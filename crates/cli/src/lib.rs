@@ -52,6 +52,7 @@ pub const CMD_DOCS: &str = "docs";
 pub const CMD_CHECK: &str = "check";
 pub const CMD_VERSION: &str = "version";
 pub const CMD_FORMAT: &str = "format";
+pub const CMD_ANNOTATE: &str = "annotate";
 pub const CMD_TEST: &str = "test";
 pub const CMD_GLUE: &str = "glue";
 pub const CMD_GEN_STUB_LIB: &str = "gen-stub-lib";
@@ -303,33 +304,41 @@ pub fn build_app() -> Command {
             .arg(args_for_app.clone().last(true))
         )
         .subcommand(Command::new(CMD_FORMAT)
+            .subcommand(Command::new(CMD_ANNOTATE)
+                .about("Add type annotations to all top-level definitions that lack them.")
+                .after_help("If DIRECTORY_OR_FILES is omitted, the .roc files in the current working\ndirectory are annotated.")
+            )
             .about("Format a .roc file or the .roc files contained in a directory using standard\nRoc formatting")
             .arg(
                 Arg::new(DIRECTORY_OR_FILES)
                     .index(1)
                     .num_args(0..)
                     .required(false)
-                    .value_parser(value_parser!(OsString)))
+                    .value_parser(value_parser!(OsString))
+                    .global(true))
             .arg(
                 Arg::new(FLAG_CHECK)
                     .long(FLAG_CHECK)
                     .help("Checks that specified files are formatted\n(If formatting is needed, return a non-zero exit code.)")
                     .action(ArgAction::SetTrue)
-                    .required(false),
+                    .required(false)
+                    .global(false),
             )
             .arg(
                 Arg::new(FLAG_STDIN)
                     .long(FLAG_STDIN)
                     .help("Read file to format from stdin")
                     .action(ArgAction::SetTrue)
-                    .required(false),
+                    .required(false)
+                    .global(true),
             )
             .arg(
                 Arg::new(FLAG_STDOUT)
                     .long(FLAG_STDOUT)
                     .help("Print formatted file to stdout")
                     .action(ArgAction::SetTrue)
-                    .required(false),
+                    .required(false)
+                    .global(true),
             )
             .after_help("If DIRECTORY_OR_FILES is omitted, the .roc files in the current working\ndirectory are formatted.")
         )
