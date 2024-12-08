@@ -400,13 +400,23 @@ pub fn walk_expr<V: Visitor>(visitor: &mut V, expr: &Expr, var: Variable) {
                 Variable::NULL,
             );
         }
+        Expr::Try {
+            result_expr,
+            result_var,
+            return_var: _,
+            ok_payload_var: _,
+            err_payload_var: _,
+            err_ext_var: _,
+            kind: _,
+        } => {
+            visitor.visit_expr(&result_expr.value, result_expr.region, *result_var);
+        }
         Expr::Return {
             return_value,
             return_var,
         } => {
             visitor.visit_expr(&return_value.value, return_value.region, *return_var);
         }
-        Expr::TypedHole(_) => { /* terminal */ }
         Expr::RuntimeError(..) => { /* terminal */ }
     }
 }

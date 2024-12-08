@@ -371,9 +371,10 @@ pub fn canonicalize_module_defs<'a>(
         PatternType::TopLevelDef,
     );
 
-    for (_early_return_var, early_return_region) in &scope.early_returns {
+    for (_early_return_var, early_return_region, early_return_kind) in &scope.early_returns {
         env.problem(Problem::ReturnOutsideOfFunction {
             region: *early_return_region,
+            return_kind: *early_return_kind,
         });
     }
 
@@ -964,6 +965,14 @@ fn fix_values_captured_in_closure_expr(
             );
         }
 
+        Try { result_expr, .. } => {
+            fix_values_captured_in_closure_expr(
+                &mut result_expr.value,
+                no_capture_symbols,
+                closure_captures,
+            );
+        }
+
         Return { return_value, .. } => {
             fix_values_captured_in_closure_expr(
                 &mut return_value.value,
@@ -1055,7 +1064,6 @@ fn fix_values_captured_in_closure_expr(
         | ParamsVar { .. }
         | AbilityMember(..)
         | EmptyRecord
-        | TypedHole { .. }
         | RuntimeError(_)
         | ZeroArgumentTag { .. }
         | RecordAccessor { .. } => {}

@@ -19,14 +19,16 @@ use roc_module::called_via::CalledVia;
 use roc_module::ident::{ForeignSymbol, Lowercase, TagName};
 use roc_module::low_level::LowLevel;
 use roc_module::symbol::{IdentId, ModuleId, Symbol};
-use roc_parse::ast::{self, Defs, PrecedenceConflict, StrLiteral};
+use roc_parse::ast::{self, Defs, PrecedenceConflict, ResultTryKind, StrLiteral};
 use roc_parse::ident::Accessor;
 use roc_parse::pattern::PatternType::*;
 use roc_problem::can::{PrecedenceProblem, Problem, RuntimeError};
 use roc_region::all::{Loc, Region};
 use roc_types::num::SingleQuoteBound;
 use roc_types::subs::{ExhaustiveMark, IllegalCycleMark, RedundantMark, VarStore, Variable};
-use roc_types::types::{Alias, Category, IndexOrField, LambdaSet, OptAbleVar, Type};
+use roc_types::types::{
+    Alias, Category, EarlyReturnKind, IndexOrField, LambdaSet, OptAbleVar, Type,
+};
 use soa::Index;
 use std::fmt::{Debug, Display};
 use std::path::PathBuf;
@@ -85,7 +87,55 @@ impl Display for IntValue {
     }
 }
 
-#[derive(Clone, Debug)]
+impl IntValue {
+    pub fn as_u8(self) -> u8 {
+        self.as_u128() as u8
+    }
+
+    pub fn as_i8(self) -> i8 {
+        self.as_i128() as i8
+    }
+
+    pub fn as_u16(self) -> u16 {
+        self.as_u128() as u16
+    }
+
+    pub fn as_i16(self) -> i16 {
+        self.as_i128() as i16
+    }
+
+    pub fn as_u32(self) -> u32 {
+        self.as_u128() as u32
+    }
+
+    pub fn as_i32(self) -> i32 {
+        self.as_i128() as i32
+    }
+
+    pub fn as_u64(self) -> u64 {
+        self.as_u128() as u64
+    }
+
+    pub fn as_i64(self) -> i64 {
+        self.as_i128() as i64
+    }
+
+    pub fn as_u128(self) -> u128 {
+        match self {
+            IntValue::I128(i128) => i128::from_ne_bytes(i128) as u128,
+            IntValue::U128(u128) => u128::from_ne_bytes(u128),
+        }
+    }
+
+    pub fn as_i128(self) -> i128 {
+        match self {
+            IntValue::I128(i128) => i128::from_ne_bytes(i128),
+            IntValue::U128(u128) => u128::from_ne_bytes(u128) as i128,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
     // Literals
 
@@ -104,7 +154,7 @@ pub enum Expr {
         loc_elems: Vec<Loc<Expr>>,
     },
 
-    // An ingested files, it's bytes, and the type variable.
+    // An ingested files, its bytes, and the type variable.
     IngestedFile(Box<PathBuf>, Arc<Vec<u8>>, Variable),
 
     // Lookups
@@ -131,7 +181,7 @@ pub enum Expr {
         /// The actual condition of the when expression.
         loc_cond: Box<Loc<Expr>>,
         cond_var: Variable,
-        /// Result type produced by the branches.
+        /// Type of each branch (and therefore the type of the entire `when` expression)
         expr_var: Variable,
         region: Region,
         /// The branches of the when, and the type of the condition that they expect to be matched
@@ -280,19 +330,32 @@ pub enum Expr {
         symbol: Symbol,
     },
 
+    Try {
+        result_expr: Box<Loc<Expr>>,
+        result_var: Variable,
+        return_var: Variable,
+        ok_payload_var: Variable,
+        err_payload_var: Variable,
+        err_ext_var: Variable,
+        kind: TryKind,
+    },
+
     Return {
         return_value: Box<Loc<Expr>>,
         return_var: Variable,
     },
 
-    /// Rendered as empty box in editor
-    TypedHole(Variable),
-
     /// Compiles, but will crash if reached
     RuntimeError(RuntimeError),
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TryKind {
+    KeywordPrefix,
+    OperatorSuffix,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ExpectLookup {
     pub symbol: Symbol,
     pub var: Variable,
@@ -358,19 +421,120 @@ impl Expr {
             }
             Self::Expect { .. } => Category::Expect,
             Self::Crash { .. } => Category::Crash,
-            Self::Return { .. } => Category::Return,
+            Self::Return { .. } => Category::Return(EarlyReturnKind::Return),
 
             Self::Dbg { .. } => Category::Expect,
+            Self::Try { .. } => Category::TrySuccess,
 
             // these nodes place no constraints on the expression's type
-            Self::TypedHole(_) | Self::RuntimeError(..) => Category::Unknown,
+            Self::RuntimeError(..) => Category::Unknown,
+        }
+    }
+
+    pub fn contains_any_early_returns(&self) -> bool {
+        match self {
+            Self::Num { .. }
+            | Self::Int { .. }
+            | Self::Float { .. }
+            | Self::Str { .. }
+            | Self::IngestedFile { .. }
+            | Self::SingleQuote { .. }
+            | Self::Var { .. }
+            | Self::AbilityMember { .. }
+            | Self::ParamsVar { .. }
+            | Self::Closure(..)
+            | Self::EmptyRecord
+            | Self::RecordAccessor(_)
+            | Self::ZeroArgumentTag { .. }
+            | Self::OpaqueWrapFunction(_)
+            | Self::RuntimeError(..) => false,
+            Self::Return { .. } | Self::Try { .. } => true,
+            Self::List { loc_elems, .. } => loc_elems
+                .iter()
+                .any(|elem| elem.value.contains_any_early_returns()),
+            Self::When {
+                loc_cond, branches, ..
+            } => {
+                loc_cond.value.contains_any_early_returns()
+                    || branches.iter().any(|branch| {
+                        branch
+                            .guard
+                            .as_ref()
+                            .is_some_and(|guard| guard.value.contains_any_early_returns())
+                            || branch.value.value.contains_any_early_returns()
+                    })
+            }
+            Self::If {
+                branches,
+                final_else,
+                ..
+            } => {
+                final_else.value.contains_any_early_returns()
+                    || branches.iter().any(|(cond, then)| {
+                        cond.value.contains_any_early_returns()
+                            || then.value.contains_any_early_returns()
+                    })
+            }
+            Self::LetRec(defs, expr, _cycle_mark) => {
+                expr.value.contains_any_early_returns()
+                    || defs
+                        .iter()
+                        .any(|def| def.loc_expr.value.contains_any_early_returns())
+            }
+            Self::LetNonRec(def, expr) => {
+                def.loc_expr.value.contains_any_early_returns()
+                    || expr.value.contains_any_early_returns()
+            }
+            Self::Call(_func, args, _called_via) => args
+                .iter()
+                .any(|(_var, arg_expr)| arg_expr.value.contains_any_early_returns()),
+            Self::RunLowLevel { args, .. } | Self::ForeignCall { args, .. } => args
+                .iter()
+                .any(|(_var, arg_expr)| arg_expr.contains_any_early_returns()),
+            Self::Tuple { elems, .. } => elems
+                .iter()
+                .any(|(_var, loc_elem)| loc_elem.value.contains_any_early_returns()),
+            Self::Record { fields, .. } => fields
+                .iter()
+                .any(|(_field_name, field)| field.loc_expr.value.contains_any_early_returns()),
+            Self::RecordAccess { loc_expr, .. } => loc_expr.value.contains_any_early_returns(),
+            Self::TupleAccess { loc_expr, .. } => loc_expr.value.contains_any_early_returns(),
+            Self::RecordUpdate { updates, .. } => {
+                updates.iter().any(|(_field_name, field_update)| {
+                    field_update.loc_expr.value.contains_any_early_returns()
+                })
+            }
+            Self::ImportParams(_module_id, _region, params) => params
+                .as_ref()
+                .is_some_and(|(_var, p)| p.contains_any_early_returns()),
+            Self::Tag { arguments, .. } => arguments
+                .iter()
+                .any(|(_var, arg)| arg.value.contains_any_early_returns()),
+            Self::OpaqueRef { argument, .. } => argument.1.value.contains_any_early_returns(),
+            Self::Crash { msg, .. } => msg.value.contains_any_early_returns(),
+            Self::Dbg {
+                loc_message,
+                loc_continuation,
+                ..
+            } => {
+                loc_message.value.contains_any_early_returns()
+                    || loc_continuation.value.contains_any_early_returns()
+            }
+            Self::Expect {
+                loc_condition,
+                loc_continuation,
+                ..
+            } => {
+                loc_condition.value.contains_any_early_returns()
+                    || loc_continuation.value.contains_any_early_returns()
+            }
         }
     }
 }
 
 /// Stores exhaustiveness-checking metadata for a closure argument that may
 /// have an annotated type.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnnotatedMark {
     pub annotation_var: Variable,
     pub exhaustive: ExhaustiveMark,
@@ -394,13 +558,13 @@ impl AnnotatedMark {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ClosureData {
     pub function_type: Variable,
     pub closure_type: Variable,
     pub return_type: Variable,
     pub fx_type: Variable,
-    pub early_returns: Vec<(Variable, Region)>,
+    pub early_returns: Vec<(Variable, Region, EarlyReturnKind)>,
     pub name: Symbol,
     pub captured_symbols: Vec<(Symbol, Variable)>,
     pub recursive: Recursive,
@@ -491,7 +655,7 @@ impl StructAccessorData {
 /// An opaque wrapper like `@Foo`, which is equivalent to `\p -> @Foo p`
 /// These are desugared to closures, but we distinguish them so we can have
 /// better error messages during constraint generation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OpaqueWrapFunctionData {
     pub opaque_name: Symbol,
     pub opaque_var: Variable,
@@ -563,7 +727,7 @@ impl OpaqueWrapFunctionData {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Field {
     pub var: Variable,
     // The region of the full `foo: f bar`, rather than just `f bar`
@@ -587,7 +751,7 @@ impl Recursive {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WhenBranchPattern {
     pub pattern: Loc<Pattern>,
     /// Degenerate branch patterns are those that don't fully bind symbols that the branch body
@@ -596,7 +760,7 @@ pub struct WhenBranchPattern {
     pub degenerate: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WhenBranch {
     pub patterns: Vec<WhenBranchPattern>,
     pub value: Loc<Expr>,
@@ -1200,7 +1364,7 @@ pub fn canonicalize_expr<'a>(
 
             (loc_expr.value, output)
         }
-        ast::Expr::DbgStmt(_, _) => {
+        ast::Expr::DbgStmt { .. } => {
             internal_error!("DbgStmt should have been desugared by now")
         }
         ast::Expr::LowLevelDbg((source_location, source), message, continuation) => {
@@ -1240,6 +1404,32 @@ pub fn canonicalize_expr<'a>(
                 output,
             )
         }
+        ast::Expr::LowLevelTry(loc_expr, kind) => {
+            let (loc_result_expr, output) =
+                canonicalize_expr(env, var_store, scope, loc_expr.region, &loc_expr.value);
+
+            let return_var = var_store.fresh();
+
+            scope
+                .early_returns
+                .push((return_var, loc_expr.region, EarlyReturnKind::Try));
+
+            (
+                Try {
+                    result_expr: Box::new(loc_result_expr),
+                    result_var: var_store.fresh(),
+                    return_var,
+                    ok_payload_var: var_store.fresh(),
+                    err_payload_var: var_store.fresh(),
+                    err_ext_var: var_store.fresh(),
+                    kind: match kind {
+                        ResultTryKind::KeywordPrefix => TryKind::KeywordPrefix,
+                        ResultTryKind::OperatorSuffix => TryKind::OperatorSuffix,
+                    },
+                },
+                output,
+            )
+        }
         ast::Expr::Return(return_expr, after_return) => {
             let mut output = Output::default();
 
@@ -1264,7 +1454,9 @@ pub fn canonicalize_expr<'a>(
 
             let return_var = var_store.fresh();
 
-            scope.early_returns.push((return_var, return_expr.region));
+            scope
+                .early_returns
+                .push((return_var, return_expr.region, EarlyReturnKind::Return));
 
             (
                 Return {
@@ -2047,7 +2239,6 @@ pub fn inline_calls(var_store: &mut VarStore, expr: Expr) -> Expr {
         | other @ ParamsVar { .. }
         | other @ AbilityMember(..)
         | other @ RunLowLevel { .. }
-        | other @ TypedHole { .. }
         | other @ ForeignCall { .. }
         | other @ OpaqueWrapFunction(_)
         | other @ Crash { .. }
@@ -2204,6 +2395,31 @@ pub fn inline_calls(var_store: &mut VarStore, expr: Expr) -> Expr {
                 loc_continuation: Box::new(loc_continuation),
                 variable,
                 symbol,
+            }
+        }
+
+        Try {
+            result_expr,
+            result_var,
+            return_var,
+            ok_payload_var,
+            err_payload_var,
+            err_ext_var,
+            kind,
+        } => {
+            let loc_result_expr = Loc {
+                region: result_expr.region,
+                value: inline_calls(var_store, result_expr.value),
+            };
+
+            Try {
+                result_expr: Box::new(loc_result_expr),
+                result_var,
+                return_var,
+                ok_payload_var,
+                err_payload_var,
+                err_ext_var,
+                kind,
             }
         }
 
@@ -2501,8 +2717,9 @@ pub fn is_valid_interpolation(expr: &ast::Expr<'_>) -> bool {
         | ast::Expr::MalformedIdent(_, _)
         | ast::Expr::Tag(_)
         | ast::Expr::OpaqueRef(_) => true,
+        ast::Expr::LowLevelTry(loc_expr, _) => is_valid_interpolation(&loc_expr.value),
         // Newlines are disallowed inside interpolation, and these all require newlines
-        ast::Expr::DbgStmt(_, _)
+        ast::Expr::DbgStmt { .. }
         | ast::Expr::LowLevelDbg(_, _, _)
         | ast::Expr::Return(_, _)
         | ast::Expr::When(_, _)
@@ -3257,7 +3474,7 @@ pub struct FunctionDef {
     pub closure_type: Variable,
     pub return_type: Variable,
     pub fx_type: Variable,
-    pub early_returns: Vec<(Variable, Region)>,
+    pub early_returns: Vec<(Variable, Region, EarlyReturnKind)>,
     pub captured_symbols: Vec<(Symbol, Variable)>,
     pub arguments: Vec<(Variable, AnnotatedMark, Loc<Pattern>)>,
 }
@@ -3399,6 +3616,9 @@ pub(crate) fn get_lookup_symbols(expr: &Expr) -> Vec<ExpectLookup> {
                 // Intentionally ignore the lookups in the nested `expect` condition itself,
                 // because they couldn't possibly influence the outcome of this `expect`!
             }
+            Expr::Try { result_expr, .. } => {
+                stack.push(&result_expr.value);
+            }
             Expr::Return { return_value, .. } => {
                 stack.push(&return_value.value);
             }
@@ -3412,7 +3632,6 @@ pub(crate) fn get_lookup_symbols(expr: &Expr) -> Vec<ExpectLookup> {
             | Expr::RecordAccessor(_)
             | Expr::SingleQuote(..)
             | Expr::EmptyRecord
-            | Expr::TypedHole(_)
             | Expr::RuntimeError(_)
             | Expr::ImportParams(_, _, None)
             | Expr::OpaqueWrapFunction(_) => {}
