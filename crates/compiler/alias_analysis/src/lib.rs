@@ -1203,12 +1203,6 @@ fn recursive_variant_types<'a>(
     Ok(result)
 }
 
-#[allow(dead_code)]
-fn worst_case_type(context: &mut impl TypeContext) -> Result<TypeId> {
-    let cell = context.add_heap_cell_type();
-    context.add_bag_type(cell)
-}
-
 fn expr_spec<'a>(
     builder: &mut FuncDefBuilder,
     interner: &STLayoutInterner<'a>,
@@ -1452,11 +1446,6 @@ fn expr_spec<'a>(
             let loaded_type = layout_spec(env, builder, interner, interner.get_repr(layout))?;
 
             erasure_load(builder, block, value, *field, loaded_type)
-        }
-        RuntimeErrorFunction(_) => {
-            let type_id = layout_spec(env, builder, interner, interner.get_repr(layout))?;
-
-            builder.add_terminate(block, type_id)
         }
         GetTagId { .. } => {
             // TODO touch heap cell in recursive cases
