@@ -1769,6 +1769,14 @@ a function of source bytes alone—a type module's main type takes its name
 from the module's file name—so no key or identity derived from module
 content may be computed from source bytes without the module name.
 
+`ModuleEnv.module_name` is that source-visible final path segment, such as
+`Foo` for the normalized logical path `Folder/Foo`. The logical path belongs
+to module discovery and coordinator state; it must never replace the
+source-visible name when restoring a serialized `ModuleEnv`. Because the
+runtime slice itself is not serialized, a cache consumer supplies the exact
+source-visible name already produced by the current canonicalization, and a
+debug invariant checks it against the serialized `display_module_name_idx`.
+
 The cache id does not include target ABI, pointer width, layout ids, field offsets,
 alignment decisions, backend choice, object format, code-generation options,
 post-check lowering strategy, or post-check specialization state.
@@ -2393,6 +2401,15 @@ A record type is concrete for this purpose only when every field kind is
 resolved. An undetermined field-kind cell remains specialization-owned even
 when its associated checked type cell is otherwise concrete, so it cannot make
 a compile-time root request eligible.
+
+A data root whose value contains a callable slot is context-free only when its
+producer fixes that callable graph with an explicit source annotation. A
+callable root itself also supplies producer-side callable evidence. An
+unannotated data root with a reachable callable slot remains specialization-owned
+because an explicit consumer relation may still determine types inside that
+callable graph; it cannot cross Monotype's relation-freeze boundary as a
+context-free compile-time request. Data roots with no reachable callable slots
+continue to use the ordinary concreteness proof.
 
 Runtime lowering restores a selected hoisted root by checked expression id. While
 lowering the synthetic compile-time wrapper for that same root, lowering must
@@ -3239,6 +3256,19 @@ therefore share one specialization, while the ordinary request type and checked
 evidence still distinguish genuinely different targets. The grounding call
 index remains only activation and debug metadata. These audits and their
 consumption bits are absent from release compiler builds.
+
+Backed named applications keep independent main union-find classes so each
+request retains its own representation witness. An explicit checked/request or
+deferred-template relation therefore also records the matching applications in
+a sparse nominal-identity union-find. Independently allocated wrappers for the
+same application join that identity through their exact permanent backing
+witness; the nominal-backing cache keys that witness by the complete
+declaration and all type arguments, including phantom arguments. Generated
+codec call selection consumes this producer-written identity directly. It does
+not recursively compare type arguments, open a backing to reconstruct nominal
+identity, or merge the representation-owning main classes. Nominal subject
+comparison is therefore constant-time amortized while preserving both exact
+source identity and backing ownership.
 
 If a format does not support a shape, checking reports the missing method as a
 static-dispatch error. Unsupported shapes are not represented as runtime parse
