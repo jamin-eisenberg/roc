@@ -29054,26 +29054,24 @@ fn processReturnConstraints(self: *Self, env: *Env, lambda_idx: CIR.Expr.Idx) st
                 );
                 continue;
             };
-            var had_problem = false;
-            if ((try self.unifyInContext(
+            if (self.tryReturnErrorContribution(actual.err) == .tagged) {
+                // This is the ordinary whole-Try relation. Keep its roots
+                // intact so a mismatch report can name both complete error
+                // payloads, rather than receiving only the nested row pair.
+                try self.checkReturnRelation(
+                    frame.body_result,
+                    constraint.actual_expr,
+                    constraint.kind.problemContext(body_tail_try),
+                    env,
+                );
+            } else if ((try self.unifyInContext(
                 expected.ok,
                 actual.ok,
                 env,
                 constraint.kind.problemContext(body_tail_try),
             )).isProblem()) {
-                had_problem = true;
+                try self.erroneous_value_exprs.put(self.gpa, constraint.actual_expr, {});
             }
-            if (self.tryReturnErrorContribution(actual.err) == .tagged and
-                (try self.unifyInContext(
-                    expected.err,
-                    actual.err,
-                    env,
-                    constraint.kind.problemContext(body_tail_try),
-                )).isProblem())
-            {
-                had_problem = true;
-            }
-            if (had_problem) try self.erroneous_value_exprs.put(self.gpa, constraint.actual_expr, {});
         }
 
         // Preserve the ordinary full-row equality for a bare `?` unless its
