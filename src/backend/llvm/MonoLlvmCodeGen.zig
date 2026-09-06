@@ -12965,8 +12965,9 @@ test "issue 11132: scratch clearing follows proc inventories and survives module
     const args = try store.addLocalSpan(&.{shared});
     const body = try store.addCFStmt(.{ .ret = .{ .value = shared } });
     const proc_count = 32;
-    for (0..proc_count) |i| {
-        _ = try store.addProcSpec(.{
+    var procs: [proc_count]LirProcSpecId = undefined;
+    for (&procs, 0..) |*proc, i| {
+        proc.* = try store.addProcSpec(.{
             .name = lir.LIR.Symbol.fromRaw(i),
             .args = args,
             .frame_locals = args,
@@ -12997,12 +12998,12 @@ test "issue 11132: scratch clearing follows proc inventories and survives module
     try std.testing.expectEqualSlices(u32, first.bitcode, second.bitcode);
 
     // A failure after slots were allocated must leave the instance reusable.
-    store.setProcSpecBody(@enumFromInt(0), null);
+    store.setProcSpecBody(procs[0], null);
     try std.testing.expectError(error.CompilationFailed, codegen.generateEntrypointModule("scratch_reuse", &.{}));
     try std.testing.expect(codegen.local_slots.len == 0);
     for (codegen.local_slot_storage.items) |slot_value| try std.testing.expect(!slot_value.allocated);
     try std.testing.expectEqual(@as(usize, 0), codegen.deferred_str_capture_count);
-    store.setProcSpecBody(@enumFromInt(0), body);
+    store.setProcSpecBody(procs[0], body);
     var after_failure = try codegen.generateEntrypointModule("scratch_reuse", &.{});
     defer after_failure.deinit();
     try std.testing.expectEqualSlices(u32, first.bitcode, after_failure.bitcode);
