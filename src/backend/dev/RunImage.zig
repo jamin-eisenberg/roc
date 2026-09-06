@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const lir = @import("lir");
-const Relocation = @import("Relocation.zig").Relocation;
+const Relocation = @import("Relocation.zig").IndexedRelocation;
 const DataRelocationKind = @import("Relocation.zig").DataRelocationKind;
 const StaticDataExport = @import("StaticDataExport.zig").StaticDataExport;
 const StaticDataRelocation = @import("StaticDataExport.zig").StaticDataRelocation;
@@ -197,6 +197,7 @@ pub fn writeToSharedMemory(
     code: []const u8,
     entrypoint_inputs: []const EntrypointInput,
     code_symbol_inputs: []const CodeSymbolInput,
+    relocation_symbol_names: []const []const u8,
     relocations: []const Relocation,
     data_exports: []const StaticDataExport,
     boxy_blob: []const u8,
@@ -206,6 +207,10 @@ pub fn writeToSharedMemory(
 
     var symbol_names = std.ArrayList(u8).empty;
     defer symbol_names.deinit(scratch);
+
+    const symbol_refs = try scratch.alloc(StringRef, relocation_symbol_names.len);
+    defer scratch.free(symbol_refs);
+    for (relocation_symbol_names, symbol_refs) |name, *ref| ref.* = try appendStringRef(scratch, &symbol_names, name);
 
     var relocation_records = std.ArrayList(RelocationRecord).empty;
     defer relocation_records.deinit(scratch);
@@ -231,14 +236,14 @@ pub fn writeToSharedMemory(
             .linked_function => |function| {
                 try relocation_records.append(scratch, .{
                     .code_offset = function.offset,
-                    .symbol = try appendStringRef(scratch, &symbol_names, function.name),
+                    .symbol = symbol_refs[@intFromEnum(function.symbol)],
                     .kind = @intFromEnum(RelocationKind.linked_function),
                 });
             },
             .linked_data => |data| {
                 try relocation_records.append(scratch, .{
                     .code_offset = data.offset,
-                    .symbol = try appendStringRef(scratch, &symbol_names, data.name),
+                    .symbol = symbol_refs[@intFromEnum(data.symbol)],
                     .kind = @intFromEnum(relocationKindForData(data.kind)),
                 });
             },
@@ -305,7 +310,7 @@ pub fn writeToSharedMemory(
         }
     }
 
-    const function_stub_count = try countReservedFunctionStubs(scratch, relocations, &data_symbol_names);
+    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &data_symbol_names);
     const function_stub_len = try mulNoOverflow(function_stub_count, max_jump_stub_size);
 
     const header = try image_allocator.create(Header);
@@ -398,32 +403,44 @@ pub fn writeToSharedMemory(
 
 /// Return the exact allocator capacity needed to serialize this run image.
 pub fn requiredCapacity(
+    scratch: Allocator,
     page_size: usize,
     code: []const u8,
     entrypoint_inputs: []const EntrypointInput,
     code_symbol_inputs: []const CodeSymbolInput,
+    relocation_symbol_names: []const []const u8,
     relocations: []const Relocation,
     data_exports: []const StaticDataExport,
     boxy_blob: []const u8,
 ) WriteError!usize {
-    return requiredCapacityFromOffset(page_size, 0, code, entrypoint_inputs, code_symbol_inputs, relocations, data_exports, boxy_blob);
+    return requiredCapacityFromOffset(scratch, page_size, 0, code, entrypoint_inputs, code_symbol_inputs, relocation_symbol_names, relocations, data_exports, boxy_blob);
 }
 
 /// Return the exact allocator offset after serializing this run image starting
 /// from an existing allocation cursor.
 pub fn requiredCapacityFromOffset(
+    scratch: Allocator,
     page_size: usize,
     initial_offset: usize,
     code: []const u8,
     entrypoint_inputs: []const EntrypointInput,
     code_symbol_inputs: []const CodeSymbolInput,
+    relocation_symbol_names: []const []const u8,
     relocations: []const Relocation,
     data_exports: []const StaticDataExport,
     boxy_blob: []const u8,
 ) WriteError!usize {
     if (!std.math.isPowerOfTwo(page_size)) return error.InvalidDevRunImage;
 
+    var data_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer data_names.deinit(scratch);
+    for (data_exports) |data_export| try data_names.put(scratch, data_export.symbol_name, {});
+    var code_names: std.StringHashMapUnmanaged(void) = .empty;
+    defer code_names.deinit(scratch);
+    for (code_symbol_inputs) |symbol| try code_names.put(scratch, symbol.name, {});
+
     var symbol_names_len: usize = 0;
+    for (relocation_symbol_names) |name| symbol_names_len = try addNoOverflow(symbol_names_len, name.len);
     var relocation_count: usize = 0;
     for (code_symbol_inputs) |input| {
         if (input.code_offset >= code.len) return error.InvalidDevRunImage;
@@ -431,12 +448,7 @@ pub fn requiredCapacityFromOffset(
     }
     for (relocations) |relocation| {
         switch (relocation) {
-            .linked_function => |function| {
-                symbol_names_len = try addNoOverflow(symbol_names_len, function.name.len);
-                relocation_count = try addNoOverflow(relocation_count, 1);
-            },
-            .linked_data => |data| {
-                symbol_names_len = try addNoOverflow(symbol_names_len, data.name.len);
+            .linked_function, .linked_data => {
                 relocation_count = try addNoOverflow(relocation_count, 1);
             },
             .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
@@ -462,14 +474,17 @@ pub fn requiredCapacityFromOffset(
             }
             symbol_names_len = try addNoOverflow(symbol_names_len, relocation.target_symbol_name.len);
             const target_exists = switch (relocation.kind) {
-                .address => dataExportNamesContain(data_exports, relocation.target_symbol_name),
-                .function_pointer => codeSymbolNamesContain(code_symbol_inputs, relocation.target_symbol_name),
+                .address => switch (relocation.target) {
+                    .data_symbol => |id| @intFromEnum(id) < data_exports.len,
+                    .named => data_names.contains(relocation.target_symbol_name),
+                },
+                .function_pointer => code_names.contains(relocation.target_symbol_name),
             };
             if (!target_exists) return error.UnsupportedStaticDataRelocation;
         }
     }
 
-    const function_stub_count = try countReservedFunctionStubsNoAlloc(relocations, data_exports);
+    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &data_names);
     const function_stub_len = try mulNoOverflow(function_stub_count, max_jump_stub_size);
 
     var capacity: usize = initial_offset;
@@ -535,62 +550,27 @@ fn appendStringRef(scratch: Allocator, symbol_names: *std.ArrayList(u8), name: [
 
 fn countReservedFunctionStubs(
     scratch: Allocator,
+    names: []const []const u8,
     relocations: []const Relocation,
     data_symbol_names: *const std.StringHashMapUnmanaged(void),
 ) WriteError!usize {
-    var stub_names = std.StringHashMapUnmanaged(void){};
-    defer stub_names.deinit(scratch);
-
-    for (relocations) |relocation| {
-        const name = switch (relocation) {
-            .linked_function => |function| function.name,
-            .linked_data => |data| if (data_symbol_names.contains(data.name)) continue else data.name,
-            .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
-        };
-        try stub_names.put(scratch, name, {});
-    }
-
-    return stub_names.count();
-}
-
-fn countReservedFunctionStubsNoAlloc(
-    relocations: []const Relocation,
-    data_exports: []const StaticDataExport,
-) WriteError!usize {
+    const uses = try scratch.alloc(u2, names.len);
+    defer scratch.free(uses);
+    @memset(uses, 0);
+    for (relocations) |relocation| switch (relocation) {
+        .linked_function => |function| {
+            uses[@intFromEnum(function.symbol)] |= 1;
+        },
+        .linked_data => |data| {
+            uses[@intFromEnum(data.symbol)] |= 2;
+        },
+        .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
+    };
     var count: usize = 0;
-    for (relocations, 0..) |relocation, i| {
-        const name = switch (relocation) {
-            .linked_function => |function| function.name,
-            .linked_data => |data| if (dataExportNamesContain(data_exports, data.name)) continue else data.name,
-            .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
-        };
-
-        for (relocations[0..i]) |previous| {
-            const previous_name = switch (previous) {
-                .linked_function => |function| function.name,
-                .linked_data => |data| if (dataExportNamesContain(data_exports, data.name)) continue else data.name,
-                .local_data, .jmp_to_return => return error.UnsupportedDevRunRelocation,
-            };
-            if (std.mem.eql(u8, previous_name, name)) break;
-        } else {
-            count = try addNoOverflow(count, 1);
-        }
+    for (names, uses) |name, use| {
+        if (use & 1 != 0 or (use & 2 != 0 and !data_symbol_names.contains(name))) count += 1;
     }
     return count;
-}
-
-fn dataExportNamesContain(data_exports: []const StaticDataExport, name: []const u8) bool {
-    for (data_exports) |data_export| {
-        if (std.mem.eql(u8, data_export.symbol_name, name)) return true;
-    }
-    return false;
-}
-
-fn codeSymbolNamesContain(code_symbols: []const CodeSymbolInput, name: []const u8) bool {
-    for (code_symbols) |symbol| {
-        if (std.mem.eql(u8, symbol.name, name)) return true;
-    }
-    return false;
 }
 
 fn addNoOverflow(a: usize, b: usize) ImageError!usize {
@@ -689,9 +669,13 @@ test "writeToSharedMemory serializes only executable image sections" {
     const code_symbol_inputs = [_]CodeSymbolInput{
         .{ .name = "roc__proc_2a", .code_offset = 3 },
     };
+    var symbols: @import("SymbolTable.zig").Table = .{};
+    defer symbols.deinit(scratch);
+    const alloc_symbol = try symbols.intern(scratch, "roc_alloc");
+    const answer_symbol = try symbols.intern(scratch, "roc__answer");
     const relocations = [_]Relocation{
-        .{ .linked_function = .{ .offset = 1, .name = "roc_alloc" } },
-        .{ .linked_data = .{ .offset = 2, .name = "roc__answer", .kind = .rel32 } },
+        .{ .linked_function = .{ .offset = 1, .symbol = alloc_symbol } },
+        .{ .linked_data = .{ .offset = 2, .symbol = answer_symbol, .kind = .rel32 } },
     };
     const data_bytes = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
     const target_data_bytes = [_]u8{42};
@@ -721,7 +705,7 @@ test "writeToSharedMemory serializes only executable image sections" {
             .alignment = 1,
         },
     };
-    const capacity = try requiredCapacity(page_size, &code, &entrypoint_inputs, &code_symbol_inputs, &relocations, &data_exports, &.{});
+    const capacity = try requiredCapacity(scratch, page_size, &code, &entrypoint_inputs, &code_symbol_inputs, symbols.names.items, &relocations, &data_exports, &.{});
     const image_bytes = try scratch.alignedAlloc(u8, std.mem.Alignment.fromByteUnits(page_size), capacity);
     defer scratch.free(image_bytes);
 
@@ -736,6 +720,7 @@ test "writeToSharedMemory serializes only executable image sections" {
         &code,
         &entrypoint_inputs,
         &code_symbol_inputs,
+        symbols.names.items,
         &relocations,
         &data_exports,
         &.{},

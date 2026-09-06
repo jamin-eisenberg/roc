@@ -6376,7 +6376,7 @@ fn writeDevRunImageToSharedMemory(
             ctx.gpa,
             store,
             layouts,
-            static_strings.entries,
+            static_strings.view(),
             lowered.lir_result.boxy_erased_arg_desc_offsets.items,
             lowered.lir_result.boxy_erased_arg_desc_params.items,
             lowered.lir_result.boxy_worker_procs.items,
@@ -6385,6 +6385,7 @@ fn writeDevRunImageToSharedMemory(
         );
         defer codegen.deinit();
         codegen.generation_mode = .shim_execution;
+        try codegen.setStaticDataSymbols(internal_static_data);
         codegen.enable_hot_reload = hot_reload_allocation != null;
 
         const proc_specs = store.getProcSpecs();
@@ -6494,11 +6495,13 @@ fn writeDevRunImageToSharedMemory(
             else
                 0;
             const required_bound = try backend.RunImage.requiredCapacityFromOffset(
+                ctx.gpa,
                 shm.page_size,
                 allocation.region_start,
                 generated_code,
                 entrypoints,
                 code_symbols,
+                codegen.getSymbolNames(),
                 relocations,
                 readonly_data.items,
                 sidecar_blob.bytes,
@@ -6530,6 +6533,7 @@ fn writeDevRunImageToSharedMemory(
             generated_code,
             entrypoints,
             code_symbols,
+            codegen.getSymbolNames(),
             relocations,
             readonly_data.items,
             sidecar_blob.bytes,

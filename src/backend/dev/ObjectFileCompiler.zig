@@ -26,6 +26,9 @@ const Dwarf = @import("Dwarf.zig");
 const ObjectWriter = @import("ObjectWriter.zig");
 const LirCodeGenMod = @import("LirCodeGen.zig");
 const static_data_export = @import("StaticDataExport.zig");
+const collections = @import("collections");
+const SymbolTable = @import("SymbolTable.zig");
+const IndexedRelocation = @import("Relocation.zig").IndexedRelocation;
 const StaticStringData = @import("StaticStringData.zig");
 
 /// Information about an entrypoint to compile
@@ -280,7 +283,7 @@ fn compileWithCodeGen(
         allocator,
         lir_store,
         layout_store,
-        static_strings.entries,
+        static_strings.view(),
         erased_arg_desc_offsets,
         erased_arg_desc_params,
         boxy_worker_procs,
@@ -291,6 +294,7 @@ fn compileWithCodeGen(
 
     // Set object file mode to generate relocatable symbol references instead of direct pointers
     codegen.generation_mode = .object_file;
+    codegen.setStaticDataSymbols(static_data_exports) catch return CompilationError.OutOfMemory;
     codegen.enable_default_platform_runtime = enable_default_platform_runtime;
 
     const static_rc_helpers = static_data_export.collectRequiredRcHelpers(allocator, static_data_exports) catch {
@@ -318,11 +322,8 @@ fn compileWithCodeGen(
     var rodata = std.ArrayList(u8).empty;
     defer rodata.deinit(allocator);
 
-    var rodata_relocations = std.ArrayList(ObjectWriter.DataRelocation).empty;
+    var rodata_relocations = std.ArrayList(ObjectWriter.IndexedDataRelocation).empty;
     defer rodata_relocations.deinit(allocator);
-
-    var static_data_symbols = std.ArrayList(ObjectWriter.Symbol).empty;
-    defer static_data_symbols.deinit(allocator);
 
     var owned_proc_symbol_names = std.ArrayList([]u8).empty;
     defer {
@@ -333,20 +334,9 @@ fn compileWithCodeGen(
     var dwarf_procs = std.ArrayList(Dwarf.ProcEntry).empty;
     defer dwarf_procs.deinit(allocator);
 
-    for (static_data_exports) |data_export| {
-        try appendStaticDataExport(allocator, data_export, &rodata, &rodata_relocations, &static_data_symbols);
-    }
-    for (static_strings.exports) |data_export| {
-        try appendStaticDataExport(allocator, data_export, &rodata, &rodata_relocations, &static_data_symbols);
-    }
+    try appendStaticDataExports(allocator, &codegen.codegen.symbols, static_data_exports, &rodata, &rodata_relocations, &symbols);
+    try appendStaticDataExports(allocator, &codegen.codegen.symbols, static_strings.exports, &rodata, &rodata_relocations, &symbols);
 
-    // ELF requires all local symbols to appear before global symbols. Keep that
-    // invariant in the shared symbol list while preserving each symbol's section
-    // offset and name-based relocation target.
-    for (static_data_symbols.items) |sym| {
-        if (sym.is_global) continue;
-        symbols.append(allocator, sym) catch return CompilationError.OutOfMemory;
-    }
     for (proc_specs, 0..) |_, i| {
         const proc_id: lir.LIR.LirProcSpecId = @enumFromInt(@as(u32, @intCast(i)));
         if (proc_specs[i].is_static_initializer) continue;
@@ -415,10 +405,6 @@ fn compileWithCodeGen(
             .uses_frame_pointer = helper.uses_frame_pointer,
         }) catch return CompilationError.OutOfMemory;
     }
-    for (static_data_symbols.items) |sym| {
-        if (!sym.is_global) continue;
-        symbols.append(allocator, sym) catch return CompilationError.OutOfMemory;
-    }
     if (timing) |timings| timings.finish(symbol_relocations_started_ns, .symbol_relocations);
 
     // Generate entrypoint wrappers
@@ -457,80 +443,8 @@ fn compileWithCodeGen(
     const code = codegen.getGeneratedCode();
     const relocations = codegen.getRelocations();
 
-    // Collect external symbol references from relocations
-    for (relocations) |reloc| {
-        switch (reloc) {
-            .linked_function => |f| {
-                // Check if this is already in our symbols list
-                var found = false;
-                for (symbols.items) |sym| {
-                    if (std.mem.eql(u8, sym.name, f.name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    symbols.append(allocator, .{
-                        .name = f.name,
-                        .offset = 0,
-                        .size = 0,
-                        .is_global = false,
-                        .is_function = true,
-                        .is_external = true,
-                        .section = .undef,
-                    }) catch {
-                        return CompilationError.OutOfMemory;
-                    };
-                }
-            },
-            .linked_data => |d| {
-                var found = false;
-                for (symbols.items) |sym| {
-                    if (std.mem.eql(u8, sym.name, d.name)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    symbols.append(allocator, .{
-                        .name = d.name,
-                        .offset = 0,
-                        .size = 0,
-                        .is_global = false,
-                        .is_function = false,
-                        .is_external = true,
-                        .section = .undef,
-                    }) catch {
-                        return CompilationError.OutOfMemory;
-                    };
-                }
-            },
-            .local_data, .jmp_to_return => {},
-        }
-    }
-
-    for (rodata_relocations.items) |reloc| {
-        var found = false;
-        for (symbols.items) |sym| {
-            if (std.mem.eql(u8, sym.name, reloc.target_symbol_name)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            symbols.append(allocator, .{
-                .name = reloc.target_symbol_name,
-                .offset = 0,
-                .size = 0,
-                .is_global = false,
-                .is_function = false,
-                .is_external = true,
-                .section = .undef,
-            }) catch {
-                return CompilationError.OutOfMemory;
-            };
-        }
-    }
+    var resolved = try resolveObjectSymbols(allocator, &codegen.codegen.symbols, symbols.items, relocations);
+    defer resolved.deinit(allocator);
     if (timing) |timings| timings.finish(symbol_relocations_started_ns, .symbol_relocations);
 
     // Build DWARF debug sections from the line entries recorded during
@@ -559,12 +473,12 @@ fn compileWithCodeGen(
     var output = std.ArrayList(u8).empty;
     errdefer output.deinit(allocator);
 
-    ObjectWriter.generateObjectFileWithDebug(
+    ObjectWriter.generateIndexedObjectFileWithDebug(
         allocator,
         target,
         code,
         rodata.items,
-        symbols.items,
+        resolved.symbols,
         relocations,
         rodata_relocations.items,
         .{
@@ -590,11 +504,104 @@ fn compileWithCodeGen(
     };
 }
 
+/// Final symbol metadata is indexed by the IDs assigned during code generation.
+const ResolvedObjectSymbols = struct {
+    symbols: []ObjectWriter.Symbol,
+
+    fn deinit(self: *ResolvedObjectSymbols, allocator: Allocator) void {
+        allocator.free(self.symbols);
+    }
+};
+
+fn resolveObjectSymbols(
+    allocator: Allocator,
+    table: *SymbolTable.Table,
+    definitions: []const ObjectWriter.Symbol,
+    relocations: []const IndexedRelocation,
+) CompilationError!ResolvedObjectSymbols {
+    const definition_ids = allocator.alloc(SymbolTable.Id, definitions.len) catch return CompilationError.OutOfMemory;
+    defer allocator.free(definition_ids);
+    for (definitions, definition_ids) |definition, *id| {
+        id.* = table.intern(allocator, definition.name) catch return CompilationError.OutOfMemory;
+    }
+    const symbols = allocator.alloc(ObjectWriter.Symbol, table.names.items.len) catch return CompilationError.OutOfMemory;
+    for (table.names.items, symbols) |name, *symbol| symbol.* = .{
+        .name = name,
+        .offset = 0,
+        .size = 0,
+        .is_global = false,
+        .is_function = false,
+        .is_external = true,
+        .section = .undef,
+    };
+    for (relocations) |relocation| switch (relocation) {
+        .linked_function => |function| {
+            symbols[@intFromEnum(function.symbol)].is_function = true;
+        },
+        .linked_data, .local_data, .jmp_to_return => {},
+    };
+    for (definitions, definition_ids) |definition, id| {
+        const symbol = &symbols[@intFromEnum(id)];
+        std.debug.assert(symbol.is_external);
+        symbol.* = definition;
+    }
+    for (table.required_definitions.items) |id| {
+        std.debug.assert(!symbols[@intFromEnum(id)].is_external);
+    }
+    return .{ .symbols = symbols };
+}
+
+fn appendStaticDataExports(
+    allocator: Allocator,
+    table: *SymbolTable.Table,
+    exports: []const StaticDataExport,
+    rodata: *std.ArrayList(u8),
+    relocations: *std.ArrayList(ObjectWriter.IndexedDataRelocation),
+    symbols: *std.ArrayList(ObjectWriter.Symbol),
+) CompilationError!void {
+    const data_symbols = allocator.alloc(SymbolTable.Id, exports.len) catch return CompilationError.OutOfMemory;
+    defer allocator.free(data_symbols);
+    for (exports, data_symbols) |data_export, *id| id.* = table.intern(allocator, data_export.symbol_name) catch return CompilationError.OutOfMemory;
+    var functions = collections.DenseMap(lir.LIR.LirProcSpecId, SymbolTable.Id).init(allocator);
+    defer functions.deinit();
+    var helpers = std.AutoHashMap(layout.RcHelperKey, SymbolTable.Id).init(allocator);
+    defer helpers.deinit();
+    for (exports) |data_export| {
+        const start = rodata.items.len;
+        try appendStaticDataExport(allocator, data_export, rodata, symbols);
+        const aligned_offset = std.mem.alignForward(usize, start, @intCast(data_export.alignment));
+        for (data_export.relocations) |relocation| {
+            const id = switch (relocation.target) {
+                .data_symbol => |target| data_symbols[@intFromEnum(target)],
+                .named => blk: {
+                    if (relocation.procedure) |proc| {
+                        if (functions.get(proc)) |id| break :blk id;
+                        const id = table.intern(allocator, relocation.target_symbol_name) catch return CompilationError.OutOfMemory;
+                        functions.put(proc, id) catch return CompilationError.OutOfMemory;
+                        break :blk id;
+                    }
+                    if (relocation.rc_helper) |helper| {
+                        if (helpers.get(helper)) |id| break :blk id;
+                        const id = table.intern(allocator, relocation.target_symbol_name) catch return CompilationError.OutOfMemory;
+                        helpers.put(helper, id) catch return CompilationError.OutOfMemory;
+                        break :blk id;
+                    }
+                    break :blk table.intern(allocator, relocation.target_symbol_name) catch return CompilationError.OutOfMemory;
+                },
+            };
+            relocations.append(allocator, .{
+                .offset = @as(u64, @intCast(aligned_offset)) + relocation.offset,
+                .symbol = id,
+                .addend = relocation.addend,
+            }) catch return CompilationError.OutOfMemory;
+        }
+    }
+}
+
 fn appendStaticDataExport(
     allocator: Allocator,
     data_export: StaticDataExport,
     rodata: *std.ArrayList(u8),
-    rodata_relocations: *std.ArrayList(ObjectWriter.DataRelocation),
     static_data_symbols: *std.ArrayList(ObjectWriter.Symbol),
 ) CompilationError!void {
     const alignment = @as(usize, @intCast(data_export.alignment));
@@ -626,16 +633,6 @@ fn appendStaticDataExport(
     }) catch {
         return CompilationError.OutOfMemory;
     };
-
-    for (data_export.relocations) |relocation| {
-        rodata_relocations.append(allocator, .{
-            .offset = @as(u64, @intCast(aligned_offset)) + relocation.offset,
-            .target_symbol_name = relocation.target_symbol_name,
-            .addend = relocation.addend,
-        }) catch {
-            return CompilationError.OutOfMemory;
-        };
-    }
 }
 
 fn compileStaticDataObjectBytes(
@@ -647,63 +644,35 @@ fn compileStaticDataObjectBytes(
         return CompilationError.NoEntrypoints;
     }
 
+    var table: SymbolTable.Table = .{};
+    defer table.deinit(allocator);
+
     var symbols = std.ArrayList(ObjectWriter.Symbol).empty;
     defer symbols.deinit(allocator);
 
     var rodata = std.ArrayList(u8).empty;
     defer rodata.deinit(allocator);
 
-    var rodata_relocations = std.ArrayList(ObjectWriter.DataRelocation).empty;
+    var rodata_relocations = std.ArrayList(ObjectWriter.IndexedDataRelocation).empty;
     defer rodata_relocations.deinit(allocator);
 
-    var static_data_symbols = std.ArrayList(ObjectWriter.Symbol).empty;
-    defer static_data_symbols.deinit(allocator);
+    try appendStaticDataExports(allocator, &table, static_data_exports, &rodata, &rodata_relocations, &symbols);
 
-    for (static_data_exports) |data_export| {
-        try appendStaticDataExport(allocator, data_export, &rodata, &rodata_relocations, &static_data_symbols);
-    }
-
-    for (static_data_symbols.items) |sym| {
-        if (sym.is_global) continue;
-        symbols.append(allocator, sym) catch return CompilationError.OutOfMemory;
-    }
-    for (static_data_symbols.items) |sym| {
-        if (!sym.is_global) continue;
-        symbols.append(allocator, sym) catch return CompilationError.OutOfMemory;
-    }
-
-    for (rodata_relocations.items) |reloc| {
-        var found = false;
-        for (symbols.items) |sym| {
-            if (std.mem.eql(u8, sym.name, reloc.target_symbol_name)) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) {
-            symbols.append(allocator, .{
-                .name = reloc.target_symbol_name,
-                .offset = 0,
-                .size = 0,
-                .is_global = false,
-                .is_function = false,
-                .is_external = true,
-                .section = .undef,
-            }) catch return CompilationError.OutOfMemory;
-        }
-    }
+    var resolved = try resolveObjectSymbols(allocator, &table, symbols.items, &.{});
+    defer resolved.deinit(allocator);
 
     var output = std.ArrayList(u8).empty;
     errdefer output.deinit(allocator);
 
-    ObjectWriter.generateObjectFile(
+    ObjectWriter.generateIndexedObjectFileWithDebug(
         allocator,
         target,
         &.{},
         rodata.items,
-        symbols.items,
+        resolved.symbols,
         &.{},
         rodata_relocations.items,
+        null,
         &output,
     ) catch |err| switch (err) {
         error.OutOfMemory => return CompilationError.OutOfMemory,

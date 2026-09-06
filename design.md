@@ -155,6 +155,38 @@ requires structural identity, name it `...Key` only after establishing why a
 dense ID cannot represent it; changing the name solely to silence the lint
 violates this invariant.
 
+### Native relocation identity
+
+Native code generators own an append-only symbol declaration table. Machine
+relocations carry its dense store-local symbol IDs, and the name column travels
+with the generated code. Builtin, hosted, literal, and static-value producers
+cache their symbol IDs in their own identity domains. Emitters consume those IDs;
+they neither format names nor discover symbols by scanning existing relocations.
+Resetting a code generator invalidates its relocation IDs and clears the matching
+producer caches together. Names are borrowed for the lifetime of that generated
+code; generated names are owned by the corresponding producer.
+
+Literal backing tables publish an explicit byte-offset-to-ordinal index alongside
+their compact entries. Byte offsets in the checked string store are not dense
+ordinals. Consumers borrow that index rather than scanning entries or allocating
+one value slot for every byte of source string storage.
+
+Frozen static allocations retain their dense index in the owning export slice.
+Address relocations distinguish these allocation references from explicit named
+linker references. Internal static roots publish their LIR `StaticDataId`, and
+native execution uses that identity directly to publish root addresses. Procedure
+and RC-helper relocations retain their existing explicit identities; each distinct
+function target owns one linker-name allocation, shared by its references.
+
+Object emission registers definitions and external declarations once, then emits
+symbols and relocations in separate passes. Each object format records the mapping
+from producer symbol IDs to its symbol-table indices. ELF local-symbol ordering,
+Mach-O binding classes and referenced-symbol flags, and COFF unwind records belong
+to format emission; they do not change producer identity. Every relocation has an
+explicit target, and a missing internal definition is a compiler invariant failure.
+The named object-input API resolves its declared names once at its boundary;
+compiler-generated machine code uses the indexed API directly.
+
 Backends do not reason about reference counting. They lower and execute the
 explicit LIR `incref`, `decref`, and `free` statements emitted before backend
 code generation. Each explicit RC statement carries the concrete RC helper

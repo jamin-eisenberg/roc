@@ -2817,7 +2817,7 @@ pub fn devEvalBoolRootsWithTimingAndMaxWorkersAndExpectSites(
             allocator,
             store,
             layouts,
-            static_strings.entries,
+            static_strings.view(),
             tables.erased_arg_desc_offsets,
             tables.erased_arg_desc_params,
             tables.worker_procs,
