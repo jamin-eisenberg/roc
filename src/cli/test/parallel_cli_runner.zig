@@ -978,6 +978,10 @@ const invalid_llvm_debug_info_needles = [_]OutputNeedle{
 };
 
 const subcommand_cases = [_]CliCase{
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
     // One descriptor template descends through the same generic nominal at more
     // than one argument set: a backing shape is written once against its
     // declaration's formals and reached once per instantiation, so each descent

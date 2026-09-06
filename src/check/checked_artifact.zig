@@ -4716,7 +4716,9 @@ pub const CheckedTypeStore = struct {
         // every fresh type participating in a recorded scheme use, including
         // the constraint function that identifies a selected dispatch target.
         for (module_env.scheme_uses.items.items) |record| {
-            if (record.slot_kind == @intFromEnum(ModuleEnv.SchemeUseRecord.Slot.dispatch_target)) {
+            if (record.slot_kind == @intFromEnum(ModuleEnv.SchemeUseRecord.Slot.dispatch_target) or
+                record.slot_kind == @intFromEnum(ModuleEnv.SchemeUseRecord.Slot.recursive_dispatch_target))
+            {
                 _ = try appendCheckedTypeRoot(allocator, module, names, import_views, &store, &active, @enumFromInt(record.slot_data));
             }
             const pairs = module_env.scheme_use_pairs.items.items[record.pairs_start .. record.pairs_start + record.pairs_len];
@@ -16898,7 +16900,7 @@ fn sealCheckedProcedureTemplateRefs(
                     @enumFromInt(record.scheme_root),
                     {},
                 ),
-                .nested_function_use, .dispatch_target => {},
+                .nested_function_use, .dispatch_target, .recursive_dispatch_target => {},
             }
         }
 
@@ -17654,7 +17656,7 @@ const EvidencePass = struct {
                     const entry = try self.value_use_by_node.getOrPut(record.node_idx);
                     if (!entry.found_existing) entry.value_ptr.* = @intCast(i);
                 },
-                .dispatch_target => {
+                .dispatch_target, .recursive_dispatch_target => {
                     // `slot_data` is the raw constraint-function var: checking
                     // guarantees exactly one selected-target instantiation per
                     // logical edge. Resolving it through union-find would
@@ -18706,6 +18708,22 @@ const EvidencePass = struct {
             .local_proc, .structural => null,
         };
         if (record_idx) |idx| {
+            const record = self.module.moduleEnvConst().scheme_uses.items.items[idx];
+            if (record.slot_kind == @intFromEnum(ModuleEnv.SchemeUseRecord.Slot.recursive_dispatch_target)) {
+                // The checker closed an exact concrete backedge and proved
+                // every requirement is determined by the target's callable.
+                // Publish its finite recipe instead of expanding it again.
+                if (procedure_schema == .requires_record) {
+                    checkedArtifactInvariant("recursive dispatch target did not have callable-derived evidence", .{});
+                }
+                return try self.internEvidenceNode(.{
+                    .target = target,
+                    .dispatcher_ty = dispatcher_ty,
+                    .generated_codec_derivation = generated_codec_derivation,
+                    .instantiation = .{ .callable = callable_ty.? },
+                    .nested = if (procedure_schema == .none) .{ .resolved = .{} } else .from_callable,
+                });
+            }
             if (self.node_by_record.get(idx)) |memoized| {
                 const existing = self.evidence_nodes.items[@intFromEnum(memoized)];
                 const callable_matches = switch (existing.instantiation) {
@@ -30203,7 +30221,9 @@ pub const CheckedModuleArtifact = struct {
     // from the codec's public value shape.
     // Version 80 removes symbolic constraint-callable evidence and records
     // recursive resolved references explicitly.
-    const serialized_layout_version: u32 = 80;
+    // Version 81 admits checker-proven concrete recursive dispatch recipes
+    // and preserves eager structural method selections.
+    const serialized_layout_version: u32 = 81;
 
     /// Comptime fingerprint of `Serialized`'s layout, mirroring
     /// `cache_module.MODULE_ENV_VERSION_HASH`. It is appended to the baked builtin
@@ -36615,8 +36635,8 @@ test "SERIALIZED_VERSION_HASH golden value" {
     // change, bump `serialized_layout_version` and replace the golden bytes below with
     // the ones this assertion prints.
     const golden: [32]u8 = .{
-        0x15, 0xF4, 0x73, 0x04, 0xA4, 0x9B, 0xDF, 0xB5, 0x32, 0x33, 0x3B, 0x16, 0x74, 0xE3, 0x1B, 0xE5,
-        0x5E, 0xED, 0x3F, 0x74, 0x3E, 0x6A, 0x45, 0xCB, 0x45, 0xCD, 0xBE, 0xF4, 0x31, 0x16, 0x18, 0x6B,
+        0x18, 0x80, 0x27, 0xEC, 0x9D, 0xAA, 0x17, 0x61, 0x89, 0x9B, 0x00, 0x10, 0x45, 0x0E, 0x3D, 0x90,
+        0x71, 0x05, 0x2F, 0x8D, 0x23, 0x50, 0xED, 0xA4, 0x7E, 0xF4, 0x05, 0x6F, 0x1D, 0xDC, 0xDB, 0xEA,
     };
     try std.testing.expectEqualSlices(u8, &golden, &CheckedModuleArtifact.SERIALIZED_VERSION_HASH);
 }

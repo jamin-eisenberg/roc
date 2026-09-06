@@ -1381,8 +1381,9 @@ pub const EvidenceNested = union(enum(u8)) {
     /// Checking recorded the target scheme instantiation, so publication
     /// resolved every nested obligation explicitly.
     resolved: artifact_serialize.Span,
-    /// Target selection occurred only after checking had settled the
-    /// dispatcher. The specialization edge must derive the target's declared
+    /// Target selection occurred after checking settled the dispatcher, or
+    /// checking explicitly closed a concrete recursive dispatch. The edge
+    /// derives the target's declared
     /// evidence params from their checker-recorded paths over its concrete callable.
     from_callable,
 };

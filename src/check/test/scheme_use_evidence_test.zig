@@ -20,6 +20,35 @@ fn recordsWithSlot(env: *const ModuleEnv, slot: Slot) usize {
     return count;
 }
 
+test "concrete recursive dispatch records a shared method instance without copying requirements" {
+    var test_env = try TestEnv.init("Test",
+        \\Expr := [Leaf(Str), Next(Expr)].{
+        \\  is_eq = |left, right|
+        \\    match (left, right) {
+        \\      (Leaf(a), Leaf(b)) => a == b
+        \\      (Next(a), Next(b)) => a == b
+        \\      _ => False
+        \\    }
+        \\}
+        \\main = Expr.Next(Expr.Leaf("a")) == Expr.Next(Expr.Leaf("a"))
+    );
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+
+    const env = test_env.module_env;
+    try std.testing.expect(recordsWithSlot(env, .recursive_dispatch_target) > 0);
+    for (env.scheme_uses.items.items) |record| {
+        if (record.slot_kind != @intFromEnum(Slot.recursive_dispatch_target)) continue;
+        try std.testing.expectEqual(@as(u32, 0), record.pairs_len);
+        var found_ancestor_instance = false;
+        for (test_env.checker.dispatch_target_instantiations.items) |instance| {
+            if (@intFromEnum(instance.constraint_fn_var) == record.slot_data) continue;
+            if (@intFromEnum(instance.method_var) == record.scheme_root) found_ancestor_instance = true;
+        }
+        try std.testing.expect(found_ancestor_instance);
+    }
+}
+
 test "value use of a where-clause generic records instantiation evidence" {
     const source =
         \\Thing := [Val(Str)].{

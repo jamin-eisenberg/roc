@@ -8557,7 +8557,7 @@ fn hoistedRootIsIntrinsicallyKept(
                 }
                 return !has_error;
             }
-            return try self.varIsConcreteCallableRootType(type_var);
+            return try self.varHasConcreteType(type_var);
         }
     }
 
@@ -8595,8 +8595,9 @@ fn varIsConcreteHoistedConstType(self: *Self, var_: Var) Allocator.Error!bool {
     return try self.varIsConcreteHoistedConstTypeInternal(.value_graph, .data_constant, var_, &self.var_set);
 }
 
-fn varIsConcreteCallableRootType(self: *Self, var_: Var) Allocator.Error!bool {
-    if (builtin.mode == .Debug) std.debug.assert(self.varIsFunctionType(var_));
+/// Whether the complete value type is fixed, permitting callable components.
+/// Used both for callable hoisting and to close concrete recursive dispatch.
+fn varHasConcreteType(self: *Self, var_: Var) Allocator.Error!bool {
     self.var_set.clearRetainingCapacity();
     return try self.varIsConcreteHoistedConstTypeInternal(.value_graph, .callable_binding, var_, &self.var_set);
 }
@@ -19314,6 +19315,17 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                     method_call.method_name_region,
                     expr_idx,
                 );
+                // Publish before discharge: derived methods may replace this
+                // plan with a structural operation, which must remain selected.
+                try self.cir.store.replaceExprWithDispatchCall(
+                    expr_idx,
+                    method_call.receiver,
+                    method_call.method_name,
+                    method_call.method_name_region,
+                    method_call.args,
+                    constraint_fn_var,
+                    .method_call,
+                );
                 try self.checkStaticDispatchConstraints(env, false);
                 for (arg_expr_idxs, 0..) |arg_expr_idx, i| {
                     self.checking_call_arg = true;
@@ -19362,15 +19374,17 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                     method_call.method_name_region,
                     expr_idx,
                 );
-                try self.cir.store.replaceExprWithDispatchCall(
-                    expr_idx,
-                    method_call.receiver,
-                    method_call.method_name,
-                    method_call.method_name_region,
-                    method_call.args,
-                    constraint_fn_var,
-                    .method_call,
-                );
+                if (eager_constraint_fn_var == null) {
+                    try self.cir.store.replaceExprWithDispatchCall(
+                        expr_idx,
+                        method_call.receiver,
+                        method_call.method_name,
+                        method_call.method_name_region,
+                        method_call.args,
+                        constraint_fn_var,
+                        .method_call,
+                    );
+                }
                 if (try self.varIsEffectfulFunction(constraint_fn_var)) {
                     self.markCurrentHoistObservableEffect();
                     does_fx = true;
@@ -25090,7 +25104,7 @@ fn checkDefaultRestrictions(self: *Self) std.mem.Allocator.Error!void {
             // A shared use copies no vars (it shares the in-flight
             // definition's), so it has no fresh pairs to seed; the walk
             // reaches the shared body through the ordinary reference edge.
-            .shared_value_use => {},
+            .shared_value_use, .recursive_dispatch_target => {},
         }
     }
     for (self.dispatch_target_instantiations.items, 0..) |instantiation, index| {
@@ -28861,17 +28875,17 @@ fn dispatchStateTypeKey(
 /// match an ancestor. Every ancestor's key was computed at its own record
 /// time, so the comparison never depends on which descendant or fixpoint
 /// pass walks the lineage first.
-fn dispatchStateKeyRepeatsAncestor(
+fn repeatedDispatchStateAncestor(
     self: *Self,
     constraint: StaticDispatchConstraint,
     parent_constraint_fn_var: ?Var,
     method_lookup: StaticDispatchMethodBinding,
     state_type_key: [32]u8,
-) bool {
+) ?u32 {
     var steps: usize = 0;
     var ancestor_fn = parent_constraint_fn_var;
     while (ancestor_fn) |fn_var| {
-        const ancestor_idx = self.dispatch_target_instantiation_by_fn_var.get(fn_var) orelse return false;
+        const ancestor_idx = self.dispatch_target_instantiation_by_fn_var.get(fn_var) orelse return null;
         steps += 1;
         std.debug.assert(steps <= self.dispatch_target_instantiations.items.len);
         const ancestor = self.dispatch_target_instantiations.items[ancestor_idx];
@@ -28879,11 +28893,11 @@ fn dispatchStateKeyRepeatsAncestor(
             std.meta.eql(ancestor.target_binding, method_lookup.binding) and
             ancestor.method_name.eql(constraint.fn_name))
         {
-            if (std.meta.eql(state_type_key, ancestor.state_type_key)) return true;
+            if (std.meta.eql(state_type_key, ancestor.state_type_key)) return ancestor_idx;
         }
         ancestor_fn = ancestor.parent_constraint_fn_var;
     }
-    return false;
+    return null;
 }
 
 /// Whether selecting `method_lookup` re-enters an ancestor edge's exact
@@ -29717,12 +29731,21 @@ fn resolveDispatchTargetMethodVar(
     }
 
     const state_type_key = try self.dispatchStateTypeKey(dispatcher_var, constraint.fn_var);
-    if (self.dispatchStateKeyRepeatsAncestor(
+    if (self.repeatedDispatchStateAncestor(
         constraint,
         parent_constraint_fn_var,
         method_lookup,
         state_type_key,
-    )) {
+    )) |ancestor_idx| {
+        if (try self.closeConcreteRecursiveDispatch(
+            dispatcher_var,
+            parent_constraint_fn_var,
+            constraint,
+            method_lookup,
+            predeclared_scheme_for_method,
+            ancestor_idx,
+            state_type_key,
+        )) |method_var| return method_var;
         try self.rejectRecursiveStaticDispatch(dispatcher_var, constraint, env, failure_expr, null);
         return null;
     }
@@ -29751,6 +29774,63 @@ fn resolveDispatchTargetMethodVar(
         env,
         region,
     );
+}
+
+/// POLICY: concrete recursive dispatch (design.md). An exact repeated state
+/// whose types and callable evidence are fixed is an implementation backedge,
+/// not another scheme instantiation. Other requirements of the ancestor stay
+/// on the ordinary validation worklist.
+fn closeConcreteRecursiveDispatch(
+    self: *Self,
+    dispatcher_var: Var,
+    parent_constraint_fn_var: ?Var,
+    constraint: StaticDispatchConstraint,
+    method_lookup: StaticDispatchMethodBinding,
+    predeclared_scheme_for_method: ?Var,
+    ancestor_idx: u32,
+    state_type_key: [32]u8,
+) Allocator.Error!?Var {
+    if (!try self.varHasConcreteType(dispatcher_var) or
+        !try self.varHasConcreteType(constraint.fn_var)) return null;
+
+    const scheme_root = if (method_lookup.is_this_module)
+        predeclared_scheme_for_method orelse ModuleEnv.varFrom(method_lookup.binding.type_node_idx)
+    else
+        try self.importedMethodScheme(method_lookup);
+    var scratch: dispatch_evidence.Scratch = .{};
+    defer scratch.deinit(self.gpa);
+    var params = std.ArrayListUnmanaged(dispatch_evidence.EvidenceParam).empty;
+    defer params.deinit(self.gpa);
+    try dispatch_evidence.enumerateEvidenceParams(self.gpa, self.types, scheme_root, &scratch, &params);
+    for (params.items) |param| {
+        if (param.source != .scheme_callable or param.path.len == 0) return null;
+    }
+
+    const ancestor = self.dispatch_target_instantiations.items[ancestor_idx];
+    try self.dispatch_target_instantiations.ensureUnusedCapacity(self.gpa, 1);
+    try self.dispatch_target_instantiation_by_fn_var.ensureUnusedCapacity(self.gpa, 1);
+    try self.cir.recordSchemeUse(
+        if (constraintIntroExpr(constraint)) |expr| @intFromEnum(expr) else 0,
+        .recursive_dispatch_target,
+        @intFromEnum(constraint.fn_var),
+        ancestor.method_var,
+        &.{},
+    );
+    const raw_index: u32 = @intCast(self.dispatch_target_instantiations.items.len);
+    self.dispatch_target_instantiations.appendAssumeCapacity(.{
+        .constraint_fn_var = constraint.fn_var,
+        .is_literal_conversion = constraint.origin.literalKind() != null,
+        .receiver_var = dispatcher_var,
+        .parent_constraint_fn_var = parent_constraint_fn_var,
+        .state_type_key = state_type_key,
+        .grew_from_ancestor = false,
+        .target_env = method_lookup.env,
+        .target_binding = method_lookup.binding,
+        .method_name = constraint.fn_name,
+        .method_var = ancestor.method_var,
+    });
+    self.dispatch_target_instantiation_by_fn_var.putAssumeCapacityNoClobber(constraint.fn_var, raw_index);
+    return ancestor.method_var;
 }
 
 fn localProcedureMethodBinding(self: *const Self, method_lookup: StaticDispatchMethodBinding) bool {
