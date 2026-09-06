@@ -1503,9 +1503,6 @@ fn parseOpenedDependencyRecordTokens(
             return .{ .malformed = try self.pushMalformed(AST.Header.Idx, .expected_package_or_platform_name, header_start) };
         }
         const name_tok = self.pos;
-        if (self.isVarIdent(name_tok)) {
-            try self.pushDiagnostic(.record_field_name_cannot_be_var, .{ .start = name_tok, .end = name_tok + 1 });
-        }
         self.advance();
         var is_platform = false;
         const field_value: AST.RecordField.Value = if (self.peek() != .OpColon) blk: {
