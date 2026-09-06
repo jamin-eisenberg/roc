@@ -166,15 +166,15 @@ Resetting a code generator invalidates its relocation IDs and clears the matchin
 producer caches together. Names are borrowed for the lifetime of that generated
 code; generated names are owned by the corresponding producer.
 
-Literal backing tables publish an explicit byte-offset-to-ordinal index alongside
+Literal backing tables store an explicit byte-offset-to-ordinal index alongside
 their compact entries. Byte offsets in the checked string store are not dense
 ordinals. Consumers borrow that index rather than scanning entries or allocating
 one value slot for every byte of source string storage.
 
 Frozen static allocations retain their dense index in the owning export slice.
 Address relocations distinguish these allocation references from explicit named
-linker references. Internal static roots publish their LIR `StaticDataId`, and
-native execution uses that identity directly to publish root addresses. Procedure
+linker references. Internal static roots retain their LIR `StaticDataId`, and
+native execution uses that identity directly as the root-address table key. Procedure
 and RC-helper relocations retain their existing explicit identities; each distinct
 function target owns one linker-name allocation, shared by its references.
 
