@@ -9448,8 +9448,8 @@ test "check type - tag union - ext hints 2" {
     );
 }
 
-// Userland reproduction of a recursive-constraint static-dispatch method that
-// cannot self-nest.
+// Userland reproduction of a concrete recursive-constraint static-dispatch
+// method that can self-nest.
 //
 // The explicit constraint dispatches on `a`, not necessarily on its first
 // argument. At a = Vec(Leaf), Vec.join has exactly the requested callable
@@ -10547,13 +10547,6 @@ test "check type - dispatch - inferred recursive nominal equality closes a concr
     try test_env.assertNoErrors();
 }
 
-// STRICTLY GROWING DISPATCH CHAINS MUST BE REJECTED STRUCTURALLY. Every
-// `go` step dispatches `go` again on a receiver wrapped in two more layers of
-// `Wrap`, so the chain can never terminate and no two states on it are ever
-// equal. The checker must reject the chain as recursive dispatch quickly,
-// rather than grinding out the whole deferred-dispatch budget on receivers
-// whose printed form grows without bound.
-
 test "check type - recursive equality does not discharge a sibling missing method" {
     var test_env = try TestEnv.init("Test",
         \\Expr := [Leaf(Str -> Str), Next(Expr)].{
@@ -10587,6 +10580,12 @@ test "check type - concrete recursive where-clause still rejects an incompatible
     try std.testing.expect(try test_env.typeProblemCount() > 0);
 }
 
+// STRICTLY GROWING DISPATCH CHAINS MUST BE REJECTED STRUCTURALLY. Every
+// `go` step dispatches `go` again on a receiver wrapped in two more layers of
+// `Wrap`, so the chain can never terminate and no two states on it are ever
+// equal. The checker must reject the chain as recursive dispatch quickly,
+// rather than grinding out the whole deferred-dispatch budget on receivers
+// whose printed form grows without bound.
 test "check type - dispatch - strictly growing dispatch chain reports recursive dispatch" {
     const source =
         \\Wrap(a) := [W(a)].{

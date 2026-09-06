@@ -7282,6 +7282,13 @@ The request is not a constraint on the parent expression id. This allows the
 same checked lambda site to be specialized at multiple function types without
 corrupting the parent body or depending on traversal order.
 
+A nested specialization with a closed request is indexed before its body
+lowers. Another request with the same exact live interface, evidence, captures,
+and lexical owner can reuse that in-progress body, including through static
+dispatch. Waiting for body completion would make concrete recursive local
+methods generate an unbounded sequence of identical specializations. This is
+exact-interface reuse, not permission to unify partially matching requests.
+
 Structural equality follows the same rule. The checker has already established
 that the operands are equality-compatible and has either emitted a dispatch plan
 that permits derived `is_eq` to lower as structural equality or rewritten the
