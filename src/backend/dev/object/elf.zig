@@ -194,7 +194,6 @@ pub const ElfWriter = struct {
     debug_info_relocs: []const DebugReloc,
 
     // String tables
-    strtab: std.ArrayList(u8),
     shstrtab: std.ArrayList(u8),
 
     const TextReloc = struct {
@@ -225,14 +224,12 @@ pub const ElfWriter = struct {
             .debug_info = &.{},
             .debug_line_relocs = &.{},
             .debug_info_relocs = &.{},
-            .strtab = .empty,
             .shstrtab = .empty,
         };
 
         errdefer self.deinit();
 
         // Initialize string tables with null byte
-        try self.strtab.append(allocator, 0);
         try self.shstrtab.append(allocator, 0);
 
         return self;
@@ -243,7 +240,6 @@ pub const ElfWriter = struct {
         self.symbols.deinit(self.allocator);
         self.text_relocs.deinit(self.allocator);
         self.rodata_relocs.deinit(self.allocator);
-        self.strtab.deinit(self.allocator);
         self.shstrtab.deinit(self.allocator);
     }
 
@@ -403,12 +399,8 @@ pub const ElfWriter = struct {
         const WRITER_SYMBOL_OFFSET: u32 = 1 + debug_target_sections.len;
         var num_locals: u32 = WRITER_SYMBOL_OFFSET;
         const symtab_size = (self.symbols.items.len + WRITER_SYMBOL_OFFSET) * @sizeOf(Elf64_Sym);
-        const name_offsets = try self.allocator.alloc(u32, self.symbols.items.len);
-        defer self.allocator.free(name_offsets);
-        var string_bytes = self.strtab.items.len;
+        var string_bytes: usize = 1; // The string table starts with a null byte.
         for (self.symbols.items) |symbol| string_bytes += symbol.name.len + 1;
-        try self.strtab.ensureTotalCapacityPrecise(self.allocator, string_bytes);
-        for (self.symbols.items, name_offsets) |symbol, *name_offset| name_offset.* = try self.addString(&self.strtab, symbol.name);
         const rela_text_size = self.text_relocs.items.len * @sizeOf(Elf64_Rela);
         const rela_rodata_size = self.rodata_relocs.items.len * @sizeOf(Elf64_Rela);
         const rela_debug_line_size = self.debug_line_relocs.len * @sizeOf(Elf64_Rela);
@@ -437,7 +429,7 @@ pub const ElfWriter = struct {
         offset = symtab_offset + symtab_size;
 
         const strtab_offset = offset;
-        offset = strtab_offset + self.strtab.items.len;
+        offset = strtab_offset + string_bytes;
 
         const shstrtab_offset = offset;
         offset = shstrtab_offset + self.shstrtab.items.len;
@@ -456,7 +448,8 @@ pub const ElfWriter = struct {
         const shdr_offset = alignUp(offset, 8);
 
         std.debug.assert(output.items.len == 0);
-        try output.ensureTotalCapacityPrecise(self.allocator, @intCast(shdr_offset + NUM_SECTIONS * @sizeOf(Elf64_Shdr)));
+        const object_size: usize = @intCast(shdr_offset + NUM_SECTIONS * @sizeOf(Elf64_Shdr));
+        try output.ensureTotalCapacityPrecise(self.allocator, object_size);
 
         // Write ELF header
         var ehdr = Elf64_Ehdr{
@@ -484,17 +477,17 @@ pub const ElfWriter = struct {
         ehdr.e_ident[7] = @intFromEnum(self.osabi);
         @memset(ehdr.e_ident[8..16], 0);
 
-        try output.appendSlice(self.allocator, std.mem.asBytes(&ehdr));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&ehdr));
 
         // Pad to text section
-        try self.padTo(output, text_offset);
-        try output.appendSlice(self.allocator, self.text);
+        padTo(output, text_offset);
+        output.appendSliceAssumeCapacity(self.text);
 
-        try self.padTo(output, rodata_offset);
-        try output.appendSlice(self.allocator, self.rodata);
+        padTo(output, rodata_offset);
+        output.appendSliceAssumeCapacity(self.rodata);
 
         // Pad to rela sections
-        try self.padTo(output, rela_text_offset);
+        padTo(output, rela_text_offset);
         for (self.text_relocs.items) |rel| {
             const r_info: u64 = (@as(u64, rel.symbol_idx + WRITER_SYMBOL_OFFSET) << 32) | rel.reloc_type;
 
@@ -504,10 +497,10 @@ pub const ElfWriter = struct {
                 .r_addend = rel.addend,
             };
 
-            try output.appendSlice(self.allocator, std.mem.asBytes(&elf_rela));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&elf_rela));
         }
 
-        try self.padTo(output, rela_rodata_offset);
+        padTo(output, rela_rodata_offset);
         for (self.rodata_relocs.items) |rel| {
             const r_info: u64 = (@as(u64, rel.symbol_idx + WRITER_SYMBOL_OFFSET) << 32) | rel.reloc_type;
 
@@ -517,13 +510,13 @@ pub const ElfWriter = struct {
                 .r_addend = rel.addend,
             };
 
-            try output.appendSlice(self.allocator, std.mem.asBytes(&elf_rela));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&elf_rela));
         }
 
         // Pad to symtab
-        try self.padTo(output, symtab_offset);
+        padTo(output, symtab_offset);
         // First symbol is always null
-        try output.appendSlice(self.allocator, &std.mem.zeroes([24]u8));
+        output.appendSliceAssumeCapacity(&std.mem.zeroes([24]u8));
 
         // Section symbols used by DWARF cross-section relocations.
         for (debug_target_sections) |section_index| {
@@ -535,13 +528,14 @@ pub const ElfWriter = struct {
                 .st_value = 0,
                 .st_size = 0,
             };
-            try output.appendSlice(self.allocator, std.mem.asBytes(&section_sym));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&section_sym));
         }
 
         // Count local symbols (for sh_info)
 
         // Add symbols
-        for (self.symbols.items, name_offsets) |sym, name_offset| {
+        var name_offset: u32 = 1;
+        for (self.symbols.items) |sym| {
             const st_info: u8 = blk: {
                 const bind: u8 = if (sym.is_global) ELF.STB_GLOBAL else ELF.STB_LOCAL;
                 const sym_type: u8 = if (sym.is_function) ELF.STT_FUNC else if (sym.section == .rodata) ELF.STT_OBJECT else ELF.STT_NOTYPE;
@@ -565,7 +559,8 @@ pub const ElfWriter = struct {
                 .st_size = sym.size,
             };
 
-            try output.appendSlice(self.allocator, std.mem.asBytes(&elf_sym));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&elf_sym));
+            name_offset += @intCast(sym.name.len + 1);
 
             if (!sym.is_global) {
                 num_locals += 1;
@@ -573,26 +568,30 @@ pub const ElfWriter = struct {
         }
 
         // strtab (no padding needed)
-        try output.appendSlice(self.allocator, self.strtab.items);
+        output.appendAssumeCapacity(0);
+        for (self.symbols.items) |sym| {
+            output.appendSliceAssumeCapacity(sym.name);
+            output.appendAssumeCapacity(0);
+        }
 
         // shstrtab
-        try output.appendSlice(self.allocator, self.shstrtab.items);
+        output.appendSliceAssumeCapacity(self.shstrtab.items);
 
         // Debug sections
-        try output.appendSlice(self.allocator, self.debug_line);
-        try output.appendSlice(self.allocator, self.debug_abbrev);
-        try output.appendSlice(self.allocator, self.debug_info);
-        try self.padTo(output, rela_debug_line_offset);
-        try appendDebugRelocations(self.allocator, self.arch, self.debug_line_relocs, output);
-        try self.padTo(output, rela_debug_info_offset);
-        try appendDebugRelocations(self.allocator, self.arch, self.debug_info_relocs, output);
+        output.appendSliceAssumeCapacity(self.debug_line);
+        output.appendSliceAssumeCapacity(self.debug_abbrev);
+        output.appendSliceAssumeCapacity(self.debug_info);
+        padTo(output, rela_debug_line_offset);
+        appendDebugRelocations(self.arch, self.debug_line_relocs, output);
+        padTo(output, rela_debug_info_offset);
+        appendDebugRelocations(self.arch, self.debug_info_relocs, output);
 
         // Pad to section headers
-        try self.padTo(output, shdr_offset);
+        padTo(output, shdr_offset);
 
         // Write section headers
         // 0: NULL section
-        try output.appendSlice(self.allocator, &std.mem.zeroes([64]u8));
+        output.appendSliceAssumeCapacity(&std.mem.zeroes([64]u8));
 
         // 1: .text
         const shdr_text = Elf64_Shdr{
@@ -607,7 +606,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 16,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_text));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_text));
 
         // 2: .rodata
         const shdr_rodata = Elf64_Shdr{
@@ -622,7 +621,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 16,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_rodata));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_rodata));
 
         // 3: .rela.text
         const shdr_rela = Elf64_Shdr{
@@ -637,7 +636,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 8,
             .sh_entsize = @sizeOf(Elf64_Rela),
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_rela));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_rela));
 
         // 4: .rela.rodata
         const shdr_rela_rodata = Elf64_Shdr{
@@ -652,7 +651,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 8,
             .sh_entsize = @sizeOf(Elf64_Rela),
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_rela_rodata));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_rela_rodata));
 
         // 5: .symtab
         const shdr_symtab = Elf64_Shdr{
@@ -667,7 +666,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 8,
             .sh_entsize = @sizeOf(Elf64_Sym),
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_symtab));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_symtab));
 
         // 6: .strtab
         const shdr_strtab = Elf64_Shdr{
@@ -676,13 +675,13 @@ pub const ElfWriter = struct {
             .sh_flags = 0,
             .sh_addr = 0,
             .sh_offset = strtab_offset,
-            .sh_size = self.strtab.items.len,
+            .sh_size = string_bytes,
             .sh_link = 0,
             .sh_info = 0,
             .sh_addralign = 1,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_strtab));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_strtab));
 
         // 7: .shstrtab
         const shdr_shstrtab = Elf64_Shdr{
@@ -697,7 +696,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 1,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_shstrtab));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_shstrtab));
 
         // 8: .debug_line
         const shdr_debug_line = Elf64_Shdr{
@@ -712,7 +711,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 1,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_debug_line));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_debug_line));
 
         // 9: .debug_abbrev
         const shdr_debug_abbrev = Elf64_Shdr{
@@ -727,7 +726,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 1,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_debug_abbrev));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_debug_abbrev));
 
         // 10: .debug_info
         const shdr_debug_info = Elf64_Shdr{
@@ -742,7 +741,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 1,
             .sh_entsize = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_debug_info));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_debug_info));
 
         // 11: .rela.debug_line
         const shdr_rela_debug_line = Elf64_Shdr{
@@ -757,7 +756,7 @@ pub const ElfWriter = struct {
             .sh_addralign = 8,
             .sh_entsize = @sizeOf(Elf64_Rela),
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_rela_debug_line));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_rela_debug_line));
 
         // 12: .rela.debug_info
         const shdr_rela_debug_info = Elf64_Shdr{
@@ -772,24 +771,24 @@ pub const ElfWriter = struct {
             .sh_addralign = 8,
             .sh_entsize = @sizeOf(Elf64_Rela),
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&shdr_rela_debug_info));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&shdr_rela_debug_info));
+        std.debug.assert(output.items.len == object_size);
     }
 
-    fn padTo(self: *Self, output: *std.ArrayList(u8), target: u64) Allocator.Error!void {
+    fn padTo(output: *std.ArrayList(u8), target: u64) void {
         const current: u64 = @intCast(output.items.len);
         if (current < target) {
             const padding: usize = @intCast(target - current);
-            try output.appendNTimes(self.allocator, 0, padding);
+            output.appendNTimesAssumeCapacity(0, padding);
         }
     }
 };
 
 fn appendDebugRelocations(
-    allocator: Allocator,
     arch: Architecture,
     relocs: []const DebugReloc,
     output: *std.ArrayList(u8),
-) Allocator.Error!void {
+) void {
     for (relocs) |rel| {
         const target_symbol_index: u64 = switch (rel.target) {
             .text => 1,
@@ -811,7 +810,7 @@ fn appendDebugRelocations(
             .r_info = (target_symbol_index << 32) | reloc_type,
             .r_addend = @intCast(rel.addend),
         };
-        try output.appendSlice(allocator, std.mem.asBytes(&elf_rela));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&elf_rela));
     }
 }
 
@@ -899,7 +898,8 @@ test "DWARF relocations preserve target section and field width" {
 
     var output: std.ArrayList(u8) = .empty;
     defer output.deinit(std.testing.allocator);
-    try appendDebugRelocations(std.testing.allocator, .x86_64, &relocs, &output);
+    try output.ensureTotalCapacityPrecise(std.testing.allocator, relocs.len * @sizeOf(Elf64_Rela));
+    appendDebugRelocations(.x86_64, &relocs, &output);
 
     try std.testing.expectEqual(@as(usize, 3 * @sizeOf(Elf64_Rela)), output.items.len);
     const abbrev = std.mem.bytesToValue(Elf64_Rela, output.items[0..@sizeOf(Elf64_Rela)]);

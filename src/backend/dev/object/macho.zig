@@ -486,7 +486,8 @@ pub const MachOWriter = struct {
         const strtab_size: u32 = @intCast(self.strtab.items.len);
 
         std.debug.assert(output.items.len == 0);
-        try output.ensureTotalCapacityPrecise(self.allocator, @as(usize, strtab_offset) + strtab_size);
+        const object_size = @as(usize, strtab_offset) + strtab_size;
+        try output.ensureTotalCapacityPrecise(self.allocator, object_size);
 
         // Write Mach-O header. The dev backend currently emits one text section
         // with direct offsets for some internal calls, so this object must be a
@@ -502,7 +503,7 @@ pub const MachOWriter = struct {
             .flags = 0,
             .reserved = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&header));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&header));
 
         // Write segment command
         const segname: [16]u8 = std.mem.zeroes([16]u8);
@@ -521,7 +522,7 @@ pub const MachOWriter = struct {
             .nsects = section_count,
             .flags = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&segment_cmd));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&segment_cmd));
 
         // Write __text section
         var sectname: [16]u8 = std.mem.zeroes([16]u8);
@@ -543,7 +544,7 @@ pub const MachOWriter = struct {
             .reserved2 = 0,
             .reserved3 = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&text_section));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&text_section));
 
         var const_sectname: [16]u8 = std.mem.zeroes([16]u8);
         @memcpy(const_sectname[0..7], "__const");
@@ -564,7 +565,7 @@ pub const MachOWriter = struct {
             .reserved2 = 0,
             .reserved3 = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&rodata_section));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&rodata_section));
 
         var dwarf_segname: [16]u8 = std.mem.zeroes([16]u8);
         @memcpy(dwarf_segname[0..7], "__DWARF");
@@ -586,7 +587,7 @@ pub const MachOWriter = struct {
             .reserved2 = 0,
             .reserved3 = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&debug_line_section));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&debug_line_section));
 
         var dbg_abbrev_name: [16]u8 = std.mem.zeroes([16]u8);
         @memcpy(dbg_abbrev_name[0..14], "__debug_abbrev");
@@ -604,7 +605,7 @@ pub const MachOWriter = struct {
             .reserved2 = 0,
             .reserved3 = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&debug_abbrev_section));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&debug_abbrev_section));
 
         var dbg_info_name: [16]u8 = std.mem.zeroes([16]u8);
         @memcpy(dbg_info_name[0..12], "__debug_info");
@@ -622,7 +623,7 @@ pub const MachOWriter = struct {
             .reserved2 = 0,
             .reserved3 = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&debug_info_section));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&debug_info_section));
 
         // Write symtab command
         const symtab_cmd = SymtabCommand{
@@ -633,7 +634,7 @@ pub const MachOWriter = struct {
             .stroff = strtab_offset,
             .strsize = strtab_size,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&symtab_cmd));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&symtab_cmd));
 
         // Write dysymtab command
         const dysymtab_cmd = DysymtabCommand{
@@ -658,7 +659,7 @@ pub const MachOWriter = struct {
             .locreloff = 0,
             .nlocrel = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&dysymtab_cmd));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&dysymtab_cmd));
 
         // Write build version command (required for modern macOS).
         // minos/sdk format: nibbles are xxxx.yy.zz (e.g. 0x000b0000 = 11.0.0).
@@ -670,13 +671,13 @@ pub const MachOWriter = struct {
             .sdk = roc_target.macos_deployment.macho_encoded_version,
             .ntools = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&build_version_cmd));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&build_version_cmd));
 
         // Write text section content
-        try output.appendSlice(self.allocator, self.text);
+        output.appendSliceAssumeCapacity(self.text);
 
         // Write read-only data section content
-        try output.appendSlice(self.allocator, self.rodata);
+        output.appendSliceAssumeCapacity(self.rodata);
         for (self.rodata_relocs.items) |rel| {
             const value = if (rel.is_extern) rel.addend else self.localRelocationValue(rel.symbol_idx, rel.addend);
             std.mem.writeInt(i64, output.items[@as(usize, rodata_offset) + rel.offset ..][0..8], value, .little);
@@ -692,7 +693,7 @@ pub const MachOWriter = struct {
                 rel.is_extern,
                 rel.reloc_type,
             );
-            try output.appendSlice(self.allocator, std.mem.asBytes(&reloc));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&reloc));
         }
 
         for (self.rodata_relocs.items) |rel| {
@@ -708,13 +709,13 @@ pub const MachOWriter = struct {
                 rel.is_extern,
                 reloc_type,
             );
-            try output.appendSlice(self.allocator, std.mem.asBytes(&reloc));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&reloc));
         }
 
         // Write debug sections and their relocations
-        try output.appendSlice(self.allocator, self.debug_line);
-        try output.appendSlice(self.allocator, self.debug_abbrev);
-        try output.appendSlice(self.allocator, self.debug_info);
+        output.appendSliceAssumeCapacity(self.debug_line);
+        output.appendSliceAssumeCapacity(self.debug_abbrev);
+        output.appendSliceAssumeCapacity(self.debug_info);
         applyDebugRelocations(
             output.items[debug_line_offset..][0..debug_line_size],
             self.debug_line_relocs,
@@ -741,7 +742,7 @@ pub const MachOWriter = struct {
                 false,
                 unsigned_reloc_type,
             );
-            try output.appendSlice(self.allocator, std.mem.asBytes(&reloc));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&reloc));
         }
         for (self.debug_info_relocs) |rel| {
             const reloc = RelocationInfo.init(
@@ -752,7 +753,7 @@ pub const MachOWriter = struct {
                 false,
                 unsigned_reloc_type,
             );
-            try output.appendSlice(self.allocator, std.mem.asBytes(&reloc));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&reloc));
         }
 
         // Write symbol table
@@ -779,13 +780,14 @@ pub const MachOWriter = struct {
                 .n_desc = 0,
                 .n_value = section_addr + sym.offset,
             };
-            try output.appendSlice(self.allocator, std.mem.asBytes(&nlist));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&nlist));
 
             str_offset += @intCast(sym.name.len + 2); // +1 underscore prefix, +1 null terminator
         }
 
         // Write string table
-        try output.appendSlice(self.allocator, self.strtab.items);
+        output.appendSliceAssumeCapacity(self.strtab.items);
+        std.debug.assert(output.items.len == object_size);
     }
 
     const SymbolTableClass = enum {

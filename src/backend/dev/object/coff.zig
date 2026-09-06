@@ -402,12 +402,12 @@ pub const CoffWriter = struct {
     }
 
     /// Write a COFF relocation entry (10 bytes) manually to avoid struct padding issues
-    fn writeRelocation(self: *Self, output: *std.ArrayList(u8), virtual_address: u32, symbol_idx: u32, reloc_type: u16) Allocator.Error!void {
+    fn writeRelocation(output: *std.ArrayList(u8), virtual_address: u32, symbol_idx: u32, reloc_type: u16) void {
         var buf: [10]u8 = undefined;
         std.mem.writeInt(u32, buf[0..4], virtual_address, .little);
         std.mem.writeInt(u32, buf[4..8], symbol_idx, .little);
         std.mem.writeInt(u16, buf[8..10], reloc_type, .little);
-        try output.appendSlice(self.allocator, &buf);
+        output.appendSliceAssumeCapacity(&buf);
     }
 
     fn pdataEntrySize(self: *const Self) u32 {
@@ -876,7 +876,8 @@ pub const CoffWriter = struct {
         std.mem.writeInt(u32, self.strtab.items[0..4], strtab_size, .little);
 
         std.debug.assert(output.items.len == 0);
-        try output.ensureTotalCapacityPrecise(self.allocator, @as(usize, symtab_offset) + symtab.items.len + strtab_size);
+        const object_size = @as(usize, symtab_offset) + symtab.items.len + strtab_size;
+        try output.ensureTotalCapacityPrecise(self.allocator, object_size);
 
         // Write COFF header
         const header = CoffHeader{
@@ -888,7 +889,7 @@ pub const CoffWriter = struct {
             .size_of_optional_header = 0, // No optional header for .obj files
             .characteristics = 0,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&header));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&header));
 
         // Write .text section header
         var sect_name: [8]u8 = std.mem.zeroes([8]u8);
@@ -909,7 +910,7 @@ pub const CoffWriter = struct {
                 COFF.IMAGE_SCN_MEM_READ |
                 COFF.IMAGE_SCN_ALIGN_16BYTES,
         };
-        try output.appendSlice(self.allocator, std.mem.asBytes(&text_header));
+        output.appendSliceAssumeCapacity(std.mem.asBytes(&text_header));
 
         if (has_rdata) {
             var rdata_name: [8]u8 = std.mem.zeroes([8]u8);
@@ -929,7 +930,7 @@ pub const CoffWriter = struct {
                     COFF.IMAGE_SCN_MEM_READ |
                     COFF.IMAGE_SCN_ALIGN_16BYTES,
             };
-            try output.appendSlice(self.allocator, std.mem.asBytes(&rdata_header));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&rdata_header));
         }
 
         // Write .pdata section header (if needed)
@@ -951,7 +952,7 @@ pub const CoffWriter = struct {
                     COFF.IMAGE_SCN_MEM_READ |
                     COFF.IMAGE_SCN_ALIGN_4BYTES,
             };
-            try output.appendSlice(self.allocator, std.mem.asBytes(&pdata_header));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&pdata_header));
 
             // Write .xdata section header
             var xdata_name: [8]u8 = std.mem.zeroes([8]u8);
@@ -971,14 +972,14 @@ pub const CoffWriter = struct {
                     COFF.IMAGE_SCN_MEM_READ |
                     COFF.IMAGE_SCN_ALIGN_4BYTES,
             };
-            try output.appendSlice(self.allocator, std.mem.asBytes(&xdata_header));
+            output.appendSliceAssumeCapacity(std.mem.asBytes(&xdata_header));
         }
 
         // Write .text section content
-        try output.appendSlice(self.allocator, self.text);
+        output.appendSliceAssumeCapacity(self.text);
 
         if (has_rdata) {
-            try output.appendSlice(self.allocator, self.rdata);
+            output.appendSliceAssumeCapacity(self.rdata);
             for (self.rdata_relocs.items) |rel| {
                 std.mem.writeInt(i64, output.items[@as(usize, rdata_offset) + rel.offset ..][0..8], rel.addend, .little);
             }
@@ -993,13 +994,13 @@ pub const CoffWriter = struct {
                         std.mem.writeInt(u32, runtime_func[0..4], func.start_offset, .little);
                         std.mem.writeInt(u32, runtime_func[4..8], func.end_offset, .little);
                         std.mem.writeInt(u32, runtime_func[8..12], 0, .little);
-                        try output.appendSlice(self.allocator, &runtime_func);
+                        output.appendSliceAssumeCapacity(&runtime_func);
                     },
                     .aarch64 => {
                         var runtime_func: [8]u8 = undefined;
                         std.mem.writeInt(u32, runtime_func[0..4], func.start_offset, .little);
                         std.mem.writeInt(u32, runtime_func[4..8], 0, .little);
-                        try output.appendSlice(self.allocator, &runtime_func);
+                        output.appendSliceAssumeCapacity(&runtime_func);
                     },
                 }
             }
@@ -1021,11 +1022,11 @@ pub const CoffWriter = struct {
 
         // Write .text relocations (10 bytes each: u32 offset, u32 symbol_idx, u16 type)
         for (self.text_relocs.items) |rel| {
-            try self.writeRelocation(output, rel.offset, rel.symbol_idx, rel.reloc_type);
+            writeRelocation(output, rel.offset, rel.symbol_idx, rel.reloc_type);
         }
 
         for (self.rdata_relocs.items) |rel| {
-            try self.writeRelocation(output, rel.offset, rel.symbol_idx, self.arch.absolutePointerRelocType());
+            writeRelocation(output, rel.offset, rel.symbol_idx, self.arch.absolutePointerRelocType());
         }
 
         // Write .pdata relocations.
@@ -1038,16 +1039,16 @@ pub const CoffWriter = struct {
                 const pdata_content_start = pdata_offset;
                 switch (self.arch) {
                     .x86_64 => {
-                        try self.writeRelocation(output, pdata_entry_offset + 0, text_section_sym_idx, addr32nb);
-                        try self.writeRelocation(output, pdata_entry_offset + 4, text_section_sym_idx, addr32nb);
-                        try self.writeRelocation(output, pdata_entry_offset + 8, xdata_section_sym_idx, addr32nb);
+                        writeRelocation(output, pdata_entry_offset + 0, text_section_sym_idx, addr32nb);
+                        writeRelocation(output, pdata_entry_offset + 4, text_section_sym_idx, addr32nb);
+                        writeRelocation(output, pdata_entry_offset + 8, xdata_section_sym_idx, addr32nb);
 
                         const unwind_data_field_offset = pdata_content_start + pdata_entry_offset + 8;
                         std.mem.writeInt(u32, output.items[unwind_data_field_offset..][0..4], xdata_offset_for_func, .little);
                     },
                     .aarch64 => {
-                        try self.writeRelocation(output, pdata_entry_offset + 0, text_section_sym_idx, addr32nb);
-                        try self.writeRelocation(output, pdata_entry_offset + 4, xdata_section_sym_idx, addr32nb);
+                        writeRelocation(output, pdata_entry_offset + 0, text_section_sym_idx, addr32nb);
+                        writeRelocation(output, pdata_entry_offset + 4, xdata_section_sym_idx, addr32nb);
 
                         const unwind_data_field_offset = pdata_content_start + pdata_entry_offset + 4;
                         std.mem.writeInt(u32, output.items[unwind_data_field_offset..][0..4], xdata_offset_for_func, .little);
@@ -1057,10 +1058,11 @@ pub const CoffWriter = struct {
         }
 
         // Write symbol table
-        try output.appendSlice(self.allocator, symtab.items);
+        output.appendSliceAssumeCapacity(symtab.items);
 
         // Write string table
-        try output.appendSlice(self.allocator, self.strtab.items);
+        output.appendSliceAssumeCapacity(self.strtab.items);
+        std.debug.assert(output.items.len == object_size);
     }
 };
 
