@@ -10739,8 +10739,8 @@ all ownership variants reuse it. Singleton-only frames use identity numbering
 without a mapping allocation. The extra group and borrowed-result bits keep
 their original meanings and remain outside the raw resource-bit prefix.
 Queries excluding one group member inspect only that group's raw-bit range,
-with the excluded bit removed. Sparse snapshots answer range existence from
-canonical empty subtrees and descend only at interval boundaries; neither
+with the excluded bit removed. Sparse snapshots answer range-existence queries
+using null pointers for empty subtrees and descend only at interval boundaries; neither
 resource count nor group membership count is scanned per query. No mutable
 per-statement group counters or additional membership sets are maintained.
 Solver-only resource anchors participate exactly like concrete RC resources in
@@ -10935,7 +10935,7 @@ Restitution consumes the structural lift's existing procedure statement
 inventory. Its reusable scratch arrays and statement-to-ordinal lookup contain
 only the active procedure's statements. Initialization, per-parameter scratch
 merges, and final receipt emission iterate that compact domain, never the
-module statement count. Only the final published receipt table is indexed by
+module statement count. Only the final receipt table output is indexed by
 module statement id.
 
 The analysis is a polynomial product of independent finite resource states, not

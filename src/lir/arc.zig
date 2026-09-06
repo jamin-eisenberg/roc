@@ -13001,7 +13001,7 @@ test "RC outcome restitution solves sixteen independent conditional arguments po
     try testing.expect(work <= count * f.store.cfStmtCount() * 2);
 }
 
-fn outcomeScratchWork(proc_count: usize) !u64 {
+fn outcomeScratchWork(proc_count: usize) (Allocator.Error || error{TestExpectedEqual})!u64 {
     var f = try ArcTest.init(testing.allocator);
     defer f.deinit();
     const outcome_layout = try f.layouts.putTagUnion(&.{ try f.layouts.ensureZstLayout(), f.list_i64 });
