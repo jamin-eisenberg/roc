@@ -9015,8 +9015,8 @@ fn configuredWasmZeroFilledMemory(wasm: ?roc_target.WasmTargetConfig) bool {
 }
 
 /// Binaryen post-link optimization mode for linked wasm output, derived from
-/// the build's opt level: LLVM opt levels get the matching Binaryen pass;
-/// dev/interpreter builds skip Binaryen entirely.
+/// the build's opt level: speed uses explicit cleanup after LLVM O3, size uses
+/// Binaryen's size pipeline, and dev/interpreter builds skip Binaryen entirely.
 fn wasmOptimizeMode(opt: cli_args.OptLevel) linker.WasmOptimizeMode {
     return switch (opt) {
         .size => .size,

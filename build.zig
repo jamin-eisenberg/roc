@@ -3751,6 +3751,9 @@ pub fn build(b: *std.Build) void {
     // Store CLI runner step reference so we can add glue host dependency later.
     var run_cli_test_step: ?*std.Build.Step = null;
 
+    const cli_test_options = b.addOptions();
+    cli_test_options.addOption(bool, "binaryen", !use_system_llvm and user_llvm_path == null);
+
     // CLI integration tests: one harness-backed runner covers platforms,
     // subcommands, echo, and glue. Focus locally with:
     //   zig build run-test-cli -- --suite echo --filter "case name"
@@ -3776,6 +3779,7 @@ pub fn build(b: *std.Build) void {
             }),
         });
         parallel_cli_runner_exe.root_module.link_libc = true;
+        parallel_cli_runner_exe.root_module.addOptions("cli_test_options", cli_test_options);
         build_test_cli_runners_step.dependOn(&parallel_cli_runner_exe.step);
 
         const run_cli = b.addRunArtifact(parallel_cli_runner_exe);
@@ -5801,6 +5805,7 @@ pub fn build(b: *std.Build) void {
         }),
         .filters = test_filters,
     });
+    cli_runner_unit_test.root_module.addOptions("cli_test_options", cli_test_options);
     test_suites.register(.{
         .step_suffix = "cli-runner-unit",
         .description = "Run CLI runner Zig unit tests",

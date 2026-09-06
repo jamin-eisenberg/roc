@@ -388,6 +388,7 @@ const CustomCase = enum {
     default_platform_wasm32_archive_reproducible,
     issue_10733_wasm_boxy_dev_sealed_object,
     issue_10827_private_compiler_support,
+    issue_11134_wasm_post_llvm_pipeline,
     macos_output_basename_reproducible,
     default_platform_crash_x64musl,
     default_platform_crash_arm64musl,
@@ -1591,6 +1592,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM size wasm32 links the Boxy runtime", .backend = .size, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=size", "--no-cache", "--output=boxed_closure_size.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM speed wasm32 links the Boxy runtime", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=speed", "--no-cache", "--output=boxed_closure_speed.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10827: Roc compiler support is private from a strong-intrinsic wasm host", .backend = .dev, .body = .{ .custom = .issue_10827_private_compiler_support } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11134: wasm speed uses explicit post-LLVM passes", .backend = .speed, .body = .{ .custom = .issue_11134_wasm_post_llvm_pipeline } },
     // issue 10951: https://github.com/roc-lang/roc/issues/10951
     // The wasm32 linker exports exactly what the platform header's `exports:`
     // field names, so a header that omits the field links a module with no
@@ -2877,6 +2879,7 @@ fn runCustomCase(
         .default_platform_wasm32_archive_reproducible => customDefaultPlatformWasm32ArchiveReproducible(io, allocator, &env, &timer, timeout_ms),
         .issue_10733_wasm_boxy_dev_sealed_object => customIssue10733WasmBoxyDevSealedObject(io, allocator, &env, &timer, timeout_ms),
         .issue_10827_private_compiler_support => customIssue10827PrivateCompilerSupport(io, allocator, &env, &timer, timeout_ms),
+        .issue_11134_wasm_post_llvm_pipeline => customWasmPostLlvmPipeline(io, allocator, &env, &timer, timeout_ms),
         .macos_output_basename_reproducible => customMacosOutputBasenameReproducible(io, allocator, &env, &timer, timeout_ms),
         .default_platform_crash_x64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .x64musl, .crash),
         .default_platform_crash_arm64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .arm64musl, .crash),
@@ -5406,6 +5409,73 @@ fn validateWasmOutput(
     defer module_def.destroy();
     module_def.decode(wasm_bytes) catch |err|
         return customFailure(allocator, timer, "generated invalid wasm {s}: {}", .{ path, err });
+    return null;
+}
+
+fn customWasmPostLlvmPipeline(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    if (!@import("cli_test_options").binaryen) {
+        return .{ .status = .skip, .phase = .setup, .message = "requires bundled Binaryen" };
+    }
+
+    var trace_env = CaseEnv{
+        .dirs = env.dirs,
+        .env_map = env.env_map.clone(allocator) catch |err|
+            return customInfraFailure(allocator, timer, "failed to clone wasm test environment: {}", .{err}),
+    };
+    defer trace_env.env_map.deinit();
+    trace_env.env_map.put("BINARYEN_PASS_DEBUG", "1") catch |err|
+        return customInfraFailure(allocator, timer, "failed to enable Binaryen pass tracing: {}", .{err});
+
+    const wasm_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "pipeline.wasm" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output path: {}", .{err});
+    defer allocator.free(wasm_path);
+    const output_arg = outputArg(allocator, wasm_path) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output argument: {}", .{err});
+    defer allocator.free(output_arg);
+
+    const modes = [_]struct { opt: OptMode, debug: bool }{
+        .{ .opt = .speed, .debug = false },
+        .{ .opt = .speed, .debug = true },
+        .{ .opt = .size, .debug = false },
+        .{ .opt = .size, .debug = true },
+    };
+    for (modes) |mode| {
+        const speed = mode.opt == .speed;
+        const opt_arg = if (speed) "--opt=speed" else "--opt=size";
+        const args = [_][]const u8{ "build", "--target=wasm32", "--no-cache", opt_arg, output_arg, "--debug" };
+        const contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: remove-unused-module-elements" },
+            .{ .stream = .stderr, .text = "running pass: memory-packing" },
+            .{ .stream = .stderr, .text = "(final validation)" },
+            .{ .stream = .stderr, .text = if (speed) "running pass: vacuum" else "running pass: coalesce-locals" },
+        };
+        const not_contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: coalesce-locals" },
+            .{ .stream = .stderr, .text = "running pass: merge-locals" },
+            .{ .stream = .stderr, .text = "running pass: precompute" },
+            .{ .stream = .stderr, .text = "running pass: inlining-optimizing" },
+        };
+        const occurrences = [_]OutputOccurrence{
+            .{ .stream = .stderr, .text = "running pass: strip-debug", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-dwarf", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-producers", .count = 1 },
+            .{ .stream = .stderr, .text = "running pass: strip-target-features", .count = @intFromBool(!speed and !mode.debug) },
+        };
+        if (runRocAndCheck(io, allocator, &trace_env, timer, timeout_ms, .{
+            .args = args[0..if (mode.debug) args.len else args.len - 1],
+            .roc_file = "test/wasm/str_concat_join_static_lib_app.roc",
+            .contains = &contains,
+            .not_contains = if (speed) &not_contains else &.{},
+            .occurrences = &occurrences,
+        })) |failure| return failure;
+        if (validateWasmOutput(io, allocator, timer, wasm_path)) |failure| return failure;
+    }
     return null;
 }
 
