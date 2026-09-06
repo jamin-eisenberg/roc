@@ -1306,7 +1306,7 @@ const Unifier = struct {
                             try self.merge(vars, .err);
                             return;
                         }
-                        try self.unifyEmptyWithNominal(vars, b_type, .empty_record, .b_is_nominal, .skip_opacity);
+                        try self.unifyEmptyWithNominal(vars, b_type, .empty_record, .b_is_nominal, .enforce_opacity);
                     },
                     .tuple,
                     .fn_pure,
@@ -1578,7 +1578,7 @@ const Unifier = struct {
         direction: NominalDirection,
         comptime opacity: OpacityGate,
     ) Error!void {
-        if (empty_shape == .empty_record or opacity == .enforce_opacity) {
+        if (opacity == .enforce_opacity) {
             // If this nominal is opaque and we're not in the origin module, error
             if (!nominal_type.canLiftInner(self.self_module_identity)) {
                 return error.TypeMismatch;

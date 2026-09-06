@@ -957,6 +957,20 @@ test "check - issue 11024 - nested empty literals own their omitted defaults" {
     }
 }
 
+test "check - issue 11024 - implicit defaulted nominal constructions instantiate type parameters independently" {
+    const src =
+        \\Cfg(a) := { values : List(a) ?? [] }
+        \\numbers : Cfg(U8)
+        \\numbers = {}
+        \\strings : Cfg(Str)
+        \\strings = {}
+    ;
+    var env = try TestEnv.init("Test", src);
+    defer env.deinit();
+    try env.assertDefType("numbers", "Cfg(U8)");
+    try env.assertDefType("strings", "Cfg(Str)");
+}
+
 test "check - issue 11024 - empty nominal construction rejects required fields" {
     const src =
         \\Foo := { bar : U64 ?? 0, baz : U64 }
