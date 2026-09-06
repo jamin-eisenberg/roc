@@ -9424,43 +9424,47 @@ fn compileLlvmAppObject(
     const llvm_cpu = llvmCpuNameForTarget(std_target);
     const llvm_features = try llvmFeatureStringForTarget(ctx.arena, std_target);
 
-    var codegen = llvm_codegen.MonoLlvmCodeGen.initForLinkedObject(
-        ctx.gpa,
-        &lowered.lir_result.store,
-        lowered.lir_result.boxy_erased_arg_desc_offsets.items,
-        lowered.lir_result.boxy_erased_arg_desc_params.items,
-        lowered.lir_result.boxy_worker_procs.items,
-        std_target,
-    );
-    codegen.layout_store = &lowered.lir_result.layouts;
     const emit_debug_info = args.debug;
-    codegen.emit_debug_info = emit_debug_info;
-    codegen.emit_local_debug_info = emit_debug_info;
-    codegen.enable_default_platform_runtime = enable_default_platform_runtime;
-    codegen.enable_default_platform_hosted_calls = enable_default_platform_hosted_calls;
-    codegen.enable_default_platform_diagnostics = enable_default_platform_hosted_calls and emit_debug_info;
-    codegen.debug_producer = "roc " ++ build_options.compiler_version;
-    defer codegen.deinit();
 
-    const static_rc_helpers = try backend.collectRequiredRcHelpers(ctx.gpa, static_data_exports);
-    defer ctx.gpa.free(static_rc_helpers);
-    codegen.static_data_rc_helpers = static_rc_helpers;
+    // Release code-generation scratch before LLVM optimization starts.
+    var bitcode = generate: {
+        var codegen = llvm_codegen.MonoLlvmCodeGen.initForLinkedObject(
+            ctx.gpa,
+            &lowered.lir_result.store,
+            lowered.lir_result.boxy_erased_arg_desc_offsets.items,
+            lowered.lir_result.boxy_erased_arg_desc_params.items,
+            lowered.lir_result.boxy_worker_procs.items,
+            std_target,
+        );
+        codegen.layout_store = &lowered.lir_result.layouts;
+        codegen.emit_debug_info = emit_debug_info;
+        codegen.emit_local_debug_info = emit_debug_info;
+        codegen.enable_default_platform_runtime = enable_default_platform_runtime;
+        codegen.enable_default_platform_hosted_calls = enable_default_platform_hosted_calls;
+        codegen.enable_default_platform_diagnostics = enable_default_platform_hosted_calls and emit_debug_info;
+        codegen.debug_producer = "roc " ++ build_options.compiler_version;
+        defer codegen.deinit();
 
-    const static_data_procs = try backend.collectReferencedProcs(ctx.gpa, static_data_exports);
-    defer ctx.gpa.free(static_data_procs);
-    codegen.static_data_procs = static_data_procs;
+        const static_rc_helpers = try backend.collectRequiredRcHelpers(ctx.gpa, static_data_exports);
+        defer ctx.gpa.free(static_rc_helpers);
+        codegen.static_data_rc_helpers = static_rc_helpers;
 
-    const llvm_entrypoints = try ctx.arena.alloc(llvm_codegen.MonoLlvmCodeGen.Entrypoint, entrypoints.len);
-    for (entrypoints, 0..) |entrypoint, i| {
-        llvm_entrypoints[i] = .{
-            .symbol_name = entrypoint.symbol_name,
-            .proc = entrypoint.proc,
-            .arg_layouts = entrypoint.arg_layouts,
-            .ret_layout = entrypoint.ret_layout,
-        };
-    }
+        const static_data_procs = try backend.collectReferencedProcs(ctx.gpa, static_data_exports);
+        defer ctx.gpa.free(static_data_procs);
+        codegen.static_data_procs = static_data_procs;
 
-    var bitcode = try codegen.generateEntrypointModule("roc_app_llvm", llvm_entrypoints);
+        const llvm_entrypoints = try ctx.arena.alloc(llvm_codegen.MonoLlvmCodeGen.Entrypoint, entrypoints.len);
+        for (entrypoints, 0..) |entrypoint, i| {
+            llvm_entrypoints[i] = .{
+                .symbol_name = entrypoint.symbol_name,
+                .proc = entrypoint.proc,
+                .arg_layouts = entrypoint.arg_layouts,
+                .ret_layout = entrypoint.ret_layout,
+            };
+        }
+
+        break :generate try codegen.generateEntrypointModule("roc_app_llvm", llvm_entrypoints);
+    };
     defer bitcode.deinit();
 
     const target_name = @tagName(target);
