@@ -2209,7 +2209,7 @@ const Pass = struct {
         }
     }
 
-    /// Find an exact loop-result projection opportunity in one traversal.
+    /// Find a partially used tuple or aggregate loop result in one traversal.
     /// Sequential spans use a cursor rather than one pending item per statement.
     fn bodyHasProjectableLoopResult(self: *Pass, expr_id: Ast.ExprId) Common.LowerError!bool {
         const Work = union(enum) {
