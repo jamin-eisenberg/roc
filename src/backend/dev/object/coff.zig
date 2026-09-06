@@ -259,17 +259,17 @@ pub const CoffWriter = struct {
     allocator: Allocator,
     arch: Architecture,
 
-    // Section contents
-    text: std.ArrayList(u8),
+    // Borrowed section contents, valid until write completes
+    text: []const u8,
     data: std.ArrayList(u8),
-    rdata: std.ArrayList(u8),
+    rdata: []const u8,
 
     // Symbol table
     symbols: std.ArrayList(Symbol),
 
     // Relocations for .text section
     text_relocs: std.ArrayList(TextReloc),
-    rdata_relocs: std.ArrayList(TextReloc),
+    rdata_relocs: std.ArrayList(DataReloc),
 
     // String table (for long symbol names)
     strtab: std.ArrayList(u8),
@@ -283,13 +283,15 @@ pub const CoffWriter = struct {
         reloc_type: u16, // Relocation type
     };
 
+    const DataReloc = struct { offset: u32, symbol_idx: u32, addend: i64 };
+
     pub fn init(allocator: Allocator, arch: Architecture) Allocator.Error!Self {
         var self = Self{
             .allocator = allocator,
             .arch = arch,
-            .text = .empty,
+            .text = &.{},
             .data = .empty,
-            .rdata = .empty,
+            .rdata = &.{},
             .symbols = .empty,
             .text_relocs = .empty,
             .rdata_relocs = .empty,
@@ -305,9 +307,7 @@ pub const CoffWriter = struct {
     }
 
     pub fn deinit(self: *Self) void {
-        self.text.deinit(self.allocator);
         self.data.deinit(self.allocator);
-        self.rdata.deinit(self.allocator);
         self.symbols.deinit(self.allocator);
         self.text_relocs.deinit(self.allocator);
         self.rdata_relocs.deinit(self.allocator);
@@ -315,16 +315,14 @@ pub const CoffWriter = struct {
         self.functions.deinit(self.allocator);
     }
 
-    /// Set the code section contents
-    pub fn setCode(self: *Self, code: []const u8) Allocator.Error!void {
-        self.text.clearRetainingCapacity();
-        try self.text.appendSlice(self.allocator, code);
+    /// Borrow the code section contents until write completes
+    pub fn setCode(self: *Self, code: []const u8) void {
+        self.text = code;
     }
 
-    /// Set read-only data section contents.
-    pub fn setRodata(self: *Self, rodata: []const u8) Allocator.Error!void {
-        self.rdata.clearRetainingCapacity();
-        try self.rdata.appendSlice(self.allocator, rodata);
+    /// Borrow read-only data section contents until write completes.
+    pub fn setRodata(self: *Self, rodata: []const u8) void {
+        self.rdata = rodata;
     }
 
     /// Add a symbol to the object file
@@ -380,12 +378,11 @@ pub const CoffWriter = struct {
 
     /// Add an absolute pointer relocation to the read-only data section.
     pub fn addRdataRelocation(self: *Self, offset: u32, symbol_idx: u32, addend: i64) Allocator.Error!void {
-        if (offset + 8 > self.rdata.items.len) unreachable;
-        std.mem.writeInt(i64, self.rdata.items[offset..][0..8], addend, .little);
+        if (offset + 8 > self.rdata.len) unreachable;
         try self.rdata_relocs.append(self.allocator, .{
             .offset = offset,
             .symbol_idx = symbol_idx,
-            .reloc_type = self.arch.absolutePointerRelocType(),
+            .addend = addend,
         });
     }
 
@@ -752,7 +749,7 @@ pub const CoffWriter = struct {
 
         // Section indices (1-based in COFF)
         const SECT_TEXT: i16 = 1;
-        const has_rdata = self.rdata.items.len > 0;
+        const has_rdata = self.rdata.len > 0;
         const SECT_RDATA: i16 = if (has_rdata) 2 else 0;
 
         const need_unwind = self.functions.items.len > 0;
@@ -777,10 +774,10 @@ pub const CoffWriter = struct {
         // Calculate offsets
         const section_headers_offset: u32 = header_size;
         const text_offset: u32 = section_headers_offset + section_header_size * num_sections;
-        const text_size: u32 = @intCast(self.text.items.len);
+        const text_size: u32 = @intCast(self.text.len);
 
         const rdata_offset: u32 = text_offset + text_size;
-        const rdata_size: u32 = @intCast(self.rdata.items.len);
+        const rdata_size: u32 = @intCast(self.rdata.len);
 
         // .pdata follows .text and .rdata
         const pdata_offset: u32 = rdata_offset + rdata_size;
@@ -877,6 +874,9 @@ pub const CoffWriter = struct {
         // Update string table size (first 4 bytes) - write as little-endian u32
         const strtab_size: u32 = @intCast(self.strtab.items.len);
         std.mem.writeInt(u32, self.strtab.items[0..4], strtab_size, .little);
+
+        std.debug.assert(output.items.len == 0);
+        try output.ensureTotalCapacityPrecise(self.allocator, @as(usize, symtab_offset) + symtab.items.len + strtab_size);
 
         // Write COFF header
         const header = CoffHeader{
@@ -975,10 +975,13 @@ pub const CoffWriter = struct {
         }
 
         // Write .text section content
-        try output.appendSlice(self.allocator, self.text.items);
+        try output.appendSlice(self.allocator, self.text);
 
         if (has_rdata) {
-            try output.appendSlice(self.allocator, self.rdata.items);
+            try output.appendSlice(self.allocator, self.rdata);
+            for (self.rdata_relocs.items) |rel| {
+                std.mem.writeInt(i64, output.items[@as(usize, rdata_offset) + rel.offset ..][0..8], rel.addend, .little);
+            }
         }
 
         // Write .pdata section content (RUNTIME_FUNCTION entries)
@@ -1022,7 +1025,7 @@ pub const CoffWriter = struct {
         }
 
         for (self.rdata_relocs.items) |rel| {
-            try self.writeRelocation(output, rel.offset, rel.symbol_idx, rel.reloc_type);
+            try self.writeRelocation(output, rel.offset, rel.symbol_idx, self.arch.absolutePointerRelocType());
         }
 
         // Write .pdata relocations.
@@ -1068,7 +1071,7 @@ test "create minimal coff object" {
     defer writer.deinit();
 
     // Add test code (ret instruction)
-    try writer.setCode(&[_]u8{0xC3});
+    writer.setCode(&[_]u8{0xC3});
 
     // Add a symbol for the function
     _ = try writer.addSymbol(.{
@@ -1098,7 +1101,7 @@ test "coff with external symbol" {
     defer writer.deinit();
 
     // Simple code: call to external function (placeholder)
-    try writer.setCode(&[_]u8{ 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3 });
+    writer.setCode(&[_]u8{ 0xE8, 0x00, 0x00, 0x00, 0x00, 0xC3 });
 
     // Add external symbol
     const ext_idx = try writer.addExternalSymbol("external_func");
@@ -1120,7 +1123,7 @@ test "coff with long symbol name" {
     var writer = try CoffWriter.init(std.testing.allocator, .x86_64);
     defer writer.deinit();
 
-    try writer.setCode(&[_]u8{0xC3});
+    writer.setCode(&[_]u8{0xC3});
 
     // Add a symbol with a name longer than 8 characters
     _ = try writer.addSymbol(.{
@@ -1146,7 +1149,7 @@ test "coff aarch64" {
     defer writer.deinit();
 
     // ARM64 ret instruction
-    try writer.setCode(&[_]u8{ 0xC0, 0x03, 0x5F, 0xD6 });
+    writer.setCode(&[_]u8{ 0xC0, 0x03, 0x5F, 0xD6 });
 
     _ = try writer.addSymbol(.{
         .name = "test_func",
@@ -1170,7 +1173,7 @@ test "coff aarch64 unwind sections" {
     var writer = try CoffWriter.init(std.testing.allocator, .aarch64);
     defer writer.deinit();
 
-    try writer.setCode(&[_]u8{
+    writer.setCode(&[_]u8{
         0xFD, 0x7B, 0xBA, 0xA9,
         0xFD, 0x03, 0x00, 0x91,
         0xF3, 0x53, 0x01, 0xA9,

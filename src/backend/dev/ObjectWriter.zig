@@ -106,9 +106,9 @@ pub fn generateIndexedObjectFileWithDebug(
             var elf = try object.ElfWriter.init(allocator, elf_arch, elfOsabi(os_tag));
             defer elf.deinit();
 
-            try elf.setCode(code);
-            try elf.setRodata(rodata);
-            if (debug) |d| try elf.setDebugSections(d.line, d.abbrev, d.info, d.line_relocs, d.info_relocs);
+            elf.setCode(code);
+            elf.setRodata(rodata);
+            if (debug) |d| elf.setDebugSections(d.line, d.abbrev, d.info, d.line_relocs, d.info_relocs);
 
             // Add symbols
             for ([_]bool{ false, true }) |global| {
@@ -148,9 +148,9 @@ pub fn generateIndexedObjectFileWithDebug(
             var macho = try object.MachOWriter.init(allocator, macho_arch);
             defer macho.deinit();
 
-            try macho.setCode(code);
-            try macho.setRodata(rodata);
-            if (debug) |d| try macho.setDebugSections(d.line, d.abbrev, d.info, d.line_relocs, d.info_relocs);
+            macho.setCode(code);
+            macho.setRodata(rodata);
+            if (debug) |d| macho.setDebugSections(d.line, d.abbrev, d.info, d.line_relocs, d.info_relocs);
 
             const referenced = try allocator.alloc(bool, symbols.len);
             defer allocator.free(referenced);
@@ -199,8 +199,8 @@ pub fn generateIndexedObjectFileWithDebug(
             var coff_writer = try object.CoffWriter.init(allocator, coff_arch);
             defer coff_writer.deinit();
 
-            try coff_writer.setCode(code);
-            try coff_writer.setRodata(rodata);
+            coff_writer.setCode(code);
+            coff_writer.setRodata(rodata);
 
             // Add symbols and function info for unwind tables
             for (symbols, 0..) |sym, ordinal| {
@@ -1065,4 +1065,44 @@ fn fastestStaticObjectNs(allocator: Allocator, count: usize) (@import("ObjectFil
         }
     }
     return fastest;
+}
+
+test "object encoding preserves borrowed sections through addend patches and allocation failure" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, exerciseBorrowedObjectSections, .{});
+}
+
+fn exerciseBorrowedObjectSections(allocator: Allocator) (Allocator.Error || error{ UnsupportedTarget, InvalidObjectFile, SectionNotFound, TestExpectedEqual })!void {
+    for ([_]RocTarget{ .x64linux, .arm64linux, .x64mac, .arm64mac, .x64win, .arm64win }) |target| {
+        var code = [_]u8{0} ** 16;
+        var data = [_]u8{0} ** 16;
+        var debug_line = [_]u8{0} ** 16;
+        var debug_info = [_]u8{0} ** 16;
+        const symbols = [_]Symbol{.{ .name = "local_target", .section = .rodata, .offset = 8, .size = 8, .is_global = false, .is_function = false, .is_external = false }};
+        const data_relocations = [_]DataRelocation{.{ .offset = 0, .target_symbol_name = "local_target", .addend = 7 }};
+        const debug: DebugSections = .{
+            .line = &debug_line,
+            .abbrev = &.{0},
+            .info = &debug_info,
+            .line_relocs = &.{.{ .section_offset = 0, .target = .text, .width = .eight, .addend = 3 }},
+            .info_relocs = &.{
+                .{ .section_offset = 0, .target = .debug_abbrev, .width = .four, .addend = 1 },
+                .{ .section_offset = 8, .target = .debug_line, .width = .eight, .addend = 2 },
+            },
+        };
+        var output: std.ArrayList(u8) = .empty;
+        defer output.deinit(allocator);
+        try generateObjectFileWithDebug(allocator, target, &code, &data, &symbols, &.{}, &data_relocations, debug, &output);
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &code);
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &data);
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &debug_line);
+        try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 16), &debug_info);
+        const section = try readonlySection(target, output.items);
+        const expected_addend: u64 = if (target.toOsTag() == .linux) 0 else 7;
+        try std.testing.expectEqual(expected_addend, std.mem.readInt(u64, section[0..8], .little));
+        if (target.toOsTag() == .macos) {
+            const info = try machoSection(output.items, "__debug_info");
+            try std.testing.expectEqual(@as(u32, code.len + data.len + debug_line.len + 1), std.mem.readInt(u32, info[0..4], .little));
+            try std.testing.expectEqual(@as(u64, code.len + data.len + 2), std.mem.readInt(u64, info[8..16], .little));
+        }
+    }
 }

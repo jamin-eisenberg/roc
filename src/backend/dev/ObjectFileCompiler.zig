@@ -316,7 +316,7 @@ fn compileWithCodeGen(
 
     // Track symbols for object file generation
     var symbol_relocations_started_ns = if (timing) |timings| timings.start() else 0;
-    var symbols = std.ArrayList(ObjectWriter.Symbol).empty;
+    var symbols = std.ArrayList(SymbolDefinition).empty;
     defer symbols.deinit(allocator);
 
     var rodata = std.ArrayList(u8).empty;
@@ -351,7 +351,7 @@ fn compileWithCodeGen(
             allocator.free(symbol_name);
             return CompilationError.OutOfMemory;
         };
-        symbols.append(allocator, .{
+        appendDefinition(allocator, &codegen.codegen.symbols, &symbols, .{
             .name = symbol_name,
             .offset = proc_symbol.code_start,
             .size = proc_symbol.code_end - proc_symbol.code_start,
@@ -388,7 +388,7 @@ fn compileWithCodeGen(
             allocator.free(symbol_name);
             return CompilationError.OutOfMemory;
         };
-        symbols.append(allocator, .{
+        appendDefinition(allocator, &codegen.codegen.symbols, &symbols, .{
             .name = symbol_name,
             .offset = helper.start_offset,
             .size = helper.end_offset - helper.start_offset,
@@ -417,7 +417,7 @@ fn compileWithCodeGen(
             entrypoint.ret_layout,
         ) catch return CompilationError.OutOfMemory;
 
-        symbols.append(allocator, .{
+        appendDefinition(allocator, &codegen.codegen.symbols, &symbols, .{
             .name = entrypoint.symbol_name,
             .offset = export_info.offset,
             .size = export_info.size,
@@ -504,6 +504,21 @@ fn compileWithCodeGen(
     };
 }
 
+const SymbolDefinition = struct {
+    id: SymbolTable.Id,
+    symbol: ObjectWriter.Symbol,
+};
+
+fn appendDefinition(
+    allocator: Allocator,
+    table: *SymbolTable.Table,
+    definitions: *std.ArrayList(SymbolDefinition),
+    symbol: ObjectWriter.Symbol,
+) Allocator.Error!void {
+    const id = try table.intern(allocator, symbol.name);
+    try definitions.append(allocator, .{ .id = id, .symbol = symbol });
+}
+
 /// Final symbol metadata is indexed by the IDs assigned during code generation.
 const ResolvedObjectSymbols = struct {
     symbols: []ObjectWriter.Symbol,
@@ -516,14 +531,9 @@ const ResolvedObjectSymbols = struct {
 fn resolveObjectSymbols(
     allocator: Allocator,
     table: *SymbolTable.Table,
-    definitions: []const ObjectWriter.Symbol,
+    definitions: []const SymbolDefinition,
     relocations: []const IndexedRelocation,
 ) CompilationError!ResolvedObjectSymbols {
-    const definition_ids = allocator.alloc(SymbolTable.Id, definitions.len) catch return CompilationError.OutOfMemory;
-    defer allocator.free(definition_ids);
-    for (definitions, definition_ids) |definition, *id| {
-        id.* = table.intern(allocator, definition.name) catch return CompilationError.OutOfMemory;
-    }
     const symbols = allocator.alloc(ObjectWriter.Symbol, table.names.items.len) catch return CompilationError.OutOfMemory;
     for (table.names.items, symbols) |name, *symbol| symbol.* = .{
         .name = name,
@@ -540,10 +550,10 @@ fn resolveObjectSymbols(
         },
         .linked_data, .local_data, .jmp_to_return => {},
     };
-    for (definitions, definition_ids) |definition, id| {
-        const symbol = &symbols[@intFromEnum(id)];
+    for (definitions) |definition| {
+        const symbol = &symbols[@intFromEnum(definition.id)];
         std.debug.assert(symbol.is_external);
-        symbol.* = definition;
+        symbol.* = definition.symbol;
     }
     for (table.required_definitions.items) |id| {
         std.debug.assert(!symbols[@intFromEnum(id)].is_external);
@@ -557,7 +567,7 @@ fn appendStaticDataExports(
     exports: []const StaticDataExport,
     rodata: *std.ArrayList(u8),
     relocations: *std.ArrayList(ObjectWriter.IndexedDataRelocation),
-    symbols: *std.ArrayList(ObjectWriter.Symbol),
+    symbols: *std.ArrayList(SymbolDefinition),
 ) CompilationError!void {
     const data_symbols = allocator.alloc(SymbolTable.Id, exports.len) catch return CompilationError.OutOfMemory;
     defer allocator.free(data_symbols);
@@ -566,9 +576,9 @@ fn appendStaticDataExports(
     defer functions.deinit();
     var helpers = std.AutoHashMap(layout.RcHelperKey, SymbolTable.Id).init(allocator);
     defer helpers.deinit();
-    for (exports) |data_export| {
+    for (exports, data_symbols) |data_export, definition_id| {
         const start = rodata.items.len;
-        try appendStaticDataExport(allocator, data_export, rodata, symbols);
+        try appendStaticDataExport(allocator, data_export, definition_id, rodata, symbols);
         const aligned_offset = std.mem.alignForward(usize, start, @intCast(data_export.alignment));
         for (data_export.relocations) |relocation| {
             const id = switch (relocation.target) {
@@ -601,8 +611,9 @@ fn appendStaticDataExports(
 fn appendStaticDataExport(
     allocator: Allocator,
     data_export: StaticDataExport,
+    id: SymbolTable.Id,
     rodata: *std.ArrayList(u8),
-    static_data_symbols: *std.ArrayList(ObjectWriter.Symbol),
+    static_data_symbols: *std.ArrayList(SymbolDefinition),
 ) CompilationError!void {
     const alignment = @as(usize, @intCast(data_export.alignment));
     const aligned_offset = std.mem.alignForward(usize, rodata.items.len, alignment);
@@ -621,7 +632,7 @@ fn appendStaticDataExport(
         );
     }
 
-    static_data_symbols.append(allocator, .{
+    static_data_symbols.append(allocator, .{ .id = id, .symbol = .{
         .name = data_export.symbol_name,
         .offset = aligned_offset + symbol_offset,
         .size = data_export.bytes.len - symbol_offset,
@@ -630,7 +641,7 @@ fn appendStaticDataExport(
         .is_external = false,
         .is_hidden = !data_export.is_exported,
         .section = .rodata,
-    }) catch {
+    } }) catch {
         return CompilationError.OutOfMemory;
     };
 }
@@ -647,7 +658,7 @@ fn compileStaticDataObjectBytes(
     var table: SymbolTable.Table = .{};
     defer table.deinit(allocator);
 
-    var symbols = std.ArrayList(ObjectWriter.Symbol).empty;
+    var symbols = std.ArrayList(SymbolDefinition).empty;
     defer symbols.deinit(allocator);
 
     var rodata = std.ArrayList(u8).empty;

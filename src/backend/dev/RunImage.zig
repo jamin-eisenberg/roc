@@ -205,12 +205,12 @@ pub fn writeToSharedMemory(
 ) WriteError!*Header {
     if (!std.math.isPowerOfTwo(page_size)) return error.InvalidDevRunImage;
 
-    var symbol_names = std.ArrayList(u8).empty;
+    var symbol_names: SymbolNames = .{};
     defer symbol_names.deinit(scratch);
 
     const symbol_refs = try scratch.alloc(StringRef, relocation_symbol_names.len);
     defer scratch.free(symbol_refs);
-    for (relocation_symbol_names, symbol_refs) |name, *ref| ref.* = try appendStringRef(scratch, &symbol_names, name);
+    for (relocation_symbol_names, symbol_refs) |name, *ref| ref.* = try symbol_names.intern(scratch, name, .reference);
 
     var relocation_records = std.ArrayList(RelocationRecord).empty;
     defer relocation_records.deinit(scratch);
@@ -219,14 +219,12 @@ pub fn writeToSharedMemory(
 
     var code_symbols = std.ArrayList(CodeSymbol).empty;
     defer code_symbols.deinit(scratch);
-    var code_symbol_names = std.StringHashMapUnmanaged(void){};
-    defer code_symbol_names.deinit(scratch);
 
     for (code_symbol_inputs) |input| {
         if (input.code_offset >= code.len) return error.InvalidDevRunImage;
-        try code_symbol_names.put(scratch, input.name, {});
+        const name_ref = try symbol_names.intern(scratch, input.name, .code);
         try code_symbols.append(scratch, .{
-            .name = try appendStringRef(scratch, &symbol_names, input.name),
+            .name = name_ref,
             .code_offset = @intCast(input.code_offset),
         });
     }
@@ -257,11 +255,14 @@ pub fn writeToSharedMemory(
     var data_symbols = std.ArrayList(DataSymbol).empty;
     defer data_symbols.deinit(scratch);
 
-    var data_symbol_names = std.StringHashMapUnmanaged(void){};
-    defer data_symbol_names.deinit(scratch);
+    const data_refs = try scratch.alloc(StringRef, data_exports.len);
+    defer scratch.free(data_refs);
+    for (data_exports, data_refs) |data_export, *ref| {
+        ref.* = try symbol_names.intern(scratch, data_export.symbol_name, .data);
+    }
 
     var max_data_alignment: usize = 1;
-    for (data_exports) |data_export| {
+    for (data_exports, data_refs) |data_export, name_ref| {
         const alignment = if (data_export.alignment == 0) 1 else data_export.alignment;
         if (!std.math.isPowerOfTwo(alignment)) return error.InvalidStaticDataAlignment;
         max_data_alignment = @max(max_data_alignment, alignment);
@@ -270,9 +271,6 @@ pub fn writeToSharedMemory(
         try data_bytes.appendNTimes(scratch, 0, aligned_offset - data_bytes.items.len);
         const data_offset = data_bytes.items.len;
         try data_bytes.appendSlice(scratch, data_export.bytes);
-
-        const name_ref = try appendStringRef(scratch, &symbol_names, data_export.symbol_name);
-        try data_symbol_names.put(scratch, data_export.symbol_name, {});
 
         try data_symbols.append(scratch, .{
             .name = name_ref,
@@ -288,9 +286,16 @@ pub fn writeToSharedMemory(
             if (relocation_offset > data_export.bytes.len or @sizeOf(usize) > data_export.bytes.len - relocation_offset) {
                 return error.InvalidDevRunImage;
             }
+            const target_ref = switch (relocation.kind) {
+                .address => switch (relocation.target) {
+                    .data_symbol => |id| data_refs[@intFromEnum(id)],
+                    .named => symbol_names.find(relocation.target_symbol_name, .data) orelse return error.UnsupportedStaticDataRelocation,
+                },
+                .function_pointer => symbol_names.find(relocation.target_symbol_name, .code) orelse return error.UnsupportedStaticDataRelocation,
+            };
             try data_relocation_records.append(scratch, .{
                 .data_offset = @intCast(data_offset + relocation_offset),
-                .symbol = try appendStringRef(scratch, &symbol_names, relocation.target_symbol_name),
+                .symbol = target_ref,
                 .addend = relocation.addend,
                 .target_kind = @intFromEnum(switch (relocation.kind) {
                     .address => StaticDataTargetKind.address,
@@ -300,17 +305,7 @@ pub fn writeToSharedMemory(
         }
     }
 
-    for (data_exports) |data_export| {
-        for (data_export.relocations) |relocation| {
-            const target_exists = switch (relocation.kind) {
-                .address => data_symbol_names.contains(relocation.target_symbol_name),
-                .function_pointer => code_symbol_names.contains(relocation.target_symbol_name),
-            };
-            if (!target_exists) return error.UnsupportedStaticDataRelocation;
-        }
-    }
-
-    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &data_symbol_names);
+    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &symbol_names);
     const function_stub_len = try mulNoOverflow(function_stub_count, max_jump_stub_size);
 
     const header = try image_allocator.create(Header);
@@ -333,8 +328,12 @@ pub fn writeToSharedMemory(
     const data_relocation_copy = try image_allocator.alloc(DataRelocationRecord, data_relocation_records.items.len);
     @memcpy(data_relocation_copy, data_relocation_records.items);
 
-    const symbol_names_copy = try image_allocator.alloc(u8, symbol_names.items.len);
-    @memcpy(symbol_names_copy, symbol_names.items);
+    const symbol_names_copy = try image_allocator.alloc(u8, symbol_names.byte_len);
+    var name_entries = symbol_names.refs.iterator();
+    while (name_entries.next()) |entry| {
+        const ref = entry.value_ptr.ref;
+        @memcpy(symbol_names_copy[ref.offset..][0..ref.len], entry.key_ptr.*);
+    }
 
     const data_symbols_copy = try image_allocator.alloc(DataSymbol, data_symbols.items.len);
     @memcpy(data_symbols_copy, data_symbols.items);
@@ -432,19 +431,15 @@ pub fn requiredCapacityFromOffset(
 ) WriteError!usize {
     if (!std.math.isPowerOfTwo(page_size)) return error.InvalidDevRunImage;
 
-    var data_names: std.StringHashMapUnmanaged(void) = .empty;
-    defer data_names.deinit(scratch);
-    for (data_exports) |data_export| try data_names.put(scratch, data_export.symbol_name, {});
-    var code_names: std.StringHashMapUnmanaged(void) = .empty;
-    defer code_names.deinit(scratch);
-    for (code_symbol_inputs) |symbol| try code_names.put(scratch, symbol.name, {});
+    var names: SymbolNames = .{};
+    defer names.deinit(scratch);
+    for (relocation_symbol_names) |name| _ = try names.intern(scratch, name, .reference);
+    for (data_exports) |data_export| _ = try names.intern(scratch, data_export.symbol_name, .data);
+    for (code_symbol_inputs) |symbol| _ = try names.intern(scratch, symbol.name, .code);
 
-    var symbol_names_len: usize = 0;
-    for (relocation_symbol_names) |name| symbol_names_len = try addNoOverflow(symbol_names_len, name.len);
     var relocation_count: usize = 0;
     for (code_symbol_inputs) |input| {
         if (input.code_offset >= code.len) return error.InvalidDevRunImage;
-        symbol_names_len = try addNoOverflow(symbol_names_len, input.name.len);
     }
     for (relocations) |relocation| {
         switch (relocation) {
@@ -464,7 +459,6 @@ pub fn requiredCapacityFromOffset(
         max_data_alignment = @max(max_data_alignment, alignment);
         data_len = std.mem.alignForward(usize, data_len, alignment);
         data_len = try addNoOverflow(data_len, data_export.bytes.len);
-        symbol_names_len = try addNoOverflow(symbol_names_len, data_export.symbol_name.len);
         data_relocation_count = try addNoOverflow(data_relocation_count, data_export.relocations.len);
         for (data_export.relocations) |relocation| {
             if (relocation.offset > std.math.maxInt(usize)) return error.InvalidDevRunImage;
@@ -472,19 +466,18 @@ pub fn requiredCapacityFromOffset(
             if (relocation_offset > data_export.bytes.len or @sizeOf(usize) > data_export.bytes.len - relocation_offset) {
                 return error.InvalidDevRunImage;
             }
-            symbol_names_len = try addNoOverflow(symbol_names_len, relocation.target_symbol_name.len);
             const target_exists = switch (relocation.kind) {
                 .address => switch (relocation.target) {
                     .data_symbol => |id| @intFromEnum(id) < data_exports.len,
-                    .named => data_names.contains(relocation.target_symbol_name),
+                    .named => names.find(relocation.target_symbol_name, .data) != null,
                 },
-                .function_pointer => code_names.contains(relocation.target_symbol_name),
+                .function_pointer => names.find(relocation.target_symbol_name, .code) != null,
             };
             if (!target_exists) return error.UnsupportedStaticDataRelocation;
         }
     }
 
-    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &data_names);
+    const function_stub_count = try countReservedFunctionStubs(scratch, relocation_symbol_names, relocations, &names);
     const function_stub_len = try mulNoOverflow(function_stub_count, max_jump_stub_size);
 
     var capacity: usize = initial_offset;
@@ -493,7 +486,7 @@ pub fn requiredCapacityFromOffset(
     capacity = try addAllocationCapacity(capacity, @alignOf(CodeSymbol), try mulNoOverflow(code_symbol_inputs.len, @sizeOf(CodeSymbol)));
     capacity = try addAllocationCapacity(capacity, @alignOf(RelocationRecord), try mulNoOverflow(relocation_count, @sizeOf(RelocationRecord)));
     capacity = try addAllocationCapacity(capacity, @alignOf(DataRelocationRecord), try mulNoOverflow(data_relocation_count, @sizeOf(DataRelocationRecord)));
-    capacity = try addAllocationCapacity(capacity, @alignOf(u8), symbol_names_len);
+    capacity = try addAllocationCapacity(capacity, @alignOf(u8), names.byte_len);
     capacity = try addAllocationCapacity(capacity, @alignOf(DataSymbol), try mulNoOverflow(data_exports.len, @sizeOf(DataSymbol)));
     capacity = try addAllocationCapacity(capacity, page_size, code.len);
     capacity = try addAllocationCapacity(capacity, 16, function_stub_len);
@@ -539,20 +532,42 @@ fn relocationKindForData(kind: DataRelocationKind) RelocationKind {
     };
 }
 
-fn appendStringRef(scratch: Allocator, symbol_names: *std.ArrayList(u8), name: []const u8) Allocator.Error!StringRef {
-    const offset = symbol_names.items.len;
-    try symbol_names.appendSlice(scratch, name);
-    return .{
-        .offset = @intCast(offset),
-        .len = @intCast(name.len),
-    };
-}
+/// Borrow each distinct name once and assign its final image byte range.
+const SymbolNames = struct {
+    const Kind = enum(u2) { reference = 0, code = 1, data = 2 };
+    const Entry = struct { ref: StringRef, kinds: u2 };
+
+    refs: std.StringHashMapUnmanaged(Entry) = .empty,
+    byte_len: usize = 0,
+
+    fn deinit(self: *SymbolNames, allocator: Allocator) void {
+        self.refs.deinit(allocator);
+    }
+
+    fn intern(self: *SymbolNames, allocator: Allocator, name: []const u8, kind: Kind) WriteError!StringRef {
+        const entry = try self.refs.getOrPut(allocator, name);
+        if (!entry.found_existing) {
+            errdefer _ = self.refs.remove(name);
+            const end = try addNoOverflow(self.byte_len, name.len);
+            if (end > std.math.maxInt(u32)) return error.InvalidDevRunImage;
+            entry.value_ptr.* = .{ .ref = .{ .offset = @intCast(self.byte_len), .len = @intCast(name.len) }, .kinds = 0 };
+            self.byte_len = end;
+        }
+        entry.value_ptr.kinds |= @intFromEnum(kind);
+        return entry.value_ptr.ref;
+    }
+
+    fn find(self: *const SymbolNames, name: []const u8, kind: Kind) ?StringRef {
+        const entry = self.refs.get(name) orelse return null;
+        return if (entry.kinds & @intFromEnum(kind) != 0) entry.ref else null;
+    }
+};
 
 fn countReservedFunctionStubs(
     scratch: Allocator,
     names: []const []const u8,
     relocations: []const Relocation,
-    data_symbol_names: *const std.StringHashMapUnmanaged(void),
+    declarations: *const SymbolNames,
 ) WriteError!usize {
     const uses = try scratch.alloc(u2, names.len);
     defer scratch.free(uses);
@@ -568,7 +583,7 @@ fn countReservedFunctionStubs(
     };
     var count: usize = 0;
     for (names, uses) |name, use| {
-        if (use & 1 != 0 or (use & 2 != 0 and !data_symbol_names.contains(name))) count += 1;
+        if (use & 1 != 0 or (use & 2 != 0 and declarations.find(name, .data) == null)) count += 1;
     }
     return count;
 }
@@ -778,4 +793,8 @@ test "writeToSharedMemory serializes only executable image sections" {
     try std.testing.expectEqual(@as(u64, @sizeOf(usize)), view.data_relocations[1].data_offset);
     try std.testing.expectEqual(@as(i64, 0), view.data_relocations[1].addend);
     try std.testing.expectEqualStrings("roc__proc_2a", try view.symbolName(view.data_relocations[1].symbol));
+    // Relocations reuse declaration byte ranges, including forward data references.
+    try std.testing.expectEqual(view.data_symbols[1].name, view.data_relocations[0].symbol);
+    try std.testing.expectEqual(view.code_symbols[0].name, view.data_relocations[1].symbol);
+    try std.testing.expectEqual(@as(usize, "roc_alloc".len + "roc__answer".len + "roc__proc_2a".len + "roc__static".len + "roc__target".len), view.symbol_names.len);
 }

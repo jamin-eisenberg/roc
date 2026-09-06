@@ -187,6 +187,14 @@ explicit target, and a missing internal definition is a compiler invariant failu
 The named object-input API resolves its declared names once at its boundary;
 compiler-generated machine code uses the indexed API directly.
 
+Definitions retain their assigned symbol IDs through final metadata assembly.
+Object writers borrow immutable section bytes until emission, compute the final
+layout before allocating the output, and apply implicit addends only to that
+output. ELF symbol and relocation records are encoded directly in their final
+sections. Dev-run images assign one byte range per distinct symbol name; static
+relocations reuse declaration ranges, with allocation IDs indexing data ranges
+directly. Capacity calculation uses the same distinct declaration set.
+
 Backends do not reason about reference counting. They lower and execute the
 explicit LIR `incref`, `decref`, and `free` statements emitted before backend
 code generation. Each explicit RC statement carries the concrete RC helper
