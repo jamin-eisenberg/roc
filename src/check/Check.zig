@@ -36,6 +36,7 @@ const Ident = base.Ident;
 const Region = base.Region;
 const DeferredConstraintCheck = unifier.DeferredConstraintCheck;
 const StaticDispatchConstraint = types_mod.StaticDispatchConstraint;
+const LiteralDispatchPlan = can.NodeStore.LiteralDispatchPlan;
 const InterpolationPartMetadata = types_mod.InterpolationPartMetadata;
 const Func = types_mod.Func;
 const Var = types_mod.Var;
@@ -296,6 +297,10 @@ scratch_deferred_static_dispatch_constraints: base.Scratch(DeferredConstraintChe
 /// derivation for a shape that is no longer the call's final type.
 final_codec_dispatch_constraints: std.ArrayListUnmanaged(FinalCodecDispatchConstraint) = .empty,
 final_codec_dispatch_constraint_fns: std.AutoHashMapUnmanaged(Var, void) = .empty,
+/// Generic generated-codec relations captured by their owning type scheme.
+/// Their definition-side worklist entries must retire without being treated as
+/// settled: each scheme instantiation copies and validates the exact relation.
+scheme_deferred_codec_constraint_fns: std.AutoHashMapUnmanaged(Var, void) = .empty,
 checking_final_codec_dispatch_constraints: bool = false,
 // Cache for imported types. This cache lives for the entire type-checking session
 /// of a module, so the same imported type can be reused across the entire module.
@@ -541,6 +546,10 @@ value_lookup_tracking: std.ArrayListUnmanaged(ValueLookupEntry),
 /// Tracks expressions whose checked type contains an error, even if annotation
 /// preservation later gives their raw expr var a non-error type.
 erroneous_value_exprs: std.AutoHashMapUnmanaged(CIR.Expr.Idx, void),
+/// Reassignments whose pattern/RHS relation was rejected. The whole statement
+/// must become an explicit runtime error before checked-body construction,
+/// because its pattern interface is erroneous independently of its RHS.
+erroneous_reassignments: std.AutoHashMapUnmanaged(CIR.Statement.Idx, CIR.Expr.Idx),
 /// Tracks unannotated expression identities whose checked value type contains
 /// an error and therefore cannot be used to introduce a parent call relation.
 call_operand_type_error_exprs: std.ArrayListUnmanaged(bool),
@@ -771,6 +780,11 @@ open_literal_vars: std.ArrayListUnmanaged(Var),
 /// a concrete number type, so range validation does not depend on flex content
 /// still being present in the union-find root.
 open_numeral_literals: std.ArrayListUnmanaged(OpenNumeralLiteral),
+/// Literal plans retired with an erroneous expression subtree. They are no
+/// longer publishable checked evidence, but later diagnostics in the same
+/// constraint pass still need their exact source regions. This list grows only
+/// on error-recovery paths and is consulted only for diagnostic source data.
+retired_literal_dispatch_plans: std.ArrayListUnmanaged(LiteralDispatchPlan),
 /// Literal receivers committed to their documented head default after
 /// validation failed—every numeric candidate rejected for numerals, the
 /// single Str candidate rejected for quotes. The dispatch pass reports each
@@ -1094,11 +1108,15 @@ const StructuralSchemeRequirementOrigin = struct {
 const SchemeDispatchRequirement = struct {
     receiver_var: Var,
     constraint: StaticDispatchConstraint,
-    /// This relation was concrete enough to leave the ordinary deferred queue,
-    /// but its final codec shape can still change through a nested variable in
-    /// the owning scheme. Instantiation must therefore copy the receiver's
-    /// structural spine even when the receiver root itself is monomorphic.
+    /// This generated-codec relation's final shape can change through a nested
+    /// variable in the owning scheme. Instantiation must therefore copy the
+    /// receiver's structural spine even when the receiver root is monomorphic.
     deferred_generated_codec: bool,
+    /// This pristine relation exists only as a scheme template in this checker.
+    /// Local unresolved captures set this after generalization; imported and
+    /// rehydrated schemes set it because only their instantiated copies need
+    /// validation here.
+    pristine_codec_is_scheme_only: bool,
     /// The expression in this scheme whose use created the pending copy.
     /// Creation requirements already have exact constraint provenance; copied
     /// requirements need this separate use-site provenance because their
@@ -2506,6 +2524,7 @@ fn initAssumePrepared(
             .receiver_var = receiver_var,
             .constraint = constraint,
             .deferred_generated_codec = true,
+            .pristine_codec_is_scheme_only = true,
             .failure_expr = null,
             .structural_origin = .{
                 .receiver_var = receiver_var,
@@ -2602,6 +2621,7 @@ fn initAssumePrepared(
         .binding_scheme_nodes = binding_scheme_nodes,
         .value_lookup_tracking = .empty,
         .erroneous_value_exprs = .empty,
+        .erroneous_reassignments = .empty,
         .call_operand_type_error_exprs = try initNodeSlots(bool, gpa, node_count, false),
         .erroneous_value_patterns = .empty,
         .rejected_default_exprs = .empty,
@@ -2630,6 +2650,7 @@ fn initAssumePrepared(
         .default_materializations = .empty,
         .open_literal_vars = .empty,
         .open_numeral_literals = .empty,
+        .retired_literal_dispatch_plans = .empty,
         .pending_tuple_accesses = .empty,
         .pinnable_vars = std.AutoHashMap(Var, void).init(gpa),
         .reported_dispatch_vars = std.AutoHashMap(Var, void).init(gpa),
@@ -2716,6 +2737,7 @@ pub fn deinit(self: *Self) void {
     self.predeclared_local_scheme_vars.deinit(self.gpa);
     self.value_lookup_tracking.deinit(self.gpa);
     self.erroneous_value_exprs.deinit(self.gpa);
+    self.erroneous_reassignments.deinit(self.gpa);
     self.call_operand_type_error_exprs.deinit(self.gpa);
     self.erroneous_value_patterns.deinit(self.gpa);
     self.rejected_default_exprs.deinit(self.gpa);
@@ -2775,6 +2797,7 @@ pub fn deinit(self: *Self) void {
     self.scratch_deferred_static_dispatch_constraints.deinit();
     self.final_codec_dispatch_constraints.deinit(self.gpa);
     self.final_codec_dispatch_constraint_fns.deinit(self.gpa);
+    self.scheme_deferred_codec_constraint_fns.deinit(self.gpa);
     self.scratch_default_param_vars.deinit();
     self.scratch_generated_codec_calls.deinit(self.gpa);
     self.pending_generated_parser_error_mappings.deinit(self.gpa);
@@ -2815,6 +2838,7 @@ pub fn deinit(self: *Self) void {
     self.scratch_evidence_pair_set.deinit(self.gpa);
     self.open_literal_vars.deinit(self.gpa);
     self.open_numeral_literals.deinit(self.gpa);
+    self.retired_literal_dispatch_plans.deinit(self.gpa);
     self.conflicted_default_literal_vars.deinit(self.gpa);
     self.pending_tuple_accesses.deinit(self.gpa);
     self.pinnable_vars.deinit();
@@ -3732,7 +3756,9 @@ fn markHoistInvalidatedExpr(
 ) Allocator.Error!void {
     const entry = try self.hoist_invalidated_exprs.getOrPut(self.gpa, expr);
     if (entry.found_existing) return;
-    self.cir.store.retireLiteralDispatchPlan(ModuleEnv.nodeIdxFrom(expr));
+    if (self.cir.store.retireLiteralDispatchPlan(ModuleEnv.nodeIdxFrom(expr))) |plan| {
+        try self.retired_literal_dispatch_plans.append(self.gpa, plan);
+    }
     try work.append(self.gpa, expr);
 }
 
@@ -7602,7 +7628,8 @@ fn contentConstraintRange(content: Content) ?StaticDispatchConstraint.SafeList.R
 fn mkFlexWithFromNumeralConstraint(
     self: *Self,
     source_node: ?CIR.Node.Idx,
-    failure_expr: ?CIR.Expr.Idx,
+    occurrence_failure_expr: ?CIR.Expr.Idx,
+    pattern_failure_expr: ?CIR.Expr.Idx,
     num_literal_info: types_mod.NumeralInfo,
     env: *Env,
 ) Allocator.Error!Var {
@@ -7676,9 +7703,9 @@ fn mkFlexWithFromNumeralConstraint(
     try self.unifyWith(flex_var, flex_content, env);
 
     if (source_node) |node_idx| {
-        try self.cir.recordNumeralDispatchPlan(node_idx, flex_var, fn_var);
+        try self.cir.recordNumeralDispatchPlan(node_idx, flex_var, fn_var, pattern_failure_expr);
     }
-    try self.recordOpenLiteralVar(flex_var, &.{constraint}, failure_expr);
+    try self.recordOpenLiteralVar(flex_var, &.{constraint}, occurrence_failure_expr);
 
     return flex_var;
 }
@@ -7690,6 +7717,7 @@ fn mkFlexWithFromQuoteConstraint(
     self: *Self,
     source_node: ?CIR.Node.Idx,
     region: Region,
+    pattern_failure_expr: ?CIR.Expr.Idx,
     env: *Env,
 ) Allocator.Error!Var {
     const trace = tracy.trace(@src());
@@ -7737,7 +7765,7 @@ fn mkFlexWithFromQuoteConstraint(
     };
     const fn_var = try self.freshFromContent(func_content, env, region);
     if (source_node) |node_idx| {
-        try self.cir.recordQuoteDispatchPlan(node_idx, flex_var, fn_var);
+        try self.cir.recordQuoteDispatchPlan(node_idx, flex_var, fn_var, pattern_failure_expr);
     }
 
     const constraint = types_mod.StaticDispatchConstraint{
@@ -7794,6 +7822,7 @@ fn checkNumeralLiteral(
     occurrence_var: Var,
     region: Region,
     comptime occurrence: NumeralOccurrence,
+    pattern_failure_expr: ?CIR.Expr.Idx,
     env: *Env,
 ) Allocator.Error!void {
     const suffix_target = self.cir.numericSuffixTargetForNode(node_idx);
@@ -7801,7 +7830,7 @@ fn checkNumeralLiteral(
     var num_literal_info = try self.exactNumeralInfoForLiteral(literal, region);
     const failure_expr: ?CIR.Expr.Idx = switch (occurrence) {
         .expression => @enumFromInt(@intFromEnum(node_idx)),
-        .pattern => null,
+        .pattern => pattern_failure_expr,
     };
     const is_int_unbound = switch (occurrence) {
         .expression => blk: {
@@ -7817,7 +7846,13 @@ fn checkNumeralLiteral(
     };
 
     num_literal_info.explicit_suffix = suffix_target != null;
-    const flex_var = try self.mkFlexWithFromNumeralConstraint(node_idx, failure_expr, num_literal_info, env);
+    const flex_var = try self.mkFlexWithFromNumeralConstraint(
+        node_idx,
+        failure_expr,
+        pattern_failure_expr,
+        num_literal_info,
+        env,
+    );
     if (is_int_unbound) {
         try self.int_unbound_vars.put(self.types.resolveVar(flex_var).var_, {});
     }
@@ -10203,21 +10238,122 @@ fn constraintSourceExpr(
     if (constraintIntroExpr(constraint)) |expr_idx| return expr_idx;
     const literal_kind = constraint.origin.literalKind() orelse return null;
     if (literal_kind == .interpolation) return null;
-
     const dispatcher_root = self.types.resolveVar(dispatcher_var).var_;
+    var pattern_failure_expr: ?CIR.Expr.Idx = null;
+
     for (self.cir.store.literalDispatchPlans()) |plan| {
-        const kind_matches = switch (literal_kind) {
-            .numeral => plan.dispatchKind() == .numeral,
-            .quote => plan.dispatchKind() == .quote,
-            .interpolation => unreachable,
-        };
-        if (!kind_matches) continue;
-        if (self.types.resolveVar(@enumFromInt(plan.target_var)).var_ != dispatcher_root) continue;
+        if (!self.literalDispatchPlanMatchesConstraint(plan, constraint, dispatcher_root)) continue;
         const node_idx: CIR.Node.Idx = @enumFromInt(plan.node_idx);
-        if (!isExprNodeTag(self.cir.store.nodes.get(node_idx).tag)) continue;
-        return @enumFromInt(plan.node_idx);
+        if (isExprNodeTag(self.cir.store.nodes.get(node_idx).tag)) {
+            return @enumFromInt(plan.node_idx);
+        }
+        if (pattern_failure_expr == null) {
+            if (plan.patternFailureExpr()) |raw| pattern_failure_expr = @enumFromInt(raw);
+        }
+    }
+    return pattern_failure_expr;
+}
+
+fn literalDispatchPlanMatchesConstraint(
+    self: *Self,
+    plan: LiteralDispatchPlan,
+    constraint: StaticDispatchConstraint,
+    dispatcher_root: Var,
+) bool {
+    const literal_kind = constraint.origin.literalKind() orelse return false;
+    // The raw callable is the literal occurrence's stable identity. Distinct
+    // occurrences may share both a receiver root and a callable equivalence
+    // class after unification, so either resolved root would conflate owners.
+    return plan.fn_var == @intFromEnum(constraint.fn_var) and
+        self.literalDispatchPlanMatches(plan, literal_kind, dispatcher_root);
+}
+
+fn literalDispatchPlanMatches(
+    self: *Self,
+    plan: LiteralDispatchPlan,
+    literal_kind: StaticDispatchConstraint.LiteralKind,
+    dispatcher_root: Var,
+) bool {
+    const kind_matches = switch (literal_kind) {
+        .numeral => plan.dispatchKind() == .numeral,
+        .quote => plan.dispatchKind() == .quote,
+        .interpolation => unreachable,
+    };
+    return kind_matches and
+        self.types.resolveVar(@enumFromInt(plan.target_var)).var_ == dispatcher_root;
+}
+
+fn matchingLiteralDispatchPlan(
+    self: *Self,
+    plans: []const LiteralDispatchPlan,
+    literal_kind: StaticDispatchConstraint.LiteralKind,
+    dispatcher_root: Var,
+) ?LiteralDispatchPlan {
+    for (plans) |plan| {
+        if (self.literalDispatchPlanMatches(plan, literal_kind, dispatcher_root)) return plan;
     }
     return null;
+}
+
+fn literalPatternFailureExprForConstraint(
+    self: *Self,
+    dispatcher_var: Var,
+    constraint: StaticDispatchConstraint,
+) ?CIR.Expr.Idx {
+    const literal_kind = constraint.origin.literalKind() orelse return null;
+    if (literal_kind == .interpolation) return null;
+    const dispatcher_root = self.types.resolveVar(dispatcher_var).var_;
+    for (self.cir.store.literalDispatchPlans()) |plan| {
+        if (!self.literalDispatchPlanMatchesConstraint(plan, constraint, dispatcher_root)) continue;
+        const node_idx: CIR.Node.Idx = @enumFromInt(plan.node_idx);
+        if (isExprNodeTag(self.cir.store.nodes.get(node_idx).tag)) continue;
+        const raw = plan.patternFailureExpr() orelse continue;
+        return @enumFromInt(raw);
+    }
+    return null;
+}
+
+/// Poison every source occurrence represented by a merged literal relation.
+/// The scan is failure-only: successful dispatch never pays for occurrence
+/// recovery. Collect owners before rewriting any of them because invalidating
+/// an expression subtree retires its literal plans from the dense plan list.
+fn poisonLiteralFailureOwners(
+    self: *Self,
+    deferred: DeferredConstraintCheck,
+    failed_constraint: StaticDispatchConstraint,
+) Allocator.Error!bool {
+    const dispatcher_root = self.types.resolveVar(deferred.var_).var_;
+    var owners: std.ArrayListUnmanaged(CIR.Expr.Idx) = .empty;
+    defer owners.deinit(self.gpa);
+
+    for (self.types.sliceStaticDispatchConstraints(deferred.constraints)) |literal_constraint| {
+        const literal_kind = literal_constraint.origin.literalKind() orelse continue;
+        if (literal_kind == .interpolation) continue;
+        const literal_fn_root = self.types.resolveVar(literal_constraint.fn_var).var_;
+
+        for (self.cir.store.literalDispatchPlans()) |plan| {
+            if (!self.literalDispatchPlanMatches(plan, literal_kind, dispatcher_root)) continue;
+            if (self.types.resolveVar(@enumFromInt(plan.fn_var)).var_ != literal_fn_root) continue;
+            const node_idx: CIR.Node.Idx = @enumFromInt(plan.node_idx);
+            const owner: CIR.Expr.Idx = if (isExprNodeTag(self.cir.store.nodes.get(node_idx).tag))
+                @enumFromInt(plan.node_idx)
+            else
+                @enumFromInt(plan.patternFailureExpr() orelse continue);
+            var already_recorded = false;
+            for (owners.items) |recorded| {
+                if (recorded == owner) {
+                    already_recorded = true;
+                    break;
+                }
+            }
+            if (!already_recorded) try owners.append(self.gpa, owner);
+        }
+    }
+
+    for (owners.items) |owner| {
+        try self.poisonConstraintFailureSource(deferred.var_, failed_constraint, owner);
+    }
+    return owners.items.len != 0;
 }
 
 fn poisonConstraintSourceExpr(
@@ -10228,7 +10364,17 @@ fn poisonConstraintSourceExpr(
     return self.poisonConstraintFailureSource(dispatcher_var, constraint, null);
 }
 
-fn deferredConstraintFailureExpr(deferred: DeferredConstraintCheck) ?CIR.Expr.Idx {
+fn deferredConstraintFailureExpr(self: *Self, deferred: DeferredConstraintCheck) ?CIR.Expr.Idx {
+    if (deferred.failure_expr.get()) |raw| return @enumFromInt(raw);
+
+    for (self.types.sliceStaticDispatchConstraints(deferred.constraints)) |constraint| {
+        if (constraint.origin.literalKind() == null) continue;
+        if (self.literalPatternFailureExprForConstraint(deferred.var_, constraint)) |expr_idx| return expr_idx;
+    }
+    return null;
+}
+
+fn explicitDeferredConstraintFailureExpr(deferred: DeferredConstraintCheck) ?CIR.Expr.Idx {
     const raw = deferred.failure_expr.get() orelse return null;
     return @enumFromInt(raw);
 }
@@ -10282,15 +10428,22 @@ fn poisonConstraintFailure(
     const fn_root = self.types.resolveVar(constraint.fn_var).var_;
     var found_owner = false;
     for (env.deferred_static_dispatch_constraints.items.items) |deferred| {
-        const owner_expr = deferredConstraintFailureExpr(deferred) orelse continue;
         if (self.types.resolveVar(deferred.var_).var_ != dispatcher_root) continue;
 
+        var owns_relation = false;
         for (self.types.sliceStaticDispatchConstraints(deferred.constraints)) |candidate| {
             if (!candidate.fn_name.eql(constraint.fn_name)) continue;
             if (self.types.resolveVar(candidate.fn_var).var_ != fn_root) continue;
+            owns_relation = true;
+            break;
+        }
+        if (!owns_relation) continue;
+
+        if (explicitDeferredConstraintFailureExpr(deferred)) |owner_expr| {
             try self.poisonConstraintFailureSource(dispatcher_var, constraint, owner_expr);
             found_owner = true;
-            break;
+        } else if (try self.poisonLiteralFailureOwners(deferred, constraint)) {
+            found_owner = true;
         }
     }
 
@@ -13031,7 +13184,7 @@ fn checkDef(self: *Self, def_idx: CIR.Def.Idx, env: *Env) std.mem.Allocator.Erro
         try self.setVarRank(def_var, env);
         try self.setVarRank(ptrn_var, env);
 
-        const def_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(def.pattern)) .match_branch else .bound;
+        const def_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(def.pattern)) .{ .match_branch = null } else .bound;
 
         // Check the pattern
         try self.checkPattern(def.pattern, def_pattern_ctx, env);
@@ -13568,7 +13721,7 @@ fn checkGroup(self: *Self, group_index: u32, env: *Env) std.mem.Allocator.Error!
             const member_def = self.cir.store.getDef(member_def_idx);
             try self.setVarRank(ModuleEnv.varFrom(member_def_idx), env);
             try self.setVarRank(ModuleEnv.varFrom(member_def.pattern), env);
-            const member_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(member_def.pattern)) .match_branch else .bound;
+            const member_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(member_def.pattern)) .{ .match_branch = null } else .bound;
             try self.checkPattern(member_def.pattern, member_pattern_ctx, env);
         }
 
@@ -13642,6 +13795,7 @@ fn checkGroup(self: *Self, group_index: u32, env: *Env) std.mem.Allocator.Error!
         }
         self.retireNonGeneralizedTypeSchemes(member_roots);
         try self.retireStructurallyPublishedTypeSchemeRequirements(member_roots, env);
+        try self.activateSchemeDeferredCodecConstraints(member_roots);
         try self.judgeAmbiguityCandidatesAtGeneralizationMultiRoot(member_roots);
         env.var_pool.popRank();
     }
@@ -16541,17 +16695,24 @@ const Polarity = enum { open, closed };
 /// The context that this pattern is being called in
 /// This determines if, for tag unions & records, they should be inferred
 /// as open or closed
-const PatternCtx = enum {
+const PatternCtx = union(enum) {
     bound,
     fn_arg,
     from_annotation,
     for_,
-    match_branch,
+    match_branch: ?CIR.Expr.Idx,
 
     fn toPolarity(self: PatternCtx) Polarity {
         return switch (self) {
             .bound, .fn_arg, .for_ => .closed,
             .from_annotation, .match_branch => .open,
+        };
+    }
+
+    fn failureExpr(self: PatternCtx) ?CIR.Expr.Idx {
+        return switch (self) {
+            .match_branch => |expr_idx| expr_idx,
+            .bound, .fn_arg, .from_annotation, .for_ => null,
         };
     }
 };
@@ -16601,7 +16762,13 @@ fn checkPatternHelp(
             // A literal pattern converts through from_quote and compares the
             // matched value against the converted constant, so the type also
             // needs equality.
-            const flex_var = try self.mkFlexWithFromQuoteConstraint(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_region, env);
+            const failure_expr = ctx.failureExpr();
+            const flex_var = try self.mkFlexWithFromQuoteConstraint(
+                ModuleEnv.nodeIdxFrom(pattern_idx),
+                pattern_region,
+                failure_expr,
+                env,
+            );
             _ = try self.unify(pattern_var, flex_var, env);
             try self.mkPatternLiteralEqConstraint(pattern_var, env, pattern_region);
         },
@@ -16895,12 +17062,12 @@ fn checkPatternHelp(
         },
         // nums //
         .num_from_numeral_literal => {
-            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, env);
+            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, ctx.failureExpr(), env);
         },
         .num_literal => |num| {
             switch (num.kind) {
                 // For unannotated literals, create a flex var with from_numeral constraint
-                .num_unbound, .int_unbound => try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, env),
+                .num_unbound, .int_unbound => try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, ctx.failureExpr(), env),
                 // Phase 5: For explicitly typed literals, use nominal types from Builtin
                 .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64, .u128, .i128, .f32, .f64, .dec => try self.unifyWith(pattern_var, try self.mkNumberTypeContent(num.kind), env),
             }
@@ -16918,7 +17085,7 @@ fn checkPatternHelp(
                 // Explicit suffix like `3.14dec` - use nominal Dec type
                 try self.unifyWith(pattern_var, try self.mkNumberTypeContent(.dec), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, ctx.failureExpr(), env);
             }
         },
         .small_dec_literal => |dec| {
@@ -16926,7 +17093,7 @@ fn checkPatternHelp(
                 // Explicit suffix - use nominal Dec type
                 try self.unifyWith(pattern_var, try self.mkNumberTypeContent(.dec), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(pattern_idx), pattern_var, pattern_region, .pattern, ctx.failureExpr(), env);
             }
         },
         .runtime_error => {
@@ -17638,6 +17805,10 @@ const ExprCheckFrame = struct {
                 &.{.{ .owner = self.expr_var_raw, .interface = self.expr_var }},
                 env,
             );
+            try checker.activateSchemeDeferredCodecConstraints(&.{.{
+                .owner = self.expr_var_raw,
+                .interface = self.expr_var,
+            }});
             // The scheme's vars froze at generalized rank: judge this def's
             // dispatch-constrained receivers now, while the judgment is a
             // local question about one scheme (see
@@ -17860,7 +18031,7 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
             } else {
                 // A plain literal converts to its target type through from_quote,
                 // defaulting to Str if nothing pins it.
-                const flex_var = try self.mkFlexWithFromQuoteConstraint(ModuleEnv.nodeIdxFrom(expr_idx), expr_region, env);
+                const flex_var = try self.mkFlexWithFromQuoteConstraint(ModuleEnv.nodeIdxFrom(expr_idx), expr_region, null, env);
                 if (self.cir.numericSuffixTargetForNode(ModuleEnv.nodeIdxFrom(expr_idx))) |suffix_target| {
                     // Explicit type suffix, e.g. `"foo".MyType`.
                     try self.unifyLiteralWithSuffixTarget(flex_var, suffix_target, expr_region, env);
@@ -17872,25 +18043,25 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
         .e_num => |num| {
             switch (num.kind) {
                 // For unannotated literals, create a flex var with from_numeral constraint
-                .num_unbound, .int_unbound => try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env),
+                .num_unbound, .int_unbound => try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env),
                 .u8, .i8, .u16, .i16, .u32, .i32, .u64, .i64, .u128, .i128, .f32, .f64, .dec => try self.unifyWith(expr_var, try self.mkNumberTypeContent(num.kind), env),
             }
         },
         .e_num_from_numeral => {
-            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
         },
         .e_frac_f32 => |frac| {
             if (frac.has_suffix) {
                 try self.unifyWith(expr_var, try self.mkNumberTypeContent(.f32), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
             }
         },
         .e_frac_f64 => |frac| {
             if (frac.has_suffix) {
                 try self.unifyWith(expr_var, try self.mkNumberTypeContent(.f64), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
             }
         },
         .e_dec => |frac| {
@@ -17900,7 +18071,7 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                 _ = try self.reportInvalidBuiltinFromNumeralInfo(expr_var, .dec, num_literal_info, env);
                 try self.unifyWith(expr_var, try self.mkNumberTypeContent(.dec), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
             }
         },
         .e_dec_small => |frac| {
@@ -17910,19 +18081,19 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                 _ = try self.reportInvalidBuiltinFromNumeralInfo(expr_var, .dec, num_literal_info, env);
                 try self.unifyWith(expr_var, try self.mkNumberTypeContent(.dec), env);
             } else {
-                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+                try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
             }
         },
         .e_typed_int => {
             // Typed integer literal like 123.U64
-            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
         },
         .e_typed_frac => {
             // Typed fractional literal like 3.14.Dec
-            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
         },
         .e_typed_num_from_numeral => {
-            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, env);
+            try self.checkNumeralLiteral(ModuleEnv.nodeIdxFrom(expr_idx), expr_var, expr_region, .expression, null, env);
         },
         // list //
         .e_empty_list => {
@@ -21062,7 +21233,7 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
                 const decl_fn_frame = decl_is_fn and !decl_predeclared;
                 if (decl_fn_frame) try env.var_pool.pushRank();
 
-                const decl_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(decl_stmt.pattern)) .match_branch else .bound;
+                const decl_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(decl_stmt.pattern)) .{ .match_branch = null } else .bound;
 
                 // Check the pattern
                 try self.checkPattern(decl_stmt.pattern, decl_pattern_ctx, env);
@@ -21154,6 +21325,10 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
                         &.{.{ .owner = decl_pattern_var, .interface = decl_pattern_var }},
                         env,
                     );
+                    try self.activateSchemeDeferredCodecConstraints(&.{.{
+                        .owner = decl_pattern_var,
+                        .interface = decl_pattern_var,
+                    }});
                     env.var_pool.popRank();
                 }
 
@@ -21173,7 +21348,7 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
             },
             .s_var => |var_stmt| {
                 self.markCurrentHoistRuntimeDependency();
-                const var_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(var_stmt.pattern_idx)) .match_branch else .bound;
+                const var_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(var_stmt.pattern_idx)) .{ .match_branch = null } else .bound;
 
                 // Check the pattern
                 try self.checkPattern(var_stmt.pattern_idx, var_pattern_ctx, env);
@@ -21218,7 +21393,7 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
             },
             .s_var_uninitialized => |var_stmt| {
                 self.markCurrentHoistRuntimeDependency();
-                const var_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(var_stmt.pattern_idx)) .match_branch else .bound;
+                const var_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(var_stmt.pattern_idx)) .{ .match_branch = null } else .bound;
 
                 try self.checkPattern(var_stmt.pattern_idx, var_pattern_ctx, env);
                 const var_pattern_var: Var = ModuleEnv.varFrom(var_stmt.pattern_idx);
@@ -21252,7 +21427,7 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
                 // The pattern occurrence itself must therefore always be
                 // checked here so its structural type and any fresh binders are
                 // established explicitly before we unify it with the RHS.
-                const reassign_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(reassign.pattern_idx)) .match_branch else .bound;
+                const reassign_pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(reassign.pattern_idx)) .{ .match_branch = null } else .bound;
                 try self.checkPattern(reassign.pattern_idx, reassign_pattern_ctx, env);
                 self.discardHoistBindingCandidate(reassign.pattern_idx);
 
@@ -21268,7 +21443,20 @@ fn checkBlockStatements(self: *Self, statements: CIR.Statement.Span, env: *Env, 
                 //
                 // TODO: if there's a mismatch here, the region of the error is
                 // the original assignment pattern, not the reassignment region
-                const reassign_pattern_result = try self.unify(reassign_pattern_var, reassign_expr_var, env);
+                const reassign_pattern_result = try self.unifyOwnedRelation(
+                    reassign_pattern_var,
+                    reassign_expr_var,
+                    env,
+                    .none,
+                    .construction,
+                );
+
+                if (reassign_pattern_result.isProblem() or
+                    self.types.resolveVar(reassign_expr_var).desc.content == .err)
+                {
+                    try self.erroneous_value_exprs.put(self.gpa, reassign.expr, {});
+                    try self.erroneous_reassignments.put(self.gpa, stmt_idx, reassign.expr);
+                }
 
                 _ = try self.unify(stmt_var, reassign_expr_var, env);
 
@@ -22346,7 +22534,7 @@ fn checkMatchExpr(
         // pattern unifications short-circuit rather than cascading.)
         for (first_branch_ptrn_idxs, 0..) |branch_ptrn_idx, cur_ptrn_index| {
             const branch_ptrn = self.cir.store.getMatchBranchPattern(branch_ptrn_idx);
-            try self.checkPattern(branch_ptrn.pattern, .match_branch, env);
+            try self.checkPattern(branch_ptrn.pattern, .{ .match_branch = expr_idx }, env);
 
             if (!cond_always_crashes) {
                 const branch_ptrn_var = ModuleEnv.varFrom(branch_ptrn.pattern);
@@ -22419,7 +22607,7 @@ fn checkMatchExpr(
         for (branch_ptrn_idxs, 0..) |branch_ptrn_idx, cur_ptrn_index| {
             // Check the pattern's sub types
             const branch_ptrn = self.cir.store.getMatchBranchPattern(branch_ptrn_idx);
-            try self.checkPattern(branch_ptrn.pattern, .match_branch, env);
+            try self.checkPattern(branch_ptrn.pattern, .{ .match_branch = expr_idx }, env);
 
             // Check the pattern against the cond
             if (!cond_always_crashes) {
@@ -22492,7 +22680,7 @@ fn checkMatchExpr(
                     for (other_branch_ptrn_idxs, 0..) |other_branch_ptrn_idx, other_cur_ptrn_index| {
                         // Check the pattern's sub types
                         const other_branch_ptrn = self.cir.store.getMatchBranchPattern(other_branch_ptrn_idx);
-                        try self.checkPattern(other_branch_ptrn.pattern, .match_branch, env);
+                        try self.checkPattern(other_branch_ptrn.pattern, .{ .match_branch = expr_idx }, env);
 
                         // Check the pattern against the cond
                         if (!cond_always_crashes) {
@@ -23397,7 +23585,7 @@ fn checkIteratorForLoop(
     var does_fx = false;
     const child_expected = expected.forStatement();
 
-    const pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(pattern)) .match_branch else .for_;
+    const pattern_ctx: PatternCtx = if (self.patternNeedsExhaustiveness(pattern)) .{ .match_branch = null } else .for_;
     try self.checkPattern(pattern, pattern_ctx, env);
     const item_var: Var = ModuleEnv.varFrom(pattern);
 
@@ -24021,6 +24209,7 @@ fn copyImportedBindingSchemeCodecRequirements(
             .receiver_var = receiver_var,
             .constraint = constraint,
             .deferred_generated_codec = true,
+            .pristine_codec_is_scheme_only = true,
             .failure_expr = null,
             .structural_origin = .{
                 .receiver_var = receiver_var,
@@ -24737,6 +24926,18 @@ fn poisonErroneousValueExprs(self: *Self) Allocator.Error!void {
             .region = self.cir.store.getExprRegion(expr_idx.*),
         } });
         try self.replaceExprWithRuntimeError(expr_idx.*, diagnostic_idx);
+    }
+
+    var reassignments = self.erroneous_reassignments.iterator();
+    while (reassignments.next()) |entry| {
+        const poisoned_expr = self.cir.store.getExpr(entry.value_ptr.*);
+        if (poisoned_expr != .e_runtime_error) {
+            if (@import("builtin").mode == .Debug) {
+                std.debug.panic("check invariant violated: rejected reassignment RHS was not poisoned", .{});
+            }
+            unreachable;
+        }
+        self.cir.store.replaceStatementWithRuntimeError(entry.key_ptr.*, poisoned_expr.e_runtime_error.diagnostic);
     }
 }
 
@@ -27121,21 +27322,30 @@ fn removeTypeSchemeAt(self: *Self, scheme_idx: usize) void {
     }
 }
 
+fn typeSchemeRequirementIndex(
+    self: *Self,
+    scheme_idx: usize,
+    receiver_var: Var,
+    constraint: StaticDispatchConstraint,
+) ?usize {
+    const receiver_root = self.types.resolveVar(receiver_var).var_;
+    const fn_root = self.types.resolveVar(constraint.fn_var).var_;
+    for (self.type_schemes.items[scheme_idx].dispatch_requirements.items, 0..) |existing, requirement_idx| {
+        if (self.types.resolveVar(existing.receiver_var).var_ != receiver_root) continue;
+        if (self.types.resolveVar(existing.constraint.fn_var).var_ != fn_root) continue;
+        if (!existing.constraint.fn_name.eql(constraint.fn_name)) continue;
+        return requirement_idx;
+    }
+    return null;
+}
+
 fn typeSchemeHasRequirement(
     self: *Self,
     scheme_idx: usize,
     receiver_var: Var,
     constraint: StaticDispatchConstraint,
 ) bool {
-    const receiver_root = self.types.resolveVar(receiver_var).var_;
-    const fn_root = self.types.resolveVar(constraint.fn_var).var_;
-    for (self.type_schemes.items[scheme_idx].dispatch_requirements.items) |existing| {
-        if (self.types.resolveVar(existing.receiver_var).var_ != receiver_root) continue;
-        if (self.types.resolveVar(existing.constraint.fn_var).var_ != fn_root) continue;
-        if (!existing.constraint.fn_name.eql(constraint.fn_name)) continue;
-        return true;
-    }
-    return false;
+    return self.typeSchemeRequirementIndex(scheme_idx, receiver_var, constraint) != null;
 }
 
 const GeneralizedSchemeRequirementKey = struct {
@@ -27309,7 +27519,11 @@ fn deduplicateGeneralizedDispatchRequirements(
     const scheme_idx = self.typeSchemeIndexForRoot(scheme_var) orelse return;
     if (self.type_schemes.items[scheme_idx].dispatch_requirements.items.len <= 1) return;
 
-    var seen = std.AutoHashMap(GeneralizedSchemeRequirementKey, Var).init(self.gpa);
+    const SeenRequirement = struct {
+        fn_var: Var,
+        write_index: usize,
+    };
+    var seen = std.AutoHashMap(GeneralizedSchemeRequirementKey, SeenRequirement).init(self.gpa);
     defer seen.deinit();
     try seen.ensureTotalCapacity(@intCast(self.type_schemes.items[scheme_idx].dispatch_requirements.items.len));
 
@@ -27334,11 +27548,19 @@ fn deduplicateGeneralizedDispatchRequirements(
         };
         const entry = seen.getOrPutAssumeCapacity(key);
         if (entry.found_existing) {
-            const same_callable = self.types.resolveVar(entry.value_ptr.*).var_ == self.types.resolveVar(requirement.constraint.fn_var).var_ or
-                try self.unifyEquivalentGeneralizedCallables(entry.value_ptr.*, requirement.constraint.fn_var, env);
-            if (same_callable) continue;
+            const same_callable = self.types.resolveVar(entry.value_ptr.fn_var).var_ == self.types.resolveVar(requirement.constraint.fn_var).var_ or
+                try self.unifyEquivalentGeneralizedCallables(entry.value_ptr.fn_var, requirement.constraint.fn_var, env);
+            if (same_callable) {
+                const retained = &self.type_schemes.items[scheme_idx].dispatch_requirements.items[entry.value_ptr.write_index];
+                retained.deferred_generated_codec = retained.deferred_generated_codec or requirement.deferred_generated_codec;
+                retained.pristine_codec_is_scheme_only = retained.pristine_codec_is_scheme_only or requirement.pristine_codec_is_scheme_only;
+                continue;
+            }
         } else {
-            entry.value_ptr.* = requirement.constraint.fn_var;
+            entry.value_ptr.* = .{
+                .fn_var = requirement.constraint.fn_var,
+                .write_index = write,
+            };
         }
         self.type_schemes.items[scheme_idx].dispatch_requirements.items[write] = requirement;
         write += 1;
@@ -27612,11 +27834,139 @@ fn retireNonGeneralizedTypeSchemes(self: *Self, roots: []const BoundaryRoot) voi
     }
 }
 
+/// Activate definition-side retirement only for schemes that survived the
+/// value-restriction classification. Capture records the fact while unresolved
+/// children are still flex; generalization turns those children rigid.
+fn activateSchemeDeferredCodecConstraints(
+    self: *Self,
+    roots: []const BoundaryRoot,
+) Allocator.Error!void {
+    for (roots) |root| {
+        const scheme_idx = self.typeSchemeIndexForRoot(root.owner) orelse continue;
+        for (self.type_schemes.items[scheme_idx].dispatch_requirements.items) |requirement| {
+            if (!requirement.pristine_codec_is_scheme_only) continue;
+            std.debug.assert(requirement.deferred_generated_codec);
+            const fn_root = self.types.resolveVar(requirement.constraint.fn_var).var_;
+            try self.scheme_deferred_codec_constraint_fns.put(self.gpa, fn_root, {});
+        }
+    }
+}
+
+fn schemeDefersGeneratedCodecConstraint(self: *const Self, fn_var: Var) bool {
+    return self.scheme_deferred_codec_constraint_fns.contains(self.types.resolveVar(fn_var).var_);
+}
+
+/// Whether this still-live relation is waiting on a generated codec whose
+/// structural receiver contains unresolved type variables. If those variables
+/// escape through the owning definition's interface, the relation belongs in
+/// that definition's scheme and will be validated independently at each use.
+fn schemeCandidateUsesGeneratedCodec(
+    self: *Self,
+    candidate: SchemeRequirementCandidate,
+) bool {
+    const is_codec = candidate.constraint.fn_name.eql(self.cir.idents.parser_for) or
+        candidate.constraint.fn_name.eql(self.cir.idents.encoder_for);
+    if (!is_codec) return false;
+
+    const resolved = self.types.resolveVar(candidate.receiver_var);
+    return switch (resolved.desc.content) {
+        .structure => |structure| switch (structure) {
+            .nominal_type => |nominal| blk: {
+                const original_env, _ = self.ownerEnvForOriginModule(
+                    nominal.origin_module,
+                    nominal.sourceDeclOptional(),
+                    nominal.originIsBuiltin(),
+                    "scheme generated codec nominal",
+                );
+                const method = self.lookupStaticDispatchMethodBinding(
+                    original_env,
+                    nominal.sourceDeclOptional(),
+                    self.cir,
+                    candidate.constraint.fn_name,
+                ) orelse break :blk false;
+                break :blk staticDispatchBindingIsDerivedMarker(method);
+            },
+            .record,
+            .record_unbound,
+            .tuple,
+            .tag_union,
+            .empty_record,
+            .empty_tag_union,
+            => true,
+            .fn_pure, .fn_effectful, .fn_unbound => false,
+        },
+        .alias => |alias| blk: {
+            const original_env, _ = self.ownerEnvForOriginModule(
+                alias.origin_module,
+                alias.source_decl.toOptional(),
+                alias.source_decl.originIsBuiltin(),
+                "scheme generated codec alias",
+            );
+            const method = self.lookupStaticDispatchMethodBinding(
+                original_env,
+                alias.source_decl.toOptional(),
+                self.cir,
+                candidate.constraint.fn_name,
+            );
+            break :blk method == null or staticDispatchBindingIsDerivedMarker(method.?);
+        },
+        .flex, .rigid, .field_presence, .err => false,
+    };
+}
+
+fn schemeCodecReceiverHasOpenOuterRow(self: *Self, root: Var) bool {
+    var current = root;
+    while (true) {
+        const content = self.types.resolveVar(current).desc.content;
+        switch (content) {
+            .alias => |alias| current = self.types.getAliasBackingVar(alias),
+            .structure => |structure| switch (structure) {
+                .record => |record| return self.types.resolveVar(record.ext).desc.content == .flex,
+                .tag_union => |tag_union| return self.types.resolveVar(tag_union.ext).desc.content == .flex,
+                .record_unbound,
+                .tuple,
+                .nominal_type,
+                .empty_record,
+                .empty_tag_union,
+                .fn_pure,
+                .fn_effectful,
+                .fn_unbound,
+                => return false,
+            },
+            .flex, .rigid, .field_presence, .err => return false,
+        }
+    }
+}
+
+fn schemeCandidateIsUnresolvedGeneratedCodec(
+    self: *Self,
+    candidate: SchemeRequirementCandidate,
+    env: *Env,
+) Allocator.Error!bool {
+    if (self.settled_static_dispatch_constraint_fns.contains(candidate.constraint.fn_var) or
+        self.staticDispatchConstraintIsInactive(candidate.constraint))
+    {
+        return false;
+    }
+    if (!self.schemeCandidateUsesGeneratedCodec(candidate)) return false;
+
+    const region = self.getRegionAt(candidate.receiver_var);
+    const support = if (candidate.constraint.fn_name.eql(self.cir.idents.parser_for)) blk: {
+        break :blk try self.varSupportsDerivedParseShape(candidate.receiver_var, env, region);
+    } else if (candidate.constraint.fn_name.eql(self.cir.idents.encoder_for)) blk: {
+        const encoding_var = self.encoderForConstraintEncodingVar(candidate.constraint) orelse return false;
+        break :blk try self.varSupportsDerivedEncodeShape(candidate.receiver_var, encoding_var, env, region);
+    } else return false;
+
+    return support == .unresolved and
+        !self.schemeCodecReceiverHasOpenOuterRow(candidate.receiver_var);
+}
+
 /// Move every still-open dispatch relation owned by this generalization
 /// boundary into its explicit scheme. Ordinary relations need the side table
 /// while their receiver belongs to an outer rank. A generated codec relation
-/// also needs it when any part of its concrete receiver escapes, because the
-/// relation is deliberately validated only after source checking has finished.
+/// also needs it when any part of its structural receiver escapes, because the
+/// relation is validated independently after each instantiation settles.
 /// Captured and dropped candidates are removed immediately, so later
 /// boundaries never rescan completed sites; only rank-undecided candidates
 /// stay owned until the capture after generalization.
@@ -27655,14 +28005,16 @@ fn captureSchemeDispatchRequirements(
             // needs an explicit entry is decided here and never reconstructed
             // at a later enclosing boundary.
             const receiver = self.types.resolveVar(candidate.receiver_var);
-            const final_codec = candidate.deferred_generated_codec or
-                self.final_codec_dispatch_constraint_fns.contains(candidate.constraint.fn_var);
-            const needs_explicit_requirement = if (final_codec) blk: {
-                // Unlike an unresolved flex relation, a concrete generated
-                // codec no longer lives on its receiver descriptor. Preserve
-                // it explicitly when any part of the receiver escapes through
-                // this scheme. That shared component is exactly where a later
-                // use can add a nominal layer before final validation.
+            const final_codec = self.final_codec_dispatch_constraint_fns.contains(candidate.constraint.fn_var);
+            const unresolved_codec = !final_codec and
+                try self.schemeCandidateIsUnresolvedGeneratedCodec(candidate, env);
+            const scheme_codec = candidate.deferred_generated_codec or final_codec or unresolved_codec;
+            const needs_explicit_requirement = if (scheme_codec) blk: {
+                // A generated codec on a structural receiver does not live on
+                // that receiver's descriptor. Preserve it explicitly when any
+                // part of the receiver escapes through this scheme. That shared
+                // component is exactly where a later use can refine the shape
+                // before final validation.
                 if (!interface_reachable_collected) {
                     self.var_set.clearRetainingCapacity();
                     try self.collectReachableVars(root.interface, &self.var_set);
@@ -27705,13 +28057,19 @@ fn captureSchemeDispatchRequirements(
             // Empty schemes have no semantic meaning and only add hot-path
             // lookup state.
             const scheme_idx = if (self.typeSchemeIndexForRoot(root.owner)) |existing_scheme_idx| blk: {
-                if (self.typeSchemeHasRequirement(existing_scheme_idx, candidate.receiver_var, candidate.constraint)) continue;
+                if (self.typeSchemeRequirementIndex(existing_scheme_idx, candidate.receiver_var, candidate.constraint)) |requirement_idx| {
+                    const existing = &self.type_schemes.items[existing_scheme_idx].dispatch_requirements.items[requirement_idx];
+                    existing.deferred_generated_codec = existing.deferred_generated_codec or scheme_codec;
+                    existing.pristine_codec_is_scheme_only = existing.pristine_codec_is_scheme_only or unresolved_codec;
+                    continue;
+                }
                 break :blk existing_scheme_idx;
             } else try self.ensureTypeScheme(root.owner, rank);
             try self.type_schemes.items[scheme_idx].dispatch_requirements.append(self.gpa, .{
                 .receiver_var = candidate.receiver_var,
                 .constraint = candidate.constraint,
-                .deferred_generated_codec = final_codec,
+                .deferred_generated_codec = scheme_codec,
+                .pristine_codec_is_scheme_only = unresolved_codec,
                 .failure_expr = candidate.failure_expr,
                 .structural_origin = candidate.structural_origin,
             });
@@ -27998,6 +28356,7 @@ fn checkGroundedStoredTypeSchemeRequirementsAtFinalization(
         var appended = false;
         for (self.type_schemes.items) |scheme| {
             for (scheme.dispatch_requirements.items) |requirement| {
+                if (requirement.pristine_codec_is_scheme_only) continue;
                 if (self.settled_static_dispatch_constraint_fns.contains(requirement.constraint.fn_var) or
                     self.staticDispatchConstraintIsInactive(requirement.constraint))
                 {
@@ -30445,7 +30804,14 @@ fn recordSettledDeferredDispatchRelation(
 ) Allocator.Error!void {
     if (self.commit_probe_active) return;
     for (self.types.sliceStaticDispatchConstraints(deferred.constraints)) |constraint| {
-        if (self.final_codec_dispatch_constraint_fns.contains(constraint.fn_var)) continue;
+        const generated_codec = constraint.fn_name.eql(self.cir.idents.parser_for) or
+            constraint.fn_name.eql(self.cir.idents.encoder_for);
+        if (generated_codec and
+            (self.final_codec_dispatch_constraint_fns.contains(constraint.fn_var) or
+                self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)))
+        {
+            continue;
+        }
         try self.settled_static_dispatch_constraint_fns.put(self.gpa, constraint.fn_var, {});
     }
 }
@@ -30515,9 +30881,18 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
     while (deferred_constraint_index < env.deferred_static_dispatch_constraints.items.items.len) : (deferred_constraint_index += 1) {
         const deferred_constraint = env.deferred_static_dispatch_constraints.items.items[deferred_constraint_index];
         const retained_top = self.scratch_deferred_static_dispatch_constraints.top();
-        const failure_expr = deferredConstraintFailureExpr(deferred_constraint);
+        const failure_expr = explicitDeferredConstraintFailureExpr(deferred_constraint);
         const deferred_children_start = env.deferred_static_dispatch_constraints.items.items.len;
-        defer inheritDeferredConstraintFailureExpr(env, deferred_children_start, deferred_constraint.failure_expr);
+        defer {
+            if (env.deferred_static_dispatch_constraints.items.items.len > deferred_children_start) {
+                const child_failure_expr = self.deferredConstraintFailureExpr(deferred_constraint);
+                inheritDeferredConstraintFailureExpr(
+                    env,
+                    deferred_children_start,
+                    if (child_failure_expr) |expr_idx| .from(@intFromEnum(expr_idx)) else .none,
+                );
+            }
+        }
 
         const dispatcher_resolved = self.types.resolveVar(deferred_constraint.var_);
         const dispatcher_content = dispatcher_resolved.desc.content;
@@ -30708,7 +31083,12 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                     if (staticDispatchBindingIsDerivedMarker(method_lookup)) {
                         if (constraint.fn_name.eql(self.cir.idents.is_eq)) {
                             if (!try self.nominalSupportsStructuralDerive(nominal_type, .equality)) {
-                                try self.reportEqualityError(deferred_constraint.var_, constraint, env);
+                                try self.reportEqualityError(
+                                    deferred_constraint.var_,
+                                    constraint,
+                                    env,
+                                    failure_expr,
+                                );
                                 continue;
                             }
                             try self.satisfyDerivedIsEqConstraint(
@@ -30741,6 +31121,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                             continue;
                         }
                         if (constraint.fn_name.eql(self.cir.idents.parser_for)) {
+                            if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                             switch (try self.nominalSupportsDerivedParseShape(nominal_type, env, region)) {
                                 .supported => if (!try self.deferGeneratedCodecConstraintToFinalization(deferred_constraint, constraint)) {
                                     try self.satisfyImplicitParserConstraint(
@@ -30767,6 +31148,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                             continue;
                         }
                         if (constraint.fn_name.eql(self.cir.idents.encoder_for)) {
+                            if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                             const encoding_var = self.encoderForConstraintEncodingVar(constraint) orelse {
                                 try self.reportConstraintError(
                                     deferred_constraint.var_,
@@ -31068,6 +31450,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                                     deferred_constraint.var_,
                                     constraint,
                                     env,
+                                    failure_expr,
                                 );
                             }
                             continue;
@@ -31103,6 +31486,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                         }
                     }
                     if (constraint.fn_name.eql(self.cir.idents.parser_for)) {
+                        if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                         const method_lookup = self.lookupStaticDispatchMethodBinding(
                             original_env,
                             alias.source_decl.toOptional(),
@@ -31134,6 +31518,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                         }
                     }
                     if (constraint.fn_name.eql(self.cir.idents.encoder_for)) {
+                        if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                         const method_lookup = self.lookupStaticDispatchMethodBinding(
                             original_env,
                             alias.source_decl.toOptional(),
@@ -31365,6 +31750,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                                 deferred_constraint.var_,
                                 constraint,
                                 env,
+                                failure_expr,
                             );
                         }
                     } else if (constraint.fn_name.eql(self.cir.idents.to_hash)) {
@@ -31405,6 +31791,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                             ),
                         }
                     } else if (constraint.fn_name.eql(self.cir.idents.parser_for)) {
+                        if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                         const region = self.getRegionAt(deferred_constraint.var_);
                         switch (try self.typeSupportsDerivedParse(dispatcher_content.structure, env, region)) {
                             .supported => {
@@ -31456,6 +31843,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                             },
                         }
                     } else if (constraint.fn_name.eql(self.cir.idents.encoder_for)) {
+                        if (self.schemeDefersGeneratedCodecConstraint(constraint.fn_var)) continue;
                         const region = self.getRegionAt(deferred_constraint.var_);
                         const encoding_var = self.encoderForConstraintEncodingVar(constraint) orelse {
                             try self.reportConstraintError(
@@ -31549,6 +31937,7 @@ fn checkStaticDispatchConstraints(self: *Self, env: *Env, is_numeric_default_pas
                                 deferred_constraint.var_,
                                 constraint,
                                 env,
+                                failure_expr,
                             );
                         } else {
                             try self.reportConstraintError(
@@ -38953,14 +39342,17 @@ fn markStaticDispatchFnRejected(self: *Self, fn_var: Var) Allocator.Error!void {
 fn quoteLiteralRegionForDispatcher(self: *Self, constraint: StaticDispatchConstraint, dispatcher_var: Var) ?Region {
     const kind = constraint.origin.literalKind() orelse return null;
     if (kind != .quote) return null;
-    const resolved_dispatcher = self.types.resolveVar(dispatcher_var).var_;
-    for (self.cir.store.literalDispatchPlans()) |plan| {
-        if (plan.dispatchKind() != .quote) continue;
-        const target: Var = @enumFromInt(plan.target_var);
-        if (self.types.resolveVar(target).var_ != resolved_dispatcher) continue;
-        return self.cir.store.getNodeRegion(@enumFromInt(plan.node_idx));
-    }
-    return null;
+    const dispatcher_root = self.types.resolveVar(dispatcher_var).var_;
+    const plan = self.matchingLiteralDispatchPlan(
+        self.cir.store.literalDispatchPlans(),
+        kind,
+        dispatcher_root,
+    ) orelse self.matchingLiteralDispatchPlan(
+        self.retired_literal_dispatch_plans.items,
+        kind,
+        dispatcher_root,
+    ) orelse return null;
+    return self.cir.store.getNodeRegion(@enumFromInt(plan.node_idx));
 }
 
 const ReportedConstraintError = struct {
@@ -39054,6 +39446,7 @@ fn reportEqualityError(
     dispatcher_var: Var,
     constraint: StaticDispatchConstraint,
     env: *Env,
+    failure_expr: ?CIR.Expr.Idx,
 ) Allocator.Error!void {
     const snapshot = try self.snapshots.snapshotVarForError(self.types, &self.type_writer, dispatcher_var);
     const equality_problem = problem.Problem{ .static_dispatch = .{
@@ -39065,7 +39458,7 @@ fn reportEqualityError(
     } };
     _ = try self.problems.appendProblem(self.cir.gpa, equality_problem);
 
-    try self.poisonConstraintFailure(dispatcher_var, constraint, env, null);
+    try self.poisonConstraintFailure(dispatcher_var, constraint, env, failure_expr);
     try self.markStaticDispatchRejected(constraint);
 }
 

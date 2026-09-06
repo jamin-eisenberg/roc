@@ -2844,6 +2844,22 @@ Every live literal-origin record leaves checking with one explicit resolution:
   callable, runtime dispatch plan, or compile-time root for it; the containing
   checked `runtime_error` expression is the failure.
 
+Literal-pattern deferred static-dispatch constraint groups are owned by the
+enclosing match. The checker passes that owner through recursive pattern
+checking and records it in the literal node's checked dispatch plan at
+creation. When the literal's deferred conversion-and-equality group is
+processed, the conversion constraint's raw callable identity selects its exact
+plan and therefore the group's failure owner. If unification merged equivalent
+literal relations, the failure path uses the merged callable class to enumerate
+every explicit occurrence plan and invalidates every owner; a receiver root by
+itself is never an occurrence identity. If either constraint is rejected,
+diagnostic recovery replaces the whole match with the checked `runtime_error`;
+a reachable `checked_error` literal pattern may not enter a checked body. A
+later scheme instantiation still owns failure of its copied static-dispatch
+constraint at the use expression. Ownership is explicit producer data and must
+not be reconstructed from pattern structure. The plan packs its kind and
+resolution into one word, so recording the owner does not increase plan size.
+
 `unresolved` is construction-only and may not cross the checked boundary.
 Checking finalizes each live record exactly once after constraint solving;
 diagnostic recovery either retires the record with its owner or seals it as
@@ -4110,6 +4126,29 @@ producer-aware value relation. It never merges the child into the corresponding
 public slot or asks a later consumer to recover the child's runtime
 representation from the public container shape.
 
+`Iter.custom` marks its exact transition-function request with the capability
+to propagate constructor-carried representation evidence. That capability is
+consumed directly while lowering the transition and inherited by its nested
+body contexts; ordinary call and control-flow lowering do not infer it from a
+function's graph shape. The seed call and the marked transition may therefore
+carry a private threaded-state component through tuples, records, tags, lists,
+and nominal backings without making constructor inspection global to unrelated
+calls. If a control-flow prepass cannot see a private result before emission,
+the first exact private branch upgrades the selection and all already-emitted
+inhabited branches are retagged with that validated selection before the
+control-flow expression is finalized.
+
+Call specialization and control-flow result selection consume that same exact
+constructor witness where the producer granted the capability. They propagate
+producer evidence by the constructor's explicit field, payload, item, or
+backing positions; equal checked type identities elsewhere do not participate.
+In particular,
+`Iter.custom` binds the transition callable's input state and successful
+next-state result to the seed's exact witness. An iterator stored in custom
+state therefore keeps one representation through the initial seed, each
+transition result, and the next call, without crossing the public recursive
+`Iter` boundary between steps.
+
 Each generated-private request also retains its exact checked-source function
 node. That source node can itself contain upstream private arguments, so a
 callee relates its fresh checked root to the source through opaque interface
@@ -5073,7 +5112,20 @@ requirement and empties the checker-local scheme index, so no import can observe
 a root type after such a requirement was silently discarded. A successfully
 validated generated-codec requirement is different: its current concrete shape
 can still change when a downstream use substitutes a nested generalized
-variable. Checking serializes that exact receiver and callable relation in a
+variable. A generated-codec receiver can also be structurally known while one
+of its components is still a scheme variable. When the receiver shares type
+variables with the owning binding's interface, capture records the same exact
+receiver and callable relation before generalization. Only after the binding is
+classified as a scheme does the definition-side worklist entry retire; every
+instantiation copies the structural receiver and validates the resulting codec
+independently. An unresolved outer record or tag extension is not a component
+scheme variable: its definition-side worklist entry remains active so
+quiescence closes or rejects the open row before generalization. A value-restricted
+binding retains its original worklist entry
+and therefore cannot use provisional capture to suppress an error. An imported
+or rehydrated pristine relation is likewise a scheme template rather than a new
+use-site requirement; only its instantiated copies are validated in that
+checker. Checking serializes each surviving receiver and callable relation in a
 node-sorted binding-scheme side table, referencing the constraint already stored
 in the module's TypeStore and carrying the scheme root that groups all source
 aliases. Import copying copies the binding root, codec receiver, and callable
@@ -5116,7 +5168,10 @@ multi-hop and transitively copied chains, repeated transitive helper uses, and
 results carried through the definition's return type; every pair has two uses
 at different result item types and asserts identical inferred types. Recursive
 SCC and source-forward annotated recursive definitions have the same two-use
-principality pins.
+principality pins. Generic structural codec pins cover direct, transitive, and
+cross-module encoder schemes, a parser whose inferred record components
+specialize at its use site, and a value-restricted copy that settles from a
+later use; the issue 10949 snapshot pins the original direct encoder case.
 A retirement regression proves later uses do not replay a discharged missing
 method, and a shared pending requirement produces exactly one diagnostic
 across multiple uses. The generated principality test checks the complete
@@ -9888,6 +9943,25 @@ Each explicit RC statement carries the concrete RC helper selected by ARC.
 Backends, the interpreter, and LirImage builders follow those statements
 mechanically. The ARC algorithm is specified in ARC Borrow Inference below.
 
+### Record Component Bindings
+
+The direct solved-to-LIR builder keeps by-value record bindings as persistent
+field-value trees while lowering a lexical block. Leaves are fresh LIR locals
+whose expressions execute at the original binding, including fields later
+overwritten or unused. This preserves effects, failure, divergence, and
+snapshot order. Record versions share unchanged component-tree nodes; an update
+copies only the tree paths to changed fields, and field reads select those evaluated locals.
+Field names map to committed field indices once per type in the procedure.
+A whole-value use requests one materialization at the original binding; it does
+not rebuild the record at each consumer. Boxed representations remain explicit
+materialized values. Component trees are builder scratch, not another stored IR.
+Their depth is logarithmic in field count, independent of update-chain length.
+The existing unique erased-result component demand follows these bindings back
+to the evaluated field producer, using the same ambiguity and repeatable-region
+rules as ordinary local return forwarding. Layout padding is excluded through
+its explicit committed padding marker, not by comparing layout and type field
+counts.
+
 ### Join-Parameter Scalarization
 
 Between direct LIR lowering and ARC insertion, one normalization splits
@@ -9910,6 +9984,15 @@ iterates so nested wrappers dissolve. A struct parameter carrying a Boxy
 descriptor also remains unsplit: scalarization may not replace its `assign_ref`
 field reads with local aliases unless it also introduces and initializes a
 matching descriptor parameter for every resulting field local.
+
+Alias transparency is solved along explicit source dependencies. Every opaque
+alias contributes a whole-value use before propagation starts, each transparent
+alias can be demoted once, and equivalent alias roots share already resolved paths.
+Reverse alias edges are intrusive links in the alias-definition table, so
+closure queries visit their own members without allocating a list per alias.
+Independent ordinary constructor eliminations share one analysis and edge
+patching traversal. Their dependencies used as constructor operands remain
+whole-value uses until the next analysis; join ABI changes require fresh data.
 
 Alias transparency is a monotone dataflow calculation. A worklist propagates
 whole-value uses backward along alias edges, demoting each candidate once.
@@ -11032,7 +11115,8 @@ whole.
 A container qualifies for dismantling when all of the following hold:
 
 - its committed layout is a struct containing at least one refcounted field
-- its binding is owned, bound exactly once, and is not a join parameter
+- its binding is owned and bound exactly once, or is a join parameter whose
+  definitions are explicit `initialize_join_param` writes
 - every occurrence of it is a field read (directly or through a borrowed
   pure same-value alias whose own occurrences are all field reads) or an
   operand-position whole use: moved into an aggregate or a call, returned,
@@ -11046,6 +11130,21 @@ arguments select. Dismantle analysis outputs the exact per-procedure `u16`
 parameter-benefit mask consumed by variant admission; the caller does not
 rediscover the benefit from field reads or uniqueness checks. The base emission
 keeps the borrowed schedule untouched.
+Admission of those mandatory owned variants uses the same definition-sensitive
+ownership-place query as complete payload transfers: scalar shell reads and
+uses after an explicit rebind do not retain the argument's old stored units.
+A terminal crash or failed expectation observes only its explicit message
+operand; it does not implicitly use every live ownership place.
+
+Each reachable `initialize_join_param` write defines a fresh container value.
+Dismantle analysis starts field-take flow at every such write's successor,
+with all fields available. A later write first checks its value operand against
+the previous definition's take state, then starts the new definition with all
+fields available. This includes loop back edges: the join cell has no global
+incoming ownership origin, and each explicit write supplies its own intact unit.
+A prospective take that reaches `loop_continue` or `loop_break` is rejected
+because the implicit boundary keeps the join definition live. Join cells with
+no explicit initializer or with any other kind of definition remain ineligible.
 
 Ownership-complete aggregate reads extend that schedule across wrappers without
 scalarizing them. An aggregate read is ownership-complete when, for the
@@ -11059,6 +11158,23 @@ no layout shape is treated as evidence that a variant is active.
 Ownership-complete aggregate reads and borrowed pure aliases form explicit
 ownership places. The place graph is solved to a fixpoint, so a nested read
 chain such as tag payload to struct field keeps the root aggregate's unit key.
+When one ownership place is read repeatedly by ownership-complete struct-field
+or tag-payload reads along a single control-flow path, dismantle analysis
+chooses the earliest same-root, same-layout read that dominates each later read
+and rewrites those later reads as explicit local aliases before ARC solving.
+Dominance is computed once from the explicit statement-successor graph with a
+synthetic entry for all procedure roots. Immediate dominators settle in reverse
+postorder, and dominator-tree intervals answer field-read and tag-payload-read
+dominance queries without re-walking procedure bodies. Read comparisons are indexed by their
+explicit ownership root rather than scanning unrelated locals.
+Divergent reads remain separate places. This canonicalization is justified only
+by the committed field or tag-payload operation and explicit CFG dominance; it
+never equates layouts or values heuristically. A borrowed struct produced by
+such a read whose complete root can own in the current emission may then
+receive that root unit and dismantle its own committed fields exactly like a
+directly owned struct. Both the transfer into the projected container and every
+later alias are present in LIR, so certification does not depend on the
+dismantle side table.
 If the final read result binds owned, that read moves the unit only when the
 root unit is present and the ownership place has no later RC-bearing use on
 that path; otherwise it retains exactly as an ordinary read would. An operand
@@ -11070,6 +11186,10 @@ allocation without holding a unit of their own. Owned bindings hold their own
 retained unit and are their own leaders, so their later uses never keep the
 place live; binding an owned pure alias of a member does count as a use,
 because that bind retains through the place. This use
+query follows the explicit borrow-source chain through every alias and payload
+read to the nearest binding made owned by the current ARC variant. Descendants
+of that binding belong to its new place, not its former lender's place.
+The use
 query is definition-sensitive: a `set_local` that writes the root ends the
 current place definition after its value operand is read. Uses reached through
 the following jump belong to the newly written join value and cannot keep the
@@ -11153,7 +11273,15 @@ Without that variant the caller must manufacture a second unit, which changes
 the runtime ownership schedule rather than merely foregoing optional inlining
 or uniqueness seeding.
 
-Which consuming reads become takes is decided per field by a forward
+An owned read that has a later observation of the same stored field before
+reinitialization or an explicit outcome receipt keeps its ordinary retain.
+This does not prevent a later read from taking the field: an early read passed
+to an owned lookup can retain and release its own unit before a final mutation
+takes the container's unit. Candidate selection proves the absence of later
+observations over the explicit CFG, including borrowed descendants and whole
+container uses; it never guesses from operation names.
+
+Which remaining consuming reads become takes is decided per field by a forward
 dataflow from the container's definition over the control-flow graph,
 tracking for each refcounted field whether it may and whether it must have
 been taken on the paths reaching each point. A consuming read is a take only
@@ -11169,8 +11297,9 @@ lent from it). Every operand mention of any of those bindings is therefore a
 borrow observation of the field at that statement, so a take the mention
 could follow is rejected exactly like a borrowing read placed there. An explicit outcome field
 receipt changes the matching edge state from taken back to available before
-that edge is walked; this is the only transition that can clear a
-`may-taken` bit. Merges meet pointwise, and a loop poisons its own takes: a
+that edge is walked. An explicit join-cell reinitialization starts a new
+definition after observing its value operand and clears that definition's
+take state. Merges meet pointwise, and a loop poisons its own takes: a
 take inside one reaches itself as possibly-taken unless an exact receipt
 dominates every repeated entry. Exclusive branches may leave different
 residual masks; the ARC join equations below normalize their exact

@@ -3553,7 +3553,7 @@ test "lambda solved compact record updates relate only unchanged field represent
         .{ .name = a, .ty = u8_ty, .default = null },
         .{ .name = b, .ty = u16_ty, .default = null },
     }) });
-    const local = try lifted.addLocal(@enumFromInt(0), base_ty);
+    const local = try lifted.addLocal(@enumFromInt(@as(u32, @intCast(lifted.localsView().len))), base_ty);
     const base = try lifted.addExpr(.{ .ty = base_ty, .data = .{ .local = local } });
     const value = try lifted.addExpr(.{ .ty = u16_ty, .data = .{ .int_lit = .{ .bytes = @bitCast(@as(i128, 256)), .kind = .i128 } } });
     const update = try lifted.addExpr(.{ .ty = result_ty, .data = .{ .record_update = .{
