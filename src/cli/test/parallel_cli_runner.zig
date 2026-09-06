@@ -833,6 +833,9 @@ const all_syntax_expected_stderr =
 ;
 
 const echo_cases = [_]CliCase{
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = "first\nsecond\nold:0\nnew:0\nold\nold\nunused\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = "first\nsecond\nold:0\nnew:0\nold\nold\nunused\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = "first\nsecond\nold:0\nnew:0\nold\nold\nunused\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: hello (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/hello.roc", .stdout_exact = "Hello, World!" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: hello (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/hello.roc", .stdout_exact = "Hello, World!" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: consecutive raw writes (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/multi.roc", .stdout_exact = "Hello, World!" } } },
