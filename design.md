@@ -2783,6 +2783,26 @@ defaulted at a generalization boundary that narrows the definition's inferred
 type reports `LITERAL DEFAULTED` as a warning, not an error, worded per
 literal kind.
 
+Operators intentionally add type constraints beyond their corresponding method
+calls. `a == b` requires `a` and `b` to have the same type and `is_eq` to return
+`Bool`; `a != b` has the same requirements and negates that Boolean result.
+Likewise, `<`, `<=`, `>`, and `>=` require equal operand types and a `Bool`
+result, calling `is_lt`, `is_lte`, `is_gt`, and `is_gte`, respectively.
+Arithmetic operators instead require the result to have the receiver's type;
+the other operand may differ, as in `Duration * I64 -> Duration`.
+
+These contracts let inference propagate information before a method has been
+selected. Either comparison operand can determine the other's type; an
+arithmetic result annotation can determine the receiver's type. A plain method
+call cannot assume these relationships: its selected method may accept a
+different argument type or return a different type. Thus `|a, b| a == b`
+infers `c, c -> Bool where [c.is_eq : c, c -> Bool]`, whereas
+`|a, b| a.is_eq(b)` infers `c, d -> e where [c.is_eq : c, d -> e]`.
+Restricting comparison results to `Bool` also keeps inferred signatures simple;
+ordinary `a.is_eq(b).not()` can require two methods with independently inferred
+result types. Replacing operators with unrestricted method-call sugar would
+change these intentional typing rules.
+
 A where alias (`a.Sortable : where [...]`) is a source-level abbreviation for a
 set of method constraints, not a type. Its declaration solves to its receiver: a
 rigid variable carrying the constraints it names. A signature that references
@@ -5089,17 +5109,27 @@ When later unification grounds one, it receives its one deferred-queue
 transition. Processing an entry may append further entries, and validation
 continues until there is no new entry or newly grounded pending requirement.
 
-Dispatch-cycle termination is structural, with two rules. Target selection is
-rejected as recursive dispatch when it repeats an exact solver state along
-its own derivation lineage—the same alpha-normalized receiver plus callable
-digest with the same exact method binding—or when it re-enters an ancestor
-edge's exact binding with a settled receiver that strictly structurally
+Dispatch-cycle termination is structural. An exact repeated solver state along
+its derivation lineage—the same alpha-normalized receiver plus callable digest
+and exact method binding—can close a recursive implementation when its receiver
+and callable are concrete and the target's evidence parameters are all reachable
+from its callable. The edge reuses the ancestor's selected method instance; it
+does not instantiate another copy of the same requirements. Checking records
+this recursive target explicitly, and CheckedModule construction emits a finite
+callable-based evidence recipe. The ancestor's other requirements must still
+check successfully.
+This admits ordinary recursive equality without making acceptance depend on
+which operand first identifies the named type. A repeated state that still needs
+type inference, or needs evidence not determined by its callable, remains a
+recursive-dispatch error. Target selection is also rejected when it re-enters an
+ancestor edge's exact binding with a settled receiver that strictly structurally
 contains that ancestor's settled receiver. Every child constraint minted by
 selecting a target records its parent edge, so the parent graph is
 lineage-complete and acyclic by construction: a child is provably fresh at
 record time. The dispatch worklists carry no numeric give-up bounds; they
-terminate because the two rules keep fresh edges finite while every latched
-fixpoint—deferred re-defers, pending scheme requirements, stored finalization
+terminate because closing or rejecting repeated states and rejecting growth
+keeps fresh edges finite while every latched fixpoint—deferred re-defers,
+pending scheme requirements, stored finalization
 relations—consumes a monotone resource, each relation grounding at most once
 and taking at most one enqueue. Graph instantiation runs on an explicit heap
 worklist whose cycles terminate through the substitution map, so it carries no
@@ -5129,7 +5159,8 @@ acquire that lineage. Before selecting a target for a derived child, the
 checker computes an alpha-normalized digest of the receiver plus callable
 relation and compares it with the child's ancestor chain. Reaching the same
 digest, method name, owner environment, and exact method binding is the same
-solver state and is rejected as recursive dispatch; a chain whose concrete
+solver state: it closes the concrete callable recursion described above, or is
+rejected as recursive dispatch; a chain whose concrete
 type structure changes has a different digest and continues unless the
 growth rule catches it re-entering the same exact binding with a strictly
 grown settled receiver. Rejection settles only that cyclic relation and
@@ -6341,6 +6372,12 @@ Other solved-graph mutations:
   deferred static-dispatch worklist. Retirement reads the explicit structural
   origin and checked scheme-use substitution produced by those operations;
   there is no rank rewrite, structural ownership probe, or graph restamp.
+- `closeConcreteRecursiveDispatch`—policy: Pending Dispatch Requirements In
+  Type Schemes (above). A concrete repeated receiver/callable state with an
+  exact ancestor target and callable-reachable evidence reuses that selected
+  method instance through ordinary unification. A dedicated scheme-use record
+  authorizes its finite recursive evidence recipe. Unresolved repeated states,
+  hidden requirements, and growing states do not qualify.
 - structural-origin retirement (`retiredRequirementCallableUnified`,
   `unifyEquivalentGeneralizedCallables` committed probe)—policy: Pending
   Dispatch Requirements In Type Schemes (above). A copied requirement whose
@@ -6353,11 +6390,13 @@ Other solved-graph mutations:
 - `rejectRecursiveStaticDispatch`—policy: Pending Dispatch Requirements In
   Type Schemes (above). Two triggers: the explicit derivation chain and
   alpha-normalized receiver + callable digest prove that target selection has
-  returned to the same solver state and exact binding, or a settled receiver
-  strictly structurally contains the settled receiver of an ancestor edge
+  returned to the same solver state and exact binding without a concrete
+  recursive implementation, or a settled receiver strictly structurally
+  contains the settled receiver of an ancestor edge
   with the same exact binding. A shrinking or otherwise changing finite chain
-  is accepted. The 80-layer accepted chain, the self-nested rejected chain,
-  and the strictly growing rejected chain pin all sides of the rule.
+  is accepted. The 80-layer accepted chain, concrete recursive equality,
+  unresolved self-nested rejected chains, and the strictly growing rejected
+  chain pin all sides of the rule.
 - `instantiate.zig` / `copy_import.zig` `dangerousSetVarDesc`—mechanism:
   instantiation and import copying build fresh disjoint graphs.
 - `deduplicateGeneralizedDispatchRequirements` (`setVarContent` of a retained
@@ -6374,7 +6413,9 @@ stamped plan—is documented and enforced at the restamp sites
 (`rewriteEqBinopAsMethodEq`, `rewriteDerivedIsEqMethodCallAsStructuralEq`,
 `rewriteDerivedMethodCallAsStructuralHash`). Plan stamping at creation
 (`replaceExprWithDispatchCall` and friends at plan-creation sites) is the
-plan's first stamp, not a restamp; `replaceExprWithRuntimeError` retires the
+plan's first stamp, not a restamp. Eager method calls stamp their plan before
+discharging its constraint, so a selected structural derivation cannot be
+overwritten by a later first-stamp operation. `replaceExprWithRuntimeError` retires the
 plans in the subtree it replaces, which is diagnostic recovery at every call
 site except `recheckNominalConstructorBackings`, where it is the rejection
 mechanism of a declared rule (see below).
@@ -7303,6 +7344,13 @@ nested body lowers, and the body lowers against that exact request interface.
 The request is not a constraint on the parent expression id. This allows the
 same checked lambda site to be specialized at multiple function types without
 corrupting the parent body or depending on traversal order.
+
+A nested specialization with a closed request is indexed before its body
+lowers. Another request with the same exact live interface, evidence, captures,
+and lexical owner can reuse that in-progress body, including through static
+dispatch. Waiting for body completion would make concrete recursive local
+methods generate an unbounded sequence of identical specializations. This is
+exact-interface reuse, not permission to unify partially matching requests.
 
 Structural equality follows the same rule. The checker has already established
 that the operands are equality-compatible and has either emitted a dispatch plan

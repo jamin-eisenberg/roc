@@ -7985,7 +7985,9 @@ const Builder = struct {
                     if (!optionalDraftCodecContractContextEql(source_ctx.graph, spec.codec_contract, codec_contract)) continue;
                     if (!draftCaptureEntryGuardsMatch(source_ctx.graph, spec.capture_entry_guards, capture_entry_guards)) continue;
                     if (!std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)) continue;
-                    const spec_fn_ty = spec.request_fn_ty orelse continue;
+                    const spec_request = try draftNestedSpecRequestNode(source_ctx.draft, source_ctx.graph, spec);
+                    if (!try source_ctx.graph.typeIsResolved(spec_request)) continue;
+                    const spec_fn_ty = try source_ctx.activeTypeFromNode(spec_request);
                     if (!try source_ctx.typeStore().typeEql(source_ctx.nameStore(), spec_fn_ty, resolved_request_ty.?)) continue;
                     if (!selection.add(raw_spec, true)) unreachable;
                 }
@@ -8189,6 +8191,12 @@ const Builder = struct {
             try lookup_entry.value_ptr.append(self.allocator, @intCast(spec_index));
         }
         if (open_shape_lookup_address) |address| {
+            try registerNestedSpecLookup(source_ctx.draft, self.allocator, address, @intCast(spec_index));
+        }
+        // A closed request has an exact interface before its body completes.
+        // Index it now so recursive calls with fresh instantiation cells can
+        // reuse this body through structural equality of the live interface.
+        if (resolved_lookup_address) |address| {
             try registerNestedSpecLookup(source_ctx.draft, self.allocator, address, @intCast(spec_index));
         }
 
