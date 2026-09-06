@@ -2022,7 +2022,6 @@ const HoistSelectionTransaction = struct {
                 try self.stageExprDependenciesInternal(binop.rhs, context);
             },
             .e_unary_minus => |unary| try self.stageExprDependenciesInternal(unary.expr, context),
-            .e_unary_not => |unary| try self.stageExprDependenciesInternal(unary.expr, context),
             .e_field_access => |field| try self.stageExprDependenciesInternal(field.receiver, context),
             .e_interpolation => |interpolation| {
                 try self.stageExprDependenciesInternal(interpolation.first, context);
@@ -3877,7 +3876,6 @@ fn markHoistInvalidatedExprChildren(
             try self.markHoistInvalidatedExpr(binop.rhs, work);
         },
         .e_unary_minus => |unary| try self.markHoistInvalidatedExpr(unary.expr, work),
-        .e_unary_not => |unary| try self.markHoistInvalidatedExpr(unary.expr, work),
         .e_field_access => |field| try self.markHoistInvalidatedExpr(field.receiver, work),
         .e_method_call => |call| {
             try self.markHoistInvalidatedExpr(call.receiver, work);
@@ -4102,7 +4100,6 @@ fn firstHoistSelectionTestExpr(checker: *Self) error{ExpectedHoistSelectionTestE
             .e_nominal_external,
             .e_binop,
             .e_unary_minus,
-            .e_unary_not,
             .e_field_access,
             .e_interpolation,
             .e_structural_eq,
@@ -4447,7 +4444,6 @@ fn exprCanBeHoistedRoot(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -4526,7 +4522,6 @@ fn exprCanCoverHoistedChildren(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -4593,7 +4588,6 @@ fn exprCanBeHoistedBindingRoot(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -9288,7 +9282,6 @@ fn hoistedRootDependenciesAreKeptInternal(
         .e_binop => |binop| (try self.hoistedRootDependenciesAreKeptInternal(binop.lhs, context, keep_oracle)) and
             try self.hoistedRootDependenciesAreKeptInternal(binop.rhs, context, keep_oracle),
         .e_unary_minus => |unary| self.hoistedRootDependenciesAreKeptInternal(unary.expr, context, keep_oracle),
-        .e_unary_not => |unary| self.hoistedRootDependenciesAreKeptInternal(unary.expr, context, keep_oracle),
         .e_field_access => |field| self.hoistedRootDependenciesAreKeptInternal(field.receiver, context, keep_oracle),
         .e_interpolation => |interpolation| blk: {
             const fn_var = interpolation.constraint_fn_var orelse break :blk false;
@@ -9417,7 +9410,6 @@ fn hoistedExprAllowsStoredConst(
         .e_binop => |binop| (try self.hoistedExprAllowsStoredConst(module, binop.lhs, context)) and
             try self.hoistedExprAllowsStoredConst(module, binop.rhs, context),
         .e_unary_minus => |unary| self.hoistedExprAllowsStoredConst(module, unary.expr, context),
-        .e_unary_not => |unary| self.hoistedExprAllowsStoredConst(module, unary.expr, context),
         .e_field_access => |field| self.hoistedExprAllowsStoredConst(module, field.receiver, context),
         .e_interpolation => |interpolation| (try self.hoistedExprAllowsStoredConst(module, interpolation.first, context)) and
             try self.hoistedExprSpanAllowsStoredConst(module, interpolation.parts, context),
@@ -9499,7 +9491,6 @@ fn hoistedCallableDefForExpr(
         .e_lambda,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_method_call,
         .e_dispatch_call,
@@ -19331,7 +19322,7 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
         // function calling //
         .e_call => |call| {
             switch (call.called_via) {
-                .apply, .record_builder => blk: {
+                .apply, .record_builder, .unary_op => blk: {
                     // First, check the function being called
                     // It could be effectful, e.g. `(mk_fn!())(arg)`
                     self.checking_call_arg = true;
@@ -19578,9 +19569,9 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                         );
                     }
                 },
-                .binop, .unary_op, .string_interpolation => {
-                    // The canonicalizer currently only produces apply, record_builder, or range for e_call expressions.
-                    // Other call types (binop, unary_op, string_interpolation) are
+                .binop, .string_interpolation => {
+                    // The canonicalizer produces apply, record_builder, or unary_op for e_call expressions.
+                    // Other call types (binop, string_interpolation) are
                     // represented as different expression types. If we hit this, there's a compiler bug.
                     std.debug.assert(false);
                     try self.markErroneous(expr_var);
@@ -19613,9 +19604,6 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
         },
         .e_unary_minus => |unary| {
             does_fx = try self.checkUnaryMinusExpr(expr_idx, expr_var, expr_region, env, unary, nested_expected) or does_fx;
-        },
-        .e_unary_not => |unary| {
-            does_fx = try self.checkUnaryNotExpr(expr_idx, expr_var, expr_region, env, unary, nested_expected) or does_fx;
         },
         .e_field_access => |field_access| {
             std.debug.assert(field_access.segments.len > 0);
@@ -22864,36 +22852,6 @@ fn checkUnaryMinusExpr(self: *Self, expr_idx: CIR.Expr.Idx, expr_var: Var, expr_
     return does_fx;
 }
 
-// unary not //
-
-/// Check the unary expr.
-/// Desugars `!a` to `a.not() : a -> a`,
-fn checkUnaryNotExpr(self: *Self, expr_idx: CIR.Expr.Idx, expr_var: Var, expr_region: Region, env: *Env, unary: CIR.Expr.UnaryNot, expected: Expected) Allocator.Error!bool {
-    const trace = tracy.trace(@src());
-    defer trace.end();
-
-    const child_expected = expected.forStatement();
-
-    // Check the operand expression
-    const does_fx = try self.checkExpr(unary.expr, env, child_expected);
-    if (try self.retireCallLikeExprWithErroneousOperands(expr_idx, expr_var, &.{unary.expr})) return does_fx;
-
-    // Get the not method + ret var
-    // Here, we assert that the arg and ret of `not` are same type
-    const not_method_name = self.cir.idents.not;
-    const not_arg_var = @as(Var, ModuleEnv.varFrom(unary.expr));
-    const not_ret_var = not_arg_var;
-
-    // Create the not static dispatch function on the not_arg + not_ret
-    // This function attaches the dispatch fn to the not_arg
-    try self.mkUnaryOp(not_arg_var, not_ret_var, not_method_name, env, expr_region, expr_idx);
-
-    // The result type is the operand type (the desugaring is `a -> a`).
-    _ = try self.unify(expr_var, not_ret_var, env);
-
-    return does_fx;
-}
-
 // binop //
 
 /// Check the types for a binary operation expression
@@ -23551,8 +23509,6 @@ fn publishUnaryDispatchExpr(
     const expr = self.cir.store.getExpr(expr_idx);
     const receiver: CIR.Expr.Idx, const surface_origin: CIR.Expr.SurfaceOrigin = if (expr == .e_unary_minus)
         .{ expr.e_unary_minus.expr, .unary_minus }
-    else if (expr == .e_unary_not)
-        .{ expr.e_unary_not.expr, .unary_not }
     else
         return;
     try self.cir.store.replaceExprWithDispatchCall(
@@ -26098,7 +26054,6 @@ fn defaultMaterializationIsRecursive(
                 .e_zero_argument_tag,
                 .e_binop,
                 .e_unary_minus,
-                .e_unary_not,
                 .e_field_access,
                 .e_method_call,
                 .e_dispatch_call,
@@ -26218,7 +26173,6 @@ fn defaultMaterializationIsRecursive(
                 }
             },
             .e_unary_minus => |unary| try expr_work.append(self.gpa, unary.expr),
-            .e_unary_not => |unary| try expr_work.append(self.gpa, unary.expr),
             .e_str => |str| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(str.span)),
             .e_list => |list| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(list.elems)),
             .e_tuple => |tuple| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(tuple.elems)),
@@ -29512,7 +29466,6 @@ fn tailTrySuffixExpr(self: *const Self, expr_idx: CIR.Expr.Idx) ?CIR.Expr.Idx {
         .e_lambda,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_method_call,
         .e_dispatch_call,
