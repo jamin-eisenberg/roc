@@ -5835,6 +5835,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .link_libc = true,
             .imports = &.{
+                .{ .name = "base", .module = roc_modules.base },
+                .{ .name = "backend", .module = roc_modules.backend },
                 .{ .name = "layout", .module = roc_modules.layout },
                 .{ .name = "lir", .module = roc_modules.lir },
                 .{ .name = "ctx", .module = roc_modules.ctx },

@@ -171,6 +171,14 @@ marks on exit, including allocation failure. Entering a scope must not scan or
 copy the caller's visited set. Clearing and restoration are proportional to
 the words touched in that scope, rather than the module's CIR node count.
 
+LLVM's store-indexed local-slot and deferred-capture columns retain capacity
+across procedures and module generation. Only newly added store rows are
+initialized. Procedure exit, including allocation failure, invalidates the
+explicit argument/frame inventory and clears tracked captures; it never scans
+the whole store. Specialized procedures may share `LocalId`s, but their LLVM
+slot values must never survive into another procedure. These columns preserve
+direct indexing without introducing a remapping lookup on every local access.
+
 The suffix `...Key` is reserved for structural or composite identity for which
 a dense owner-relative ID cannot preserve the required identity. Examples
 include identities which must remain stable before or across serialization,
@@ -189,6 +197,46 @@ with an owning-store column or `collections.DenseMap`. If the key genuinely
 requires structural identity, name it `...Key` only after establishing why a
 dense ID cannot represent it; changing the name solely to silence the lint
 violates this invariant.
+
+### Native relocation identity
+
+Native code generators own an append-only symbol declaration table. Machine
+relocations carry its dense store-local symbol IDs, and the name column travels
+with the generated code. Builtin, hosted, literal, and static-value producers
+cache their symbol IDs in their own identity domains. Emitters consume those IDs;
+they neither format names nor discover symbols by scanning existing relocations.
+Resetting a code generator invalidates its relocation IDs and clears the matching
+producer caches together. Names are borrowed for the lifetime of that generated
+code; generated names are owned by the corresponding producer.
+
+Literal backing tables store an explicit byte-offset-to-ordinal index alongside
+their compact entries. Byte offsets in the checked string store are not dense
+ordinals. Consumers borrow that index rather than scanning entries or allocating
+one value slot for every byte of source string storage.
+
+Frozen static allocations retain their dense index in the owning export slice.
+Address relocations distinguish these allocation references from explicit named
+linker references. Internal static roots retain their LIR `StaticDataId`, and
+native execution uses that identity directly as the root-address table key. Procedure
+and RC-helper relocations retain their existing explicit identities; each distinct
+function target owns one linker-name allocation, shared by its references.
+
+Object emission registers definitions and external declarations once, then emits
+symbols and relocations in separate passes. Each object format records the mapping
+from producer symbol IDs to its symbol-table indices. ELF local-symbol ordering,
+Mach-O binding classes and referenced-symbol flags, and COFF unwind records belong
+to format emission; they do not change producer identity. Every relocation has an
+explicit target, and a missing internal definition is a compiler invariant failure.
+The named object-input API resolves its declared names once at its boundary;
+compiler-generated machine code uses the indexed API directly.
+
+Definitions retain their assigned symbol IDs through final metadata assembly.
+Object writers borrow immutable section bytes until emission, compute the final
+layout before allocating the output, and apply implicit addends only to that
+output. ELF symbol and relocation records are encoded directly in their final
+sections. Dev-run images assign one byte range per distinct symbol name; static
+relocations reuse declaration ranges, with allocation IDs indexing data ranges
+directly. Capacity calculation uses the same distinct declaration set.
 
 Backends do not reason about reference counting. They lower and execute the
 explicit LIR `incref`, `decref`, and `free` statements emitted before backend
@@ -1436,6 +1484,12 @@ initialization paths that prove the binding cannot collide, such as seeding the
 compiler-owned builtin scope before source declarations are introduced. If that
 proof stops being local and obvious, the initialization path must use the same
 type-binding API.
+
+Logical negation `!expr` desugars in `Can` to an ordinary call to the
+compiler-owned `Bool.not`, with type `Bool -> Bool`. It does not introduce a
+static-dispatch constraint on the operand. Source declarations shadowing `Bool`
+do not change this target; within Builtin.roc the call refers to its local
+`Bool.not` definition. Checking and later stages consume the ordinary call.
 
 Result suffix desugaring has a separate owner inside `Can`. The suffix forms
 `expr?`, `expr ? handler`, and `expr ?? default` all lower to a match over the
@@ -2763,6 +2817,26 @@ Checked diagnostics include warning severity: a literal (number or string)
 defaulted at a generalization boundary that narrows the definition's inferred
 type reports `LITERAL DEFAULTED` as a warning, not an error, worded per
 literal kind.
+
+Operators intentionally add type constraints beyond their corresponding method
+calls. `a == b` requires `a` and `b` to have the same type and `is_eq` to return
+`Bool`; `a != b` has the same requirements and negates that Boolean result.
+Likewise, `<`, `<=`, `>`, and `>=` require equal operand types and a `Bool`
+result, calling `is_lt`, `is_lte`, `is_gt`, and `is_gte`, respectively.
+Arithmetic operators instead require the result to have the receiver's type;
+the other operand may differ, as in `Duration * I64 -> Duration`.
+
+These contracts let inference propagate information before a method has been
+selected. Either comparison operand can determine the other's type; an
+arithmetic result annotation can determine the receiver's type. A plain method
+call cannot assume these relationships: its selected method may accept a
+different argument type or return a different type. Thus `|a, b| a == b`
+infers `c, c -> Bool where [c.is_eq : c, c -> Bool]`, whereas
+`|a, b| a.is_eq(b)` infers `c, d -> e where [c.is_eq : c, d -> e]`.
+Restricting comparison results to `Bool` also keeps inferred signatures simple;
+ordinary `a.is_eq(b).not()` can require two methods with independently inferred
+result types. Replacing operators with unrestricted method-call sugar would
+change these intentional typing rules.
 
 A where alias (`a.Sortable : where [...]`) is a source-level abbreviation for a
 set of method constraints, not a type. Its declaration solves to its receiver: a
@@ -4504,13 +4578,22 @@ field and tuple-item reads from that local. A leaf that would duplicate runtime
 work through structural reuse, or that references an initializer-private
 binding, becomes such a read. If no field or tuple-item read exists, only that
 substructure becomes opaque. Materializing the pair therefore never
-reconstructs or copies the recursive value. Materializing a chain with a
-recursive anchor emits an ordinary block in source order; an acyclic chain
-retains the ordinary nested-let representation. This finite structure ending
-in an explicit local back-edge permits the same call-pattern and
-callable-worker specialization as an acyclic value without unrolling
-recursion, moving runtime work out of recursive scope, or reconstructing a
-vanished source binding.
+reconstructs or copies the recursive value. This finite structure ending in an
+explicit local back-edge permits the same call-pattern and callable-worker
+specialization as an acyclic value without unrolling recursion, moving runtime
+work out of recursive scope, or reconstructing a vanished source binding.
+
+Materializing any binding chain emits one flat block in source order. Sequence
+length must not become expression nesting depth; consumers iterate the statement
+span without copying or repeatedly scanning its remaining tail. Record-update
+normalization captures the evaluated base once, then snapshots all unchanged
+fields in one typed record-destructuring binding before cloning replacement
+computations. Record width increases the pattern's field span, not the number
+of sequential expression bindings. The old base must not remain live solely to
+read unchanged fields after replacement work: doing so would keep its
+collections shared and prevent ARC from permitting in-place mutation.
+Structural consumers retain the complete exact field view, and no consumer
+reconstructs missing field or evaluation-order information.
 
 This follows the useful ownership discipline of GHC's simplifier floats: an
 expression transformation produces an ordered binding collection together with
@@ -5061,17 +5144,27 @@ When later unification grounds one, it receives its one deferred-queue
 transition. Processing an entry may append further entries, and validation
 continues until there is no new entry or newly grounded pending requirement.
 
-Dispatch-cycle termination is structural, with two rules. Target selection is
-rejected as recursive dispatch when it repeats an exact solver state along
-its own derivation lineage—the same alpha-normalized receiver plus callable
-digest with the same exact method binding—or when it re-enters an ancestor
-edge's exact binding with a settled receiver that strictly structurally
+Dispatch-cycle termination is structural. An exact repeated solver state along
+its derivation lineage—the same alpha-normalized receiver plus callable digest
+and exact method binding—can close a recursive implementation when its receiver
+and callable are concrete and the target's evidence parameters are all reachable
+from its callable. The edge reuses the ancestor's selected method instance; it
+does not instantiate another copy of the same requirements. Checking records
+this recursive target explicitly, and CheckedModule construction emits a finite
+callable-based evidence recipe. The ancestor's other requirements must still
+check successfully.
+This admits ordinary recursive equality without making acceptance depend on
+which operand first identifies the named type. A repeated state that still needs
+type inference, or needs evidence not determined by its callable, remains a
+recursive-dispatch error. Target selection is also rejected when it re-enters an
+ancestor edge's exact binding with a settled receiver that strictly structurally
 contains that ancestor's settled receiver. Every child constraint minted by
 selecting a target records its parent edge, so the parent graph is
 lineage-complete and acyclic by construction: a child is provably fresh at
 record time. The dispatch worklists carry no numeric give-up bounds; they
-terminate because the two rules keep fresh edges finite while every latched
-fixpoint—deferred re-defers, pending scheme requirements, stored finalization
+terminate because closing or rejecting repeated states and rejecting growth
+keeps fresh edges finite while every latched fixpoint—deferred re-defers,
+pending scheme requirements, stored finalization
 relations—consumes a monotone resource, each relation grounding at most once
 and taking at most one enqueue. Graph instantiation runs on an explicit heap
 worklist whose cycles terminate through the substitution map, so it carries no
@@ -5101,7 +5194,8 @@ acquire that lineage. Before selecting a target for a derived child, the
 checker computes an alpha-normalized digest of the receiver plus callable
 relation and compares it with the child's ancestor chain. Reaching the same
 digest, method name, owner environment, and exact method binding is the same
-solver state and is rejected as recursive dispatch; a chain whose concrete
+solver state: it closes the concrete callable recursion described above, or is
+rejected as recursive dispatch; a chain whose concrete
 type structure changes has a different digest and continues unless the
 growth rule catches it re-entering the same exact binding with a strictly
 grown settled receiver. Rejection settles only that cyclic relation and
@@ -6313,6 +6407,12 @@ Other solved-graph mutations:
   deferred static-dispatch worklist. Retirement reads the explicit structural
   origin and checked scheme-use substitution produced by those operations;
   there is no rank rewrite, structural ownership probe, or graph restamp.
+- `closeConcreteRecursiveDispatch`—policy: Pending Dispatch Requirements In
+  Type Schemes (above). A concrete repeated receiver/callable state with an
+  exact ancestor target and callable-reachable evidence reuses that selected
+  method instance through ordinary unification. A dedicated scheme-use record
+  authorizes its finite recursive evidence recipe. Unresolved repeated states,
+  hidden requirements, and growing states do not qualify.
 - structural-origin retirement (`retiredRequirementCallableUnified`,
   `unifyEquivalentGeneralizedCallables` committed probe)—policy: Pending
   Dispatch Requirements In Type Schemes (above). A copied requirement whose
@@ -6325,11 +6425,13 @@ Other solved-graph mutations:
 - `rejectRecursiveStaticDispatch`—policy: Pending Dispatch Requirements In
   Type Schemes (above). Two triggers: the explicit derivation chain and
   alpha-normalized receiver + callable digest prove that target selection has
-  returned to the same solver state and exact binding, or a settled receiver
-  strictly structurally contains the settled receiver of an ancestor edge
+  returned to the same solver state and exact binding without a concrete
+  recursive implementation, or a settled receiver strictly structurally
+  contains the settled receiver of an ancestor edge
   with the same exact binding. A shrinking or otherwise changing finite chain
-  is accepted. The 80-layer accepted chain, the self-nested rejected chain,
-  and the strictly growing rejected chain pin all sides of the rule.
+  is accepted. The 80-layer accepted chain, concrete recursive equality,
+  unresolved self-nested rejected chains, and the strictly growing rejected
+  chain pin all sides of the rule.
 - `instantiate.zig` / `copy_import.zig` `dangerousSetVarDesc`—mechanism:
   instantiation and import copying build fresh disjoint graphs.
 - `deduplicateGeneralizedDispatchRequirements` (`setVarContent` of a retained
@@ -6346,7 +6448,9 @@ stamped plan—is documented and enforced at the restamp sites
 (`rewriteEqBinopAsMethodEq`, `rewriteDerivedIsEqMethodCallAsStructuralEq`,
 `rewriteDerivedMethodCallAsStructuralHash`). Plan stamping at creation
 (`replaceExprWithDispatchCall` and friends at plan-creation sites) is the
-plan's first stamp, not a restamp; `replaceExprWithRuntimeError` retires the
+plan's first stamp, not a restamp. Eager method calls stamp their plan before
+discharging its constraint, so a selected structural derivation cannot be
+overwritten by a later first-stamp operation. `replaceExprWithRuntimeError` retires the
 plans in the subtree it replaces, which is diagnostic recovery at every call
 site except `recheckNominalConstructorBackings`, where it is the rejection
 mechanism of a declared rule (see below).
@@ -7276,6 +7380,13 @@ The request is not a constraint on the parent expression id. This allows the
 same checked lambda site to be specialized at multiple function types without
 corrupting the parent body or depending on traversal order.
 
+A nested specialization with a closed request is indexed before its body
+lowers. Another request with the same exact live interface, evidence, captures,
+and lexical owner can reuse that in-progress body, including through static
+dispatch. Waiting for body completion would make concrete recursive local
+methods generate an unbounded sequence of identical specializations. This is
+exact-interface reuse, not permission to unify partially matching requests.
+
 Structural equality follows the same rule. The checker has already established
 that the operands are equality-compatible and has either emitted a dispatch plan
 that permits derived `is_eq` to lower as structural equality or rewritten the
@@ -7591,9 +7702,11 @@ explicitly updated fields until LIR construction. This distinction is required
 while a Monotype solve group is open: the result type can gain fields from later
 constraints, so enumerating the current type shape and expanding an update at
 that point would permanently omit fields that the final closed type contains.
-Lambda Solved relates the base to the update result and checks each explicit
-field against the final record type. Direct LIR lowering evaluates the base
-once, reads all unchanged fields before evaluating update expressions, and
+Lambda Solved relates only unchanged fields of the base to the update result
+and checks each replacement against the result field's type. A replacement may
+have a different specialized representation or callable set from the old field;
+relating the entire base and result would incorrectly unify those positions.
+Direct LIR lowering evaluates the base once, reads all unchanged fields before evaluating update expressions, and
 writes the final fields in committed runtime order. A `record_update` may carry
 a structural, alias, or nominal record result type directly; unlike `record`,
 `tuple`, and `tag`, it is a base-preserving transformation rather than a fresh
@@ -8602,6 +8715,13 @@ The solver:
 - verifies each lifted jump is lexically scoped and unifies its arguments with
   the corresponding join-point parameter types
 
+Expression inference uses an explicit, reusable continuation stack. A suspended
+block owns one statement cursor, and a suspended match owns its branch and
+binding cursors; sequence length never becomes native call-stack depth. Child
+constraints are completed in source order, with the expected-slot relation
+applied before entering a child and finished after it returns. Loop, join, and
+return scopes remain active for exactly their original lexical extent.
+
 Structural unification, including inspectable nominal-backing relations, runs
 on one explicit work stack. A backing relation isolates an interned structural
 operand once, schedules that working variable against the backing, and defers
@@ -9188,7 +9308,8 @@ ABI directly; they do not select numeric payload layouts or descriptor data.
 Checked unary operator nodes use that same primitive path when they remain in a
 checked body. Unary `-` lowers as `num_negate`, so signed-integer
 lowest-value protection is emitted by the low-level expander before the raw
-operation. Unary `!` lowers as `bool_not` over the checked Bool representation.
+operation. The ordinary `Bool.not` call produced for unary `!` uses the builtin
+`bool_not` path over the checked Bool representation.
 If checking resolved the source operator to a static-dispatch call instead, the
 boxy lowerer consumes the checked dispatch plan for that call rather than
 reinterpreting the original source operator.
@@ -10010,6 +10131,15 @@ closure queries visit their own members without allocating a list per alias.
 Independent ordinary constructor eliminations share one analysis and edge
 patching traversal. Their dependencies used as constructor operands remain
 whole-value uses until the next analysis; join ABI changes require fresh data.
+
+Alias transparency is a monotone dataflow calculation. A worklist propagates
+whole-value uses backward along alias edges, demoting each candidate once.
+After that fixed point, one iterative traversal caches each transparent alias's
+root for the current collection round. An active edge identifies a cycle; a
+cycle has no constructor or join-parameter root and cannot authorize their
+scalarization. Rewrites invalidate this per-round inventory before the next
+collection. Neither propagation nor root lookup repeatedly walks the same long
+chain.
 
 ## Integer Arithmetic Operations
 
