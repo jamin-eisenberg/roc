@@ -2730,7 +2730,8 @@ test "package platform dependencies select one exact local platform" {
 
     const selected = resolved.selected_platform_index.?;
     try std.testing.expectEqual(HeaderKind.platform, resolved.packages[selected].kind);
-    try std.testing.expectEqualStrings("/workspace/platform/main.roc", resolved.packages[selected].identity);
+    const sep = std.fs.path.sep_str;
+    try std.testing.expectEqualStrings(sep ++ "workspace" ++ sep ++ "platform" ++ sep ++ "main.roc", resolved.packages[selected].identity);
 }
 
 test "compatible platform versions with different hashes are rejected" {

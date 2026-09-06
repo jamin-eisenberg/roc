@@ -146,6 +146,17 @@ pub const ComptimeSiteId = enum(u32) {
     _,
 };
 
+/// Dense identifier of one source `expect` observed by `roc test`.
+pub const ExpectSiteId = enum(u32) {
+    _,
+};
+
+/// Source metadata for one `expect` observation counter.
+pub const ExpectSite = struct {
+    loc: base.SourceLoc,
+    region: base.Region,
+};
+
 pub const CheckedExhaustivenessSiteId = check.CheckedModule.CheckedExhaustivenessSiteId;
 
 /// Source control-flow construct observed during compile-time finalization.
@@ -954,6 +965,9 @@ pub const CFStmt = union(enum) {
     },
     expect: struct {
         condition: LocalId,
+        /// Present only in test-plan LIR. Other lowering modes retain the
+        /// ordinary host notification behavior for a failed inline expect.
+        site: ?ExpectSiteId = null,
         next: CFStmtId,
     },
     /// The Err arm of a `?` operator used directly inside a top-level expect.
@@ -1103,6 +1117,10 @@ pub fn erasedCallReuseFieldsMatch(assign: anytype) bool {
 pub const LirProcSpec = struct {
     name: Symbol,
     args: LocalSpan,
+    /// Producer-authored provenance for a function normalized from an
+    /// iterator pipeline. Dev-only structural fusion consumes this bit; it
+    /// must never infer the scope from symbols or LIR body shape.
+    iterator_fusion_scope: bool = false,
     /// Hidden erased-callable ownership input. Every erased-callable ABI proc
     /// records its final argument here, regardless of whether its result can
     /// reuse the allocation. Its local has erased-callable layout so ARC always

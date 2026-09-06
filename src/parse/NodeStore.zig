@@ -105,6 +105,7 @@ const ExprNodeTag = enum {
     method_call,
     tuple_access,
     arrow_call,
+    arrow_method_call,
     lambda,
     apply,
     suffix_single_question,
@@ -973,6 +974,10 @@ pub fn addPattern(store: *NodeStore, pattern: AST.Pattern) std.mem.Allocator.Err
             node.tag = .single_quote_patt;
             node.region = sq.region;
             node.main_token = sq.token;
+            if (sq.type_ident) |type_ident| {
+                node.data.lhs = @bitCast(type_ident);
+                node.data.rhs = @intFromBool(true);
+            }
         },
         .record => |r| {
             node.tag = .record_patt;
@@ -1072,6 +1077,10 @@ pub fn addExpr(store: *NodeStore, expr: AST.Expr) std.mem.Allocator.Error!AST.Ex
             node.tag = .single_quote;
             node.region = e.region;
             node.main_token = e.token;
+            if (e.type_ident) |type_ident| {
+                node.data.lhs = @bitCast(type_ident);
+                node.data.rhs = @intFromBool(true);
+            }
         },
         .string_part => |e| {
             node.tag = .string_part;
@@ -1189,7 +1198,10 @@ pub fn addExpr(store: *NodeStore, expr: AST.Expr) std.mem.Allocator.Error!AST.Ex
             node.data.lhs = @intFromEnum(ta.expr);
         },
         .arrow_call => |ld| {
-            node.tag = .arrow_call;
+            node.tag = switch (ld.target_kind) {
+                .ordinary => .arrow_call,
+                .method_call => .arrow_method_call,
+            };
             node.region = ld.region;
             node.main_token = ld.operator;
             node.data.lhs = @intFromEnum(ld.left);
@@ -2184,6 +2196,7 @@ pub fn getPattern(store: *const NodeStore, pattern_idx: AST.Pattern.Idx) AST.Pat
         .single_quote_patt => {
             return .{ .single_quote = .{
                 .token = node.main_token,
+                .type_ident = if (node.data.rhs != 0) @bitCast(node.data.lhs) else null,
                 .region = node.region,
             } };
         },
@@ -2319,6 +2332,7 @@ pub fn getExpr(store: *const NodeStore, expr_idx: AST.Expr.Idx) AST.Expr {
         .single_quote => {
             return .{ .single_quote = .{
                 .token = node.main_token,
+                .type_ident = if (node.data.rhs != 0) @bitCast(node.data.lhs) else null,
                 .region = node.region,
             } };
         },
@@ -2475,6 +2489,16 @@ pub fn getExpr(store: *const NodeStore, expr_idx: AST.Expr.Idx) AST.Expr {
                 .right = @enumFromInt(node.data.rhs),
                 .operator = node.main_token,
                 .region = node.region,
+                .target_kind = .ordinary,
+            } };
+        },
+        .arrow_method_call => {
+            return .{ .arrow_call = .{
+                .left = @enumFromInt(node.data.lhs),
+                .right = @enumFromInt(node.data.rhs),
+                .operator = node.main_token,
+                .region = node.region,
+                .target_kind = .method_call,
             } };
         },
         .lambda => {
