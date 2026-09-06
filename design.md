@@ -10884,6 +10884,11 @@ When one ownership place is read repeatedly by ownership-complete struct-field
 or tag-payload reads along a single control-flow path, dismantle analysis
 chooses the earliest same-root, same-layout read that dominates each later read
 and rewrites those later reads as explicit local aliases before ARC solving.
+Dominance is computed once from the explicit statement-successor graph with a
+synthetic entry for all procedure roots. Immediate dominators settle in reverse
+postorder, and dominator-tree intervals answer projection queries without
+re-walking procedure bodies. Projection comparisons are indexed by their
+explicit ownership root rather than scanning unrelated locals.
 Divergent reads remain separate places. This canonicalization is justified only
 by the committed field or tag-payload operation and explicit CFG dominance; it
 never equates layouts or values heuristically. A borrowed struct produced by

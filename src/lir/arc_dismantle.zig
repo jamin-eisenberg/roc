@@ -814,25 +814,200 @@ fn restoredFieldMaskForDefault(
     return restored;
 }
 
-fn statementDominates(store: *const LirStore, allocator: Allocator, dominator: LIR.CFStmtId, target: LIR.CFStmtId) Error!bool {
-    if (dominator == target) return true;
-    var seen = try std.bit_set.DynamicBitSetUnmanaged.initEmpty(allocator, store.cfStmtCount());
-    defer seen.deinit(allocator);
-    var work = std.ArrayList(LIR.CFStmtId).empty;
-    defer work.deinit(allocator);
-    for (0..store.procSpecCount()) |proc_index| {
-        const proc = store.getProcSpec(@enumFromInt(@as(u32, @intCast(proc_index))));
-        if (proc.body) |body| try work.append(allocator, body);
+/// Exact dominance of the statement graph, computed once for all projection
+/// queries. A synthetic entry reaches every procedure body. Reverse-postorder
+/// immediate-dominator iteration handles shared successors and cycles; tree
+/// intervals then answer each query in constant time.
+const StatementDominance = struct {
+    enter: []u32,
+    leave: []u32,
+
+    const Edge = struct { from: u32, to: u32 };
+    const Frame = struct { node: u32, edge: u32 };
+
+    fn init(gpa: Allocator, store: *LirStore) Error!StatementDominance {
+        const entry: u32 = @intCast(store.cfStmtCount());
+        var edges = std.ArrayList(Edge).empty;
+        defer edges.deinit(gpa);
+        var successors = std.ArrayList(LIR.CFStmtId).empty;
+        defer successors.deinit(store.allocator);
+        for (0..store.cfStmtCount()) |index| {
+            successors.clearRetainingCapacity();
+            try body_clone.appendSuccessors(store, &successors, @enumFromInt(@as(u32, @intCast(index))));
+            for (successors.items) |next| try edges.append(gpa, .{ .from = @intCast(index), .to = @intFromEnum(next) });
+        }
+        for (0..store.procSpecCount()) |index| {
+            const proc = store.getProcSpec(@enumFromInt(@as(u32, @intCast(index))));
+            if (proc.body) |body| try edges.append(gpa, .{ .from = entry, .to = @intFromEnum(body) });
+        }
+        return initGraph(gpa, store.cfStmtCount() + 1, entry, edges.items);
     }
-    while (work.pop()) |current| {
-        if (current == dominator) continue;
-        if (current == target) return false;
-        const index = @intFromEnum(current);
-        if (seen.isSet(index)) continue;
-        seen.set(index);
-        try body_clone.appendSuccessors(@constCast(store), &work, current);
+
+    fn initGraph(gpa: Allocator, count: usize, entry: u32, edges: []const Edge) Error!StatementDominance {
+        const outgoing = try gpa.alloc(u32, count);
+        defer gpa.free(outgoing);
+        const incoming = try gpa.alloc(u32, count);
+        defer gpa.free(incoming);
+        const next_out = try gpa.alloc(u32, edges.len);
+        defer gpa.free(next_out);
+        const next_in = try gpa.alloc(u32, edges.len);
+        defer gpa.free(next_in);
+        @memset(outgoing, no_index);
+        @memset(incoming, no_index);
+        for (edges, 0..) |edge, index| {
+            next_out[index] = outgoing[edge.from];
+            outgoing[edge.from] = @intCast(index);
+            next_in[index] = incoming[edge.to];
+            incoming[edge.to] = @intCast(index);
+        }
+        const order = try gpa.alloc(u32, count);
+        defer gpa.free(order);
+        @memset(order, no_index);
+        var postorder = std.ArrayList(u32).empty;
+        defer postorder.deinit(gpa);
+        var frames = std.ArrayList(Frame).empty;
+        defer frames.deinit(gpa);
+        order[entry] = 0;
+        try frames.append(gpa, .{ .node = entry, .edge = outgoing[entry] });
+        while (frames.items.len != 0) {
+            const frame = &frames.items[frames.items.len - 1];
+            if (frame.edge == no_index) {
+                try postorder.append(gpa, frame.node);
+                _ = frames.pop();
+            } else {
+                const edge_index = frame.edge;
+                frame.edge = next_out[edge_index];
+                const child = edges[edge_index].to;
+                if (order[child] != no_index) continue;
+                order[child] = 0;
+                try frames.append(gpa, .{ .node = child, .edge = outgoing[child] });
+            }
+        }
+        std.mem.reverse(u32, postorder.items);
+        for (postorder.items, 0..) |node, index| order[node] = @intCast(index);
+        const idom = try gpa.alloc(u32, count);
+        defer gpa.free(idom);
+        @memset(idom, no_index);
+        idom[entry] = entry;
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (postorder.items[1..]) |node| {
+                var parent: u32 = no_index;
+                var edge_index = incoming[node];
+                while (edge_index != no_index) : (edge_index = next_in[edge_index]) {
+                    const predecessor = edges[edge_index].from;
+                    if (idom[predecessor] == no_index) continue;
+                    if (parent == no_index) {
+                        parent = predecessor;
+                    } else {
+                        var other = predecessor;
+                        while (parent != other) {
+                            if (order[parent] > order[other]) {
+                                parent = idom[parent];
+                            } else {
+                                other = idom[other];
+                            }
+                        }
+                    }
+                }
+                std.debug.assert(parent != no_index);
+                if (idom[node] != parent) {
+                    idom[node] = parent;
+                    changed = true;
+                }
+            }
+        }
+        // Reuse the node columns as first-child and next-sibling links for
+        // the solved dominator tree. Unreachable nodes retain no interval.
+        @memset(outgoing, no_index);
+        @memset(incoming, no_index);
+        for (postorder.items[1..]) |node| {
+            incoming[node] = outgoing[idom[node]];
+            outgoing[idom[node]] = node;
+        }
+        const enter = try gpa.alloc(u32, count);
+        errdefer gpa.free(enter);
+        const leave = try gpa.alloc(u32, count);
+        errdefer gpa.free(leave);
+        @memset(enter, no_index);
+        @memset(leave, no_index);
+        var clock: u32 = 0;
+        enter[entry] = clock;
+        clock += 1;
+        try frames.append(gpa, .{ .node = entry, .edge = outgoing[entry] });
+        while (frames.items.len != 0) {
+            const frame = &frames.items[frames.items.len - 1];
+            if (frame.edge == no_index) {
+                leave[frame.node] = clock;
+                _ = frames.pop();
+            } else {
+                const child = frame.edge;
+                frame.edge = incoming[child];
+                enter[child] = clock;
+                clock += 1;
+                try frames.append(gpa, .{ .node = child, .edge = outgoing[child] });
+            }
+        }
+        return .{ .enter = enter, .leave = leave };
     }
-    return true;
+
+    fn deinit(self: *StatementDominance, gpa: Allocator) void {
+        gpa.free(self.enter);
+        gpa.free(self.leave);
+    }
+
+    fn dominates(self: StatementDominance, dominator: LIR.CFStmtId, target: LIR.CFStmtId) bool {
+        const a = @intFromEnum(dominator);
+        const b = @intFromEnum(target);
+        std.debug.assert(self.enter[a] != no_index and self.enter[b] != no_index);
+        return self.enter[a] <= self.enter[b] and self.enter[b] < self.leave[a];
+    }
+};
+
+test "statement dominance agrees with deleted-node reachability on every four-node graph" {
+    const gpa = std.testing.allocator;
+    // All directed edges between distinct nodes: includes diamonds, cycles,
+    // irreducible loops, multiple entry successors, and unreachable regions.
+    for (0..4096) |mask| {
+        var edge_buffer: [12]StatementDominance.Edge = undefined;
+        var edge_count: usize = 0;
+        var bit: u4 = 0;
+        for (0..4) |from| {
+            for (0..4) |to| {
+                if (from == to) continue;
+                if (mask & (@as(usize, 1) << bit) != 0) {
+                    edge_buffer[edge_count] = .{ .from = @intCast(from), .to = @intCast(to) };
+                    edge_count += 1;
+                }
+                bit += 1;
+            }
+        }
+        const edges = edge_buffer[0..edge_count];
+        var dominance = try StatementDominance.initGraph(gpa, 4, 0, edges);
+        defer dominance.deinit(gpa);
+        for (0..4) |removed| {
+            if (dominance.enter[removed] == no_index) continue;
+            var reachable: [4]bool = .{ removed != 0, false, false, false };
+            var changed = true;
+            while (changed) {
+                changed = false;
+                for (edges) |edge| {
+                    if (edge.to != removed and reachable[edge.from] and !reachable[edge.to]) {
+                        reachable[edge.to] = true;
+                        changed = true;
+                    }
+                }
+            }
+            for (0..4) |target| {
+                if (dominance.enter[target] == no_index) continue;
+                try std.testing.expectEqual(!reachable[target], dominance.dominates(
+                    @enumFromInt(@as(u32, @intCast(removed))),
+                    @enumFromInt(@as(u32, @intCast(target))),
+                ));
+            }
+        }
+    }
 }
 
 /// Solve takes for every reachable statement in the store.
@@ -980,6 +1155,21 @@ pub fn compute(
     defer gpa.free(projected_stmt);
     @memset(projected_stmt, no_index);
     for (projection_edges.items) |edge| projected_stmt[@intFromEnum(edge.target)] = @intFromEnum(edge.stmt);
+    // Compare only projections of the same explicit ownership root, rather
+    // than scanning every local in the module for each projected container.
+    const root_heads = try gpa.alloc(u32, store.localCount());
+    defer gpa.free(root_heads);
+    @memset(root_heads, no_index);
+    const root_next = try gpa.alloc(u32, store.localCount());
+    defer gpa.free(root_next);
+    @memset(root_next, no_index);
+    for (projected_root, 0..) |root, index| {
+        if (root == no_index or projected_stmt[index] == no_index) continue;
+        root_next[index] = root_heads[root];
+        root_heads[root] = @intCast(index);
+    }
+    var dominance = try StatementDominance.init(gpa, store);
+    defer dominance.deinit(gpa);
     for (projected_root, 0..) |root, local_index| {
         if (root == no_index) continue;
         const local: LIR.LocalId = @enumFromInt(@as(u32, @intCast(local_index)));
@@ -988,15 +1178,15 @@ pub fn compute(
         const target_stmt_index = projected_stmt[local_index];
         if (target_stmt_index == no_index) continue;
         var representative: u32 = @intCast(local_index);
-        for (projected_root, 0..) |other_root, other_index| {
-            if (other_root != root or projected_stmt[other_index] == no_index) continue;
+        var other_index = root_heads[root];
+        while (other_index != no_index) : (other_index = root_next[other_index]) {
             const other: LIR.LocalId = @enumFromInt(@as(u32, @intCast(other_index)));
             if (store.getLocal(other).layout_idx != store.getLocal(local).layout_idx) continue;
             const other_stmt: LIR.CFStmtId = @enumFromInt(projected_stmt[other_index]);
             const target_stmt: LIR.CFStmtId = @enumFromInt(target_stmt_index);
-            if (!try statementDominates(store, gpa, other_stmt, target_stmt)) continue;
+            if (!dominance.dominates(other_stmt, target_stmt)) continue;
             const representative_stmt: LIR.CFStmtId = @enumFromInt(projected_stmt[representative]);
-            if (try statementDominates(store, gpa, other_stmt, representative_stmt)) {
+            if (dominance.dominates(other_stmt, representative_stmt)) {
                 representative = @intCast(other_index);
             }
         }
