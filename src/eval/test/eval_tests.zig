@@ -1258,7 +1258,12 @@ const core_tests = [_]TestCase{
         .expected = .{ .inspect_str = "(3, 3, 2, 2, 2, 2.0, 2.0, Ok(2.0), Ok(2.0))" },
     },
     .{
-        .name = "pipe RHS includes its postfix method chain",
+        .name = "pipe inserts lhs as first explicit method argument",
+        .source = "([1, 2, 3] |> [1].concat(), 1 |> 1.plus(), \"roc \" |> \"and roll\".with_prefix())",
+        .expected = .{ .inspect_str = "([1.0, 1.0, 2.0, 3.0], 2.0, \"roc and roll\")" },
+    },
+    .{
+        .name = "grouped pipe method target calls the method result",
         .source_kind = .module,
         .source =
         \\Holder := { n : I64 }.{
@@ -1269,9 +1274,30 @@ const core_tests = [_]TestCase{
         \\bar : I64 -> Holder
         \\bar = |n| Holder.{ n: n }
         \\
-        \\main = 2 |> bar(3).blah()
+        \\main = 2 |> (bar(3).blah())
         ,
         .expected = .{ .inspect_str = "5" },
+    },
+    .{
+        .name = "pipe supplies the first explicit method argument",
+        .source_kind = .module,
+        .source =
+        \\Holder := { n : I64 }.{
+        \\    add : Holder, I64 -> I64
+        \\    add = |holder, value| holder.n + value
+        \\
+        \\    sum : Holder, I64, I64 -> I64
+        \\    sum = |holder, left, right| holder.n + left + right
+        \\
+        \\    make_adder : Holder -> (I64 -> I64)
+        \\    make_adder = |holder| |value| holder.n + value
+        \\}
+        \\
+        \\holder = Holder.{ n: 3 }
+        \\
+        \\main = (2 |> holder.add(), 2 |> holder.sum(4), 2 |> holder.sum(4) + 1, 2 |> holder.make_adder()())
+        ,
+        .expected = .{ .inspect_str = "(5, 9, 10, 5)" },
     },
     .{
         .name = "whitespace-separated postfix applies to completed pipe",
