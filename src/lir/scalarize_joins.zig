@@ -133,7 +133,47 @@ const AliasDef = struct {
     source: LIR.LocalId,
     /// A local defined by more than one alias statement is never transparent.
     def_count: u32,
+    root_state: enum { pending, active, complete } = .pending,
+    /// Null for a transparent cycle, which cannot reach a constructor or a
+    /// join parameter and therefore cannot authorize scalarizing either.
+    root: ?LIR.LocalId = null,
 };
+
+/// Compress the settled alias graph once per collection round. Every
+/// transparent edge is followed once; an active node proves a cycle.
+fn resolveTransparentRoots(
+    allocator: Allocator,
+    alias_defs: *collections.DenseMap(LIR.LocalId, AliasDef),
+    transparent: *const collections.DenseMap(LIR.LocalId, void),
+) ScalarizeError!void {
+    var path = std.ArrayList(LIR.LocalId).empty;
+    defer path.deinit(allocator);
+    var aliases = alias_defs.iterator();
+    while (aliases.next()) |entry| {
+        const start = entry.key_ptr.*;
+        if (!transparent.contains(start) or entry.value_ptr.root_state == .complete) continue;
+        path.clearRetainingCapacity();
+        var current = start;
+        const root: ?LIR.LocalId = while (true) {
+            if (!transparent.contains(current)) break current;
+            const def = alias_defs.getPtr(current).?;
+            switch (def.root_state) {
+                .complete => break def.root,
+                .active => break null,
+                .pending => {
+                    try path.append(allocator, current);
+                    def.root_state = .active;
+                    current = def.source;
+                },
+            }
+        };
+        for (path.items) |local| {
+            const def = alias_defs.getPtr(local).?;
+            def.root = root;
+            def.root_state = .complete;
+        }
+    }
+}
 
 const Pass = struct {
     store: *LirStore,
@@ -357,20 +397,25 @@ const Pass = struct {
             }
         }
 
-        var changed = true;
-        while (changed) {
-            changed = false;
-            var candidates = self.alias_defs.iterator();
-            while (candidates.next()) |entry| {
-                const target = entry.key_ptr.*;
-                if (!self.transparent.contains(target)) continue;
-                if (self.use_other.contains(target)) {
-                    _ = self.transparent.remove(target);
-                    try self.noteUse(entry.value_ptr.source);
-                    changed = true;
-                }
+        // Each demotion can affect only its source. Process that edge once
+        // instead of rescanning the whole table for every link in a chain.
+        var pending = std.ArrayList(LIR.LocalId).empty;
+        defer pending.deinit(self.allocator);
+        var candidates = self.alias_defs.iterator();
+        while (candidates.next()) |entry| {
+            const target = entry.key_ptr.*;
+            if (self.transparent.contains(target) and self.use_other.contains(target)) {
+                try pending.append(self.allocator, target);
             }
         }
+        while (pending.pop()) |target| {
+            if (!self.transparent.remove(target)) continue;
+            const source = self.alias_defs.get(target).?.source;
+            try self.noteUse(source);
+            if (self.transparent.contains(source)) try pending.append(self.allocator, source);
+        }
+
+        try resolveTransparentRoots(self.allocator, &self.alias_defs, &self.transparent);
 
         // A multiply-defined alias already counted its sources at collection.
         var settled = self.alias_defs.iterator();
@@ -381,11 +426,9 @@ const Pass = struct {
                 // Transparent reads still count toward initializer-build
                 // qualification: a build read through an alias must not be
                 // splatted away, or the alias's reads would dangle.
-                if (self.struct_builds.getPtr(self.transparentRoot(def.source))) |build| {
-                    build.uses += 1;
-                }
-                if (self.tag_builds.getPtr(self.transparentRoot(def.source))) |build| {
-                    build.uses += 1;
+                if (self.transparentRoot(def.source)) |root| {
+                    if (self.struct_builds.getPtr(root)) |build| build.uses += 1;
+                    if (self.tag_builds.getPtr(root)) |build| build.uses += 1;
                 }
             } else if (def.def_count == 1) {
                 try self.noteUse(def.source);
@@ -393,17 +436,11 @@ const Pass = struct {
         }
     }
 
-    /// Follow a transparent-alias chain to the local whose value it reads.
-    fn transparentRoot(self: *const Pass, source: LIR.LocalId) LIR.LocalId {
-        var root = source;
-        var steps: usize = 0;
-        while (self.transparent.contains(root)) {
-            const def = self.alias_defs.get(root) orelse break;
-            root = def.source;
-            steps += 1;
-            if (steps > self.alias_defs.count()) break;
-        }
-        return root;
+    fn transparentRoot(self: *const Pass, source: LIR.LocalId) ?LIR.LocalId {
+        if (!self.transparent.contains(source)) return source;
+        const def = self.alias_defs.get(source).?;
+        std.debug.assert(def.root_state == .complete);
+        return def.root;
     }
 
     /// The transparent aliases rooted at `param`, in dependency order, plus
@@ -2532,4 +2569,69 @@ test "scalarize splits a parameter shared by two joins" {
     try testing.expectEqual(GuardedList.at(outer_params, 0), new_read_n.op.local);
     const new_read_s = store.getCFStmt(read_s).assign_ref;
     try testing.expectEqual(GuardedList.at(inner_params, 1), new_read_s.op.local);
+}
+
+test "scalarize propagates an escaping whole value through a long alias chain" {
+    var f = try ScalarizeTest.init(testing.allocator);
+    defer f.deinit();
+    const store = &f.store;
+    const num = try store.addLocal(.{ .layout_idx = .i64 });
+    const text = try store.addLocal(.{ .layout_idx = .str });
+    const record = try store.addLocal(.{ .layout_idx = f.pair });
+    const field = try store.addLocal(.{ .layout_idx = .i64 });
+    var locals = std.ArrayList(LIR.LocalId).empty;
+    defer locals.deinit(testing.allocator);
+    try locals.append(testing.allocator, record);
+    for (0..5000) |_| try locals.append(testing.allocator, try store.addLocal(.{ .layout_idx = f.pair }));
+    const result = locals.items[locals.items.len - 1];
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+    var body = ret;
+    var index = locals.items.len - 1;
+    while (index > 0) : (index -= 1) {
+        body = try store.addCFStmt(.{ .assign_ref = .{
+            .target = locals.items[index],
+            .op = .{ .local = locals.items[index - 1] },
+            .next = body,
+        } });
+    }
+    body = try store.addCFStmt(.{ .assign_ref = .{ .target = field, .op = .{ .field = .{ .source = record, .field_idx = 0 } }, .next = body } });
+    const build = try store.addCFStmt(.{ .assign_struct = .{ .target = record, .fields = try store.addLocalSpan(&.{ num, text }), .next = body } });
+    const proc_id = try store.addProcSpec(.{ .name = store.freshSyntheticSymbol(), .args = try store.addLocalSpan(&.{ num, text }), .body = build, .ret_layout = f.pair });
+    try run(store, &f.layouts);
+    // The field read does not justify deleting the constructor: the last
+    // alias returns the entire record, so that use must reach its producer.
+    try testing.expectEqual(build, store.getProcSpec(proc_id).body.?);
+    try testing.expect(store.getCFStmt(build) == .assign_struct);
+    try testing.expectEqual(result, store.getCFStmt(ret).ret.value);
+}
+
+test "scalarize alias roots share resolved tails and identify cycles explicitly" {
+    const allocator = testing.allocator;
+    var aliases = collections.DenseMap(LIR.LocalId, AliasDef).init(allocator);
+    defer aliases.deinit();
+    var transparent = collections.DenseMap(LIR.LocalId, void).init(allocator);
+    defer transparent.deinit();
+    for (0..10_000) |index| {
+        const local: LIR.LocalId = @enumFromInt(@as(u32, @intCast(index)));
+        try aliases.put(local, .{ .stmt = @enumFromInt(0), .source = @enumFromInt(@as(u32, @intCast(index + 1))), .def_count = 1 });
+        try transparent.put(local, {});
+    }
+    // A cycle and a separate incoming edge have no constructor/parameter
+    // root. Their exact graph is retained instead of selecting a guessed root.
+    for ([_]u32{ 10_002, 10_001, 10_002 }, 10_001..) |source, index| {
+        const local: LIR.LocalId = @enumFromInt(@as(u32, @intCast(index)));
+        try aliases.put(local, .{ .stmt = @enumFromInt(0), .source = @enumFromInt(source), .def_count = 1 });
+        try transparent.put(local, {});
+    }
+    try resolveTransparentRoots(allocator, &aliases, &transparent);
+    for (0..10_000) |index| {
+        const def = aliases.get(@enumFromInt(@as(u32, @intCast(index)))).?;
+        try testing.expectEqual(.complete, def.root_state);
+        try testing.expectEqual(@as(LIR.LocalId, @enumFromInt(10_000)), def.root.?);
+    }
+    for (10_001..10_004) |index| {
+        const def = aliases.get(@enumFromInt(@as(u32, @intCast(index)))).?;
+        try testing.expectEqual(.complete, def.root_state);
+        try testing.expectEqual(null, def.root);
+    }
 }
