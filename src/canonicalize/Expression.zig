@@ -1049,7 +1049,16 @@ pub const Expr = union(enum) {
                 const region = ir.store.getExprRegion(expr_idx);
                 try ir.appendRegionInfoToSExprTreeFromRegion(tree, region);
                 try tree.pushStringPair("source", ir.getIdent(e.source_ident));
-                try tree.pushStringPair("target-module", ir.moduleIdentityDisplayText(e.module_identity));
+                const module_name = ir.moduleIdentityDisplayText(e.module_identity);
+                // Use the same builtin display marker as external lookups.
+                if (std.mem.eql(u8, module_name, "Builtin") or CIR.Import.isCompilerBuiltinImportName(module_name)) {
+                    const field_begin = tree.beginNode();
+                    try tree.pushStaticAtom("builtin");
+                    const field_attrs = tree.beginNode();
+                    try tree.endNode(field_begin, field_attrs);
+                } else {
+                    try tree.pushStringPair("target-module", module_name);
+                }
                 try tree.pushStringPairFmt("target-node", "{d}", .{e.target_node_idx});
                 try tree.pushStringPairFmt("target-def", "{d}", .{@intFromEnum(e.target_def_idx)});
                 const attrs = tree.beginNode();
