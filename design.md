@@ -136,6 +136,14 @@ is not a reason to hash an ID. Direct columns avoid hashing, table growth,
 repeated key storage, allocator traffic, and duplicate per-consumer indexing
 work.
 
+LLVM's store-indexed local-slot and deferred-capture columns retain capacity
+across procedures and module generation. Only newly added store rows are
+initialized. Procedure exit, including allocation failure, invalidates the
+explicit argument/frame inventory and clears tracked captures; it never scans
+the whole store. Specialized procedures may share `LocalId`s, but their LLVM
+slot values must never survive into another procedure. These columns preserve
+direct indexing without introducing a remapping lookup on every local access.
+
 The suffix `...Key` is reserved for structural or composite identity for which
 a dense owner-relative ID cannot preserve the required identity. Examples
 include identities which must remain stable before or across serialization,

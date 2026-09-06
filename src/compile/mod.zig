@@ -157,6 +157,7 @@ test "compile tests" {
     std.testing.refAllDecls(@import("test/issue_11103_test.zig"));
     std.testing.refAllDecls(@import("test/issue_11062_test.zig"));
     std.testing.refAllDecls(@import("test/issue_11098_test.zig"));
+    std.testing.refAllDecls(@import("test/issue_11132_test.zig"));
     std.testing.refAllDecls(@import("test/issue_11130_test.zig"));
     std.testing.refAllDecls(@import("test/issue_11131_test.zig"));
     std.testing.refAllDecls(@import("test/package_effect_boundary_test.zig"));
