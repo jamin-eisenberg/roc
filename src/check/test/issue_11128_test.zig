@@ -4,7 +4,7 @@ const CheckedArtifact = @import("../checked_artifact.zig");
 const TopLevelProcedureBinding = CheckedArtifact.TopLevelProcedureBinding;
 const TopLevelProcedureBindingTable = CheckedArtifact.TopLevelProcedureBindingTable;
 
-fn schemeAllocationFailures(gpa: std.mem.Allocator) !void {
+fn schemeAllocationFailures(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{TestExpectedEqual})!void {
     var store = CheckedArtifact.CheckedTypeStore{};
     defer store.deinit(gpa);
     var inserted: usize = 0;
@@ -97,7 +97,7 @@ test "issue 11128 wrapper and callable template appends stay amortized" {
     }
 }
 
-fn bindingAllocationFailures(gpa: std.mem.Allocator) !void {
+fn bindingAllocationFailures(gpa: std.mem.Allocator) (std.mem.Allocator.Error || error{TestExpectedEqual})!void {
     var table = TopLevelProcedureBindingTable.initEmpty();
     defer table.deinit(gpa);
     var count: usize = 0;

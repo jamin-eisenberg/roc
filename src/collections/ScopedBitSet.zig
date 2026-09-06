@@ -188,7 +188,7 @@ test "ScopedBitSet randomized scopes agree with independent bit sets" {
     }
 }
 
-fn allocationFailureScenario(gpa: Allocator) !void {
+fn allocationFailureScenario(gpa: Allocator) Allocator.Error!void {
     var set_ = try Self.initEmpty(gpa, 4096);
     defer set_.deinit(gpa);
     try set_.set(gpa, 1);

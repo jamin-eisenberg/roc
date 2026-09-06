@@ -136,27 +136,28 @@ is not a reason to hash an ID. Direct columns avoid hashing, table growth,
 repeated key storage, allocator traffic, and duplicate per-consumer indexing
 work.
 
-Mutable checked-artifact tables retain contiguous capacity throughout
-publication, including when procedure templates are extended with compile-time
-entry wrappers. Known batch sizes reserve capacity once; incremental appends
-grow amortized. Publication must not repeatedly copy a completed prefix, and
-serialization writes only live rows, never spare capacity.
+Mutable checked module tables retain contiguous capacity while checking
+produces its output, including when procedure templates are extended with
+compile-time entry wrappers. Known batch sizes reserve capacity once;
+incremental appends grow amortized. Producing checked module data must not
+repeatedly copy a completed prefix, and serialization writes only live rows,
+never spare capacity.
 
 Checked source schemes are interned by their complete structural keys. The
 owning table retains the first representative root and assigns dense scheme
 IDs in insertion order. Its probing index stores only those IDs and travels
-with the serialized artifact, so mutable and frozen lookups never scan the
+with the serialized checked module, so mutable and frozen lookups never scan the
 scheme table or rebuild an index from its rows.
 
-During publication of an immutable source module, the producer computes each
-requested source scheme once and retains its scheme ID by resolved source
+While producing checked data for an immutable source module, checking computes
+each requested source scheme once and retains its scheme ID by resolved source
 variable. Consumers use that explicit source identity; a specialized checked
 root's scheme cannot substitute for the source scheme. This index is temporary
 and is released after its last consumer, before compile-time evaluation; error
 exits also release it. Scheme hashing may reuse traversal
 capacity, but every complete digest starts fresh identity and cycle numbering,
 including after allocation failure. Neither this index nor hashing scratch is
-added to the serialized artifact or reused across source-store mutations.
+added to the serialized checked module or reused across source-store mutations.
 
 Instantiation substitutions, generalization visitation, and per-query function
 effect memos retain sparse storage while clearing and iterating only live
