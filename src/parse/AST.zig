@@ -1974,12 +1974,6 @@ pub const Header = union(enum) {
                 }
                 try tree.endNode(exposes_begin, attrs2);
 
-                // Platform
-                if (a.platform_idx) |platform_idx| {
-                    const platform = ast.store.getRecordField(platform_idx);
-                    try platform.pushToSExprTree(gpa, env, ast, tree);
-                }
-
                 // Packages
                 const packages_coll = ast.store.getCollection(a.packages);
                 const packages_items = ast.store.recordFieldSlice(.{ .span = packages_coll.span });
