@@ -12768,7 +12768,7 @@ the resolved function/table identities and final module reachability that
 were unavailable before linking. They do not invoke Binaryen's default
 optimization pipeline or repeat inlining, precomputation, or local coalescing
 over LLVM's optimized output. The CLI selects the pass list explicitly;
-the Binaryen bridge executes that list without selecting additional passes.
+`RocBinaryenOptimizeWasm` executes that list without selecting additional passes.
 Lowering Binaryen's optimize level is not a way to select this pipeline:
 even level zero runs local coalescing through `BinaryenModuleOptimize`.
 
