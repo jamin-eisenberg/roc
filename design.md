@@ -12760,13 +12760,31 @@ during the final link. Undefined functions referenced by the linked objects may
 remain host imports, but the linker must not treat a missing declared export as
 such an import or silently discard it.
 
-After the final wasm link, size builds run Binaryen at optimize level 2 and
+After the final wasm link, LLVM speed builds run an explicit Binaryen cleanup
+pipeline: directize, remove-unused-brs, optimize-instructions, dce, vacuum,
+duplicate-function elimination, unused module item removal, and memory
+packing. These passes simplify the final wasm instructions and use
+the resolved function/table identities and final module reachability that
+were unavailable before linking. They do not invoke Binaryen's default
+optimization pipeline or repeat inlining, precomputation, or local coalescing
+over LLVM's optimized output. The CLI selects the pass list explicitly;
+the Binaryen bridge executes that list without selecting additional passes.
+Lowering Binaryen's optimize level is not a way to select this pipeline:
+even level zero runs local coalescing through `BinaryenModuleOptimize`.
+
+Size builds run Binaryen's default pipeline at optimize level 2 and
 shrink level 2, validate the resulting module, and remove debug, producer, and
 target-feature custom sections from non-debug output. Removing the
 target-feature custom section does not alter the wasm code section; Binaryen
 validates the module after the metadata is removed. The removed custom section
 is not part of the runtime ABI. Debug builds retain debugging and
 target-feature metadata.
+
+Validation and metadata stripping are independent of optimization pass
+selection. Both speed and size builds validate the final module, preserve
+the platform's imported-memory initialization contract and target instruction
+features, and strip debug metadata only for non-debug output. Both remove
+producer metadata; only non-debug size builds remove target-feature metadata.
 
 ## Host Symbol ABI
 
