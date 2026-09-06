@@ -4515,13 +4515,22 @@ field and tuple-item reads from that local. A leaf that would duplicate runtime
 work through structural reuse, or that references an initializer-private
 binding, becomes such a read. If no field or tuple-item read exists, only that
 substructure becomes opaque. Materializing the pair therefore never
-reconstructs or copies the recursive value. Materializing a chain with a
-recursive anchor emits an ordinary block in source order; an acyclic chain
-retains the ordinary nested-let representation. This finite structure ending
-in an explicit local back-edge permits the same call-pattern and
-callable-worker specialization as an acyclic value without unrolling
-recursion, moving runtime work out of recursive scope, or reconstructing a
-vanished source binding.
+reconstructs or copies the recursive value. This finite structure ending in an
+explicit local back-edge permits the same call-pattern and callable-worker
+specialization as an acyclic value without unrolling recursion, moving runtime
+work out of recursive scope, or reconstructing a vanished source binding.
+
+Materializing any binding chain emits one flat block in source order. Sequence
+length must not become expression nesting depth; consumers iterate the statement
+span without copying or repeatedly scanning its remaining tail. Record-update
+normalization captures the evaluated base once, then snapshots all unchanged
+fields in one typed record-destructuring binding before cloning replacement
+computations. Record width increases the pattern's field span, not the number
+of sequential expression bindings. The old base must not remain live solely to
+read unchanged fields after replacement work: doing so would keep its
+collections shared and prevent ARC from permitting in-place mutation.
+Structural consumers retain the complete exact field view, and no consumer
+reconstructs missing field or evaluation-order information.
 
 This follows the useful ownership discipline of GHC's simplifier floats: an
 expression transformation produces an ordered binding collection together with
@@ -7602,9 +7611,11 @@ explicitly updated fields until LIR construction. This distinction is required
 while a Monotype solve group is open: the result type can gain fields from later
 constraints, so enumerating the current type shape and expanding an update at
 that point would permanently omit fields that the final closed type contains.
-Lambda Solved relates the base to the update result and checks each explicit
-field against the final record type. Direct LIR lowering evaluates the base
-once, reads all unchanged fields before evaluating update expressions, and
+Lambda Solved relates only unchanged fields of the base to the update result
+and checks each replacement against the result field's type. A replacement may
+have a different specialized representation or callable set from the old field;
+relating the entire base and result would incorrectly unify those positions.
+Direct LIR lowering evaluates the base once, reads all unchanged fields before evaluating update expressions, and
 writes the final fields in committed runtime order. A `record_update` may carry
 a structural, alias, or nominal record result type directly; unlike `record`,
 `tuple`, and `tag`, it is a base-preserving transformation rather than a fresh
@@ -8612,6 +8623,13 @@ The solver:
 - solves recursive groups as groups, not by accidental declaration order
 - verifies each lifted jump is lexically scoped and unifies its arguments with
   the corresponding join-point parameter types
+
+Expression inference uses an explicit, reusable continuation stack. A suspended
+block owns one statement cursor, and a suspended match owns its branch and
+binding cursors; sequence length never becomes native call-stack depth. Child
+constraints are completed in source order, with the expected-slot relation
+applied before entering a child and finished after it returns. Loop, join, and
+return scopes remain active for exactly their original lexical extent.
 
 Structural unification, including inspectable nominal-backing relations, runs
 on one explicit work stack. A backing relation isolates an interned structural
@@ -10022,6 +10040,15 @@ closure queries visit their own members without allocating a list per alias.
 Independent ordinary constructor eliminations share one analysis and edge
 patching traversal. Their dependencies used as constructor operands remain
 whole-value uses until the next analysis; join ABI changes require fresh data.
+
+Alias transparency is a monotone dataflow calculation. A worklist propagates
+whole-value uses backward along alias edges, demoting each candidate once.
+After that fixed point, one iterative traversal caches each transparent alias's
+root for the current collection round. An active edge identifies a cycle; a
+cycle has no constructor or join-parameter root and cannot authorize their
+scalarization. Rewrites invalidate this per-round inventory before the next
+collection. Neither propagation nor root lookup repeatedly walks the same long
+chain.
 
 ## Integer Arithmetic Operations
 
