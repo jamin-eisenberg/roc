@@ -10886,8 +10886,8 @@ chooses the earliest same-root, same-layout read that dominates each later read
 and rewrites those later reads as explicit local aliases before ARC solving.
 Dominance is computed once from the explicit statement-successor graph with a
 synthetic entry for all procedure roots. Immediate dominators settle in reverse
-postorder, and dominator-tree intervals answer projection queries without
-re-walking procedure bodies. Projection comparisons are indexed by their
+postorder, and dominator-tree intervals answer field-read and tag-payload-read
+dominance queries without re-walking procedure bodies. Read comparisons are indexed by their
 explicit ownership root rather than scanning unrelated locals.
 Divergent reads remain separate places. This canonicalization is justified only
 by the committed field or tag-payload operation and explicit CFG dominance; it
