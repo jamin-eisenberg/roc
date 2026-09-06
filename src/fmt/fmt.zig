@@ -1589,6 +1589,10 @@ const Formatter = struct {
             },
             .single_quote => |s| {
                 try fmt.pushTokenText(s.token);
+                if (s.type_ident) |type_ident| {
+                    try fmt.push('.');
+                    try fmt.pushAll(fmt.ast.env.getIdent(type_ident));
+                }
             },
             .ident => |i| {
                 const qualifier_tokens = fmt.ast.store.tokenSlice(i.qualifiers);
@@ -1704,6 +1708,9 @@ const Formatter = struct {
                         const apply_fn_idx = apply.@"fn";
                         const apply_fn = fmt.ast.store.getExpr(apply_fn_idx);
                         const args = fmt.ast.store.exprSlice(apply.args);
+                        const fn_is_call = apply_fn == .apply or
+                            apply_fn == .method_call or
+                            apply_fn == .nominal_apply;
 
                         // A direct empty argument list contributes no arguments
                         // beyond the piped value. Remove it unless a following
@@ -1711,7 +1718,7 @@ const Formatter = struct {
                         // doing so would expose another application as the RHS.
                         // (`value |> make()()` must remain distinct from
                         // `value |> make()`.)
-                        if (args.len == 0 and apply_fn != .apply and !format_context.question_suffix_follows) {
+                        if (args.len == 0 and !fn_is_call and !format_context.question_suffix_follows) {
                             const right_region = fmt.nodeRegion(@intFromEnum(ld.right));
                             const closing_token = right_region.end - 1;
                             if (fmt.hasCommentBefore(closing_token) and try fmt.flushCommentsBefore(closing_token)) {
@@ -1775,11 +1782,14 @@ const Formatter = struct {
                     .for_expr,
                     .malformed,
                     => {
-                        // A pipe target can start with a name or grouping
-                        // parenthesis. Postfix chains rooted in a name are
-                        // therefore safe without grouping; all other ASTs need
-                        // parentheses so migrating `->` preserves valid syntax.
-                        const needs_parens = !fmt.exprCanStartPipeTargetUnparenthesized(ld.right);
+                        // Method-insertion syntax is intentionally ungrouped.
+                        // Ordinary complete method calls stay grouped so they
+                        // continue to mean "call the method result." Other ASTs
+                        // follow the general pipe-target grammar.
+                        const needs_parens = switch (ld.target_kind) {
+                            .method_call => false,
+                            .ordinary => right_expr == .method_call or !fmt.exprCanStartPipeTargetUnparenthesized(ld.right),
+                        };
                         if (needs_parens) {
                             try fmt.formatPipeTargetParens(ld.right, right_expr == .multiline_string or right_expr == .typed_multiline_string);
                         } else {
@@ -2427,6 +2437,10 @@ const Formatter = struct {
             .single_quote => |sq| {
                 region = sq.region;
                 try fmt.formatIdent(sq.token, null);
+                if (sq.type_ident) |type_ident| {
+                    try fmt.push('.');
+                    try fmt.pushAll(fmt.ast.env.getIdent(type_ident));
+                }
             },
             .int => |n| {
                 region = n.region;
@@ -3599,7 +3613,7 @@ const Formatter = struct {
                         try fmt.newline();
                     }
                 } else if (!fmt.has_newline) {
-                    try fmt.push(' ');
+                    fmt.setInlineCommentSeparator();
                 }
                 try fmt.push('#');
                 const comment_text = between_text[comment_start..comment_end];
@@ -3675,7 +3689,7 @@ const Formatter = struct {
                 if (newline_count > 0 or fmt.has_newline) {
                     try fmt.pushIndent();
                 } else {
-                    try fmt.push(' ');
+                    fmt.setInlineCommentSeparator();
                 }
                 try fmt.push('#');
                 const comment_text = between_text[comment_start..comment_end];
@@ -3718,6 +3732,11 @@ const Formatter = struct {
 
         // Return true if there was a newline, whether or not there was a comment
         return newline_count > 0;
+    }
+
+    inline fn setInlineCommentSeparator(fmt: *Formatter) void {
+        std.debug.assert(!fmt.has_newline);
+        fmt.pending_spaces = 1;
     }
 
     fn push(fmt: *Formatter, c: u8) error{WriteFailed}!void {
@@ -4913,6 +4932,26 @@ test "pipe owns the postfix chain on its right" {
     try std.testing.expectEqualStrings("a = foo |> bar(baz).blah()\n", result);
 }
 
+test "literal method pipe targets and grouped result calls format stably" {
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\a=[1,2,3]|>[1].concat()
+        \\b=1|>1.plus()
+        \\c="roc "|>"and roll".with_prefix()
+        \\d=x|>(receiver.method())
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "a = [1, 2, 3] |> [1].concat()\n" ++
+            "\n" ++
+            "b = 1 |> (1).plus()\n" ++
+            "\n" ++
+            "c = \"roc \" |> \"and roll\".with_prefix()\n" ++
+            "\n" ++
+            "d = x |> (receiver.method())\n",
+        result,
+    );
+}
+
 test "formatter preserves an old arrow's postfix grouping during migration" {
     const result = try moduleFmtsStable(std.testing.allocator, "a=foo->bar(baz).blah()", false);
     defer std.testing.allocator.free(result);
@@ -4923,6 +4962,26 @@ test "pipe drops direct empty target argument lists" {
     const result = try moduleFmtsStable(std.testing.allocator, "a=(x|>foo(),x|>Ok(),x|>(|v|v)())", false);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("a = (x |> foo, x |> Ok, x |> (|v| v))\n", result);
+}
+
+test "issue 11045: pipe keeps empty argument lists on method targets" {
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\my_const = []
+        \\
+        \\_ = [1, 2, 3] |> my_const.concat()
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "my_const = []\n\n" ++
+            "_ = [1, 2, 3] |> my_const.concat()\n",
+        result,
+    );
+}
+
+test "pipe keeps an empty target application after a method call" {
+    const result = try moduleFmtsStable(std.testing.allocator, "a=x|>receiver.method()()", false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("a = x |> receiver.method()()\n", result);
 }
 
 test "pipe keeps comments from removed empty argument lists" {
@@ -4948,6 +5007,15 @@ test "pipe keeps comments from removed empty argument lists" {
             "\tfoo\n",
         result,
     );
+}
+
+test "issue 11043: parenthesized pipe target with a comment-only argument list is idempotent" {
+    // Repro for https://github.com/roc-lang/roc/issues/11043
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\t=0|>(0)(#
+        \\)
+    , false);
+    defer std.testing.allocator.free(result);
 }
 
 test "multiline pipes start indented lines" {

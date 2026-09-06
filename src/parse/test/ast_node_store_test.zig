@@ -15,7 +15,7 @@ fn rand_idx(random: std.Random, comptime T: type) T {
             .attributes = .{
                 .effectful = random.boolean(),
                 .ignored = random.boolean(),
-                .reassignable = random.boolean(),
+                .reserved = random.boolean(),
             },
             .idx = random.int(u29),
         };
@@ -475,6 +475,7 @@ test "NodeStore round trip - Pattern" {
         .single_quote = .{
             .region = rand_region(random),
             .token = rand_token_idx(random),
+            .type_ident = rand_idx(random, base.Ident.Idx),
         },
     });
     try patterns.append(gpa, AST.Pattern{
@@ -713,6 +714,7 @@ test "NodeStore round trip - Expr" {
         .single_quote = .{
             .region = rand_region(random),
             .token = rand_token_idx(random),
+            .type_ident = rand_idx(random, base.Ident.Idx),
         },
     });
     try expressions.append(gpa, AST.Expr{
@@ -826,6 +828,7 @@ test "NodeStore round trip - Expr" {
             .right = rand_idx(random, AST.Expr.Idx),
             .operator = rand_token_idx(random),
             .region = rand_region(random),
+            .target_kind = if (random.boolean()) .method_call else .ordinary,
         },
     });
     try expressions.append(gpa, AST.Expr{

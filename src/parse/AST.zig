@@ -290,12 +290,6 @@ fn addFoundSyntaxNote(ctx: ParseReportContext, report: *reporting.Report) Alloca
     try report.document.addInlineCode(owned_token);
     try report.document.addText(" here.");
 
-    if (token_text[0] == '$') {
-        try report.document.addLineBreak();
-        try report.document.addReflowingText("Dollar-prefixed names are mutable variables in Roc. Record fields are labels, so they cannot start with `$`.");
-        return;
-    }
-
     const token_tag = ctx.tokenTag();
     if (token_tag == .UpperIdent or token_tag == .DotUpperIdent or token_tag == .NoSpaceDotUpperIdent) {
         try report.document.addLineBreak();
@@ -495,7 +489,6 @@ pub fn parseDiagnosticToReport(self: *AST, env: *const CommonEnv, diagnostic: Di
         .expr_unexpected_token => reportParseProblem(ctx, "Unexpected Expression Syntax", "I was parsing an expression, and this token cannot start an expression here.", "Expressions can be names, literals, tags, records, lists, tuples, lambdas, blocks, conditionals, matches, or function calls.", .{ .example = "add(1, 2)" }),
         .return_outside_function => reportParseProblem(ctx, "Return Outside Function", "I was parsing a statement, and `return` appeared outside a function body.", "`return` exits from the current function. Move it inside a function body, or remove it if this code is already the final expression.", .{ .example = "foo = |x| {\n    if x < 0 { return Err(Negative) }\n    Ok(x)\n}" }),
         .expected_expr_record_field_name => reportParseProblem(ctx, "Expected Record Field", "I was parsing a record expression, and I expected a lowercase field name.", "Record fields start with lowercase names. After the name, either write `: value` or omit the value to use field punning.", .{ .example = "{ name: \"Ada\", age }" }),
-        .record_field_name_cannot_be_var => reportParseProblem(ctx, "Invalid Record Field Name", "Record field names cannot start with a dollar sign.", "Names that start with `$` are reassignable variables declared with the `var` keyword, so they cannot be used as record field names.", .{ .show_found = false }),
         .optional_field_mark_after_colon => reportParseProblem(ctx, "Invalid Optional Field Syntax", "I was parsing a record type, and this optional field puts the `?` after the `:`.", "Optional fields are written with the `?` before the `:`: `?:` declares the field optional.", .{ .example = "{ name ?: Str }", .show_found = false }),
         .expected_ty_apply_close_round => reportParseProblem(ctx, "Expected Type Argument End", "I was parsing type arguments, and I expected `)`.", "Type applications put their arguments inside parentheses.", .{ .example = "Dict(Str, U64)" }),
         .expected_expr_apply_close_round => reportParseProblem(ctx, "Expected Call Argument End", "I was parsing function or method call arguments, and I expected `)`.", "Function call arguments go inside parentheses and are separated with commas.", .{ .example = "add(1, 2)" }),
@@ -511,10 +504,9 @@ pub fn parseDiagnosticToReport(self: *AST, env: *const CommonEnv, diagnostic: Di
         .expr_arrow_expects_ident => reportParseProblem(ctx, "Expected Arrow Target", "I was parsing an arrow expression, and I expected a name or parenthesized expression after the arrow.", "The right side of this arrow form must start with a value name, tag name, or parenthesized expression.", .{ .example = "value -> next" }),
         .expr_pipe_expects_ident => reportParseProblem(ctx, "Expected Pipe Target", "I was parsing a pipe expression, and I expected a name or parenthesized expression after `|>`.", "The right side of a pipe must start with a value name, tag name, or parenthesized expression.", .{ .example = "value |> next" }),
         .expr_double_dot_is_not_range => reportParseProblem(ctx, "Not A Range Operator", "I was parsing an expression, and `..` is not a range operator.", "Use `..<` for an exclusive range or `..=` for an inclusive range.", .{ .example = "1..<10\n1..=10", .show_found = false }),
-        .var_only_allowed_in_a_body => reportParseProblem(ctx, "Var Outside Body", "I was parsing a statement, and `var` appeared outside a function or block body.", "Mutable variables are local body statements. Move this `var` into a body, or use an ordinary top-level declaration.", .{ .example = "main = {\n    var count = 0\n    count\n}" }),
-        .var_must_have_ident => reportParseProblem(ctx, "Expected Var Name", "I was parsing a `var` statement, and I expected a lowercase name.", "A mutable variable declaration starts with `var`, followed by the variable name.", .{ .example = "var count = 0" }),
-        .var_expected_equals => reportParseProblem(ctx, "Expected Var Initializer", "I was parsing a `var` statement, and I expected `=` before the initial value.", "Mutable variables must be initialized when they are declared.", .{ .example = "var count = 0" }),
-        .var_type_anno_needs_var_keyword => reportParseProblem(ctx, "Expected Var Keyword", "I was parsing a mutable variable declaration, and I expected the `var` keyword.", "Dollar-prefixed mutable names must be introduced with `var` when they have a type annotation.", .{ .example = "var $count : U64" }),
+        .var_only_allowed_in_a_body => reportParseProblem(ctx, "Var Outside Body", "I was parsing a statement, and `var` appeared outside a function or block body.", "Mutable variables are local body statements. Move this `var` into a body, or use an ordinary top-level declaration.", .{ .example = "main = {\n    var $count = 0\n    $count\n}" }),
+        .var_must_have_ident => reportParseProblem(ctx, "Expected Var Name", "I was parsing a `var` statement, and I expected a lowercase name.", "A mutable variable declaration starts with `var`, followed by the variable name.", .{ .example = "var $count = 0" }),
+        .var_expected_equals => reportParseProblem(ctx, "Expected Var Initializer", "I was parsing a `var` statement, and I expected `=` before the initial value.", "Mutable variables must be initialized when they are declared.", .{ .example = "var $count = 0" }),
         .for_expected_in => reportParseProblem(ctx, "Expected In", "I was parsing a `for` expression or statement, and I expected `in` after the pattern.", "A `for` loop writes the pattern first, then `in`, then the collection being iterated.", .{ .example = "for item in items {\n    item\n}" }),
         .match_branch_wrong_arrow => reportParseProblem(ctx, "Wrong Match Arrow", "I was parsing a match branch, and I found `->` where Roc uses `=>`.", "Match branches use a fat arrow between the pattern and the branch body.", .{ .example = "Ok(value) => value", .show_found = false }),
         .match_branch_missing_arrow => reportParseProblem(ctx, "Missing Match Arrow", "I was parsing a match branch, and I expected `=>` before the branch body.", "Add `=>` after the pattern or guard.", .{ .example = "Err(msg) => crash msg" }),
@@ -532,6 +524,7 @@ pub fn parseDiagnosticToReport(self: *AST, env: *const CommonEnv, diagnostic: Di
         .nominal_associated_cannot_have_final_expression => reportParseProblem(ctx, "Unexpected Associated Expression", "I was parsing associated items for a nominal type, and I found a plain final expression.", "Associated item blocks can contain associated types and values. Remove the trailing expression or turn it into a named associated value.", .{ .example = "Id := U64 implements [\n    zero = @Id 0\n]" }),
         .type_alias_cannot_have_associated => reportParseProblem(ctx, "Type Alias With Associated Items", "I was parsing a type alias, but only nominal types can have associated items.", "Use `:=` to define a nominal type with associated items, or remove the associated item block from this alias.", .{ .example = "Id := U64 implements [\n    zero = @Id 0\n]" }),
         .where_alias_cannot_have_associated => reportParseProblem(ctx, "Where Alias With Associated Items", "I was parsing a where alias, but only nominal types can have associated items.", "A where alias names a set of method constraints, so it has no associated items. Remove the associated item block.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
+        .where_alias_expected_colon => reportParseProblem(ctx, "Expected Where Alias Colon", "I was parsing a where alias declaration, and I expected `:` after its name.", "A where alias separates its name from its `where` clause with a colon.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
         .where_alias_expected_where => reportParseProblem(ctx, "Expected Where Clause", "I was parsing a where alias declaration, and I expected `where` after the `:`.", "A where alias is declared by naming a type variable and giving it a set of method constraints.", .{ .example = "a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]" }),
         .deprecated_number_suffix => reportDeprecatedNumberSuffix(ctx),
         .expected_targets_colon => reportParseProblem(ctx, "Expected Targets Colon", "I was parsing a `targets` section, and I expected `:` after `targets`.", "The targets section starts with `targets:` followed by a configuration record.", .{ .example = "targets: { linux: { inputs: [app] } }" }),
@@ -634,8 +627,6 @@ pub const Diagnostic = struct {
         expr_unexpected_token,
         return_outside_function,
         expected_expr_record_field_name,
-        /// `$name` idents are reassignable variables and cannot name record fields
-        record_field_name_cannot_be_var,
         optional_field_mark_after_colon,
         expected_ty_apply_close_round,
         expected_expr_apply_close_round,
@@ -656,7 +647,6 @@ pub const Diagnostic = struct {
         var_only_allowed_in_a_body,
         var_must_have_ident,
         var_expected_equals,
-        var_type_anno_needs_var_keyword,
         for_expected_in,
         match_branch_wrong_arrow,
         match_branch_missing_arrow,
@@ -674,6 +664,7 @@ pub const Diagnostic = struct {
         nominal_associated_cannot_have_final_expression,
         type_alias_cannot_have_associated,
         where_alias_cannot_have_associated,
+        where_alias_expected_colon,
         where_alias_expected_where,
         deprecated_number_suffix,
 
@@ -1368,6 +1359,7 @@ pub const Pattern = union(enum) {
     },
     single_quote: struct {
         token: Token.Idx,
+        type_ident: ?base.Ident.Idx = null,
         region: TokenizedRegion,
     },
     record: struct {
@@ -1526,6 +1518,9 @@ pub const Pattern = union(enum) {
                 try tree.pushStaticAtom("p-single-quote");
                 try ast.appendRegionInfoToSexprTree(env, tree, sq.region);
                 try tree.pushStringPair("raw", ast.resolve(sq.token));
+                if (sq.type_ident) |type_ident| {
+                    try tree.pushStringPair("type", env.getIdent(type_ident));
+                }
                 const attrs = tree.beginNode();
                 try tree.endNode(begin, attrs);
             },
@@ -1703,6 +1698,24 @@ pub const BinOp = struct {
 
         try tree.endNode(begin, attrs);
     }
+};
+
+/// Records the syntactic interpretation of a pipe target. This distinction is
+/// intentionally made by the parser: canonicalization must not infer pipe
+/// semantics from the shape of the right-hand expression.
+pub const PipeTargetKind = enum {
+    ordinary,
+    method_call,
+};
+
+/// A pipe expression and the parser's final syntactic interpretation of its
+/// target.
+pub const ArrowCall = struct {
+    left: Expr.Idx,
+    right: Expr.Idx,
+    operator: Token.Idx,
+    region: TokenizedRegion,
+    target_kind: PipeTargetKind = .ordinary,
 };
 
 /// Whether a record-field access segment requires the field to be present or
@@ -2843,6 +2856,7 @@ pub const Expr = union(enum) {
     },
     single_quote: struct {
         token: Token.Idx,
+        type_ident: ?base.Ident.Idx = null,
         region: TokenizedRegion,
     },
     string_part: struct { // TODO: this should be more properly represented in its own union enum
@@ -2900,7 +2914,7 @@ pub const Expr = union(enum) {
         elem_token: Token.Idx,
         region: TokenizedRegion,
     },
-    arrow_call: BinOp,
+    arrow_call: ArrowCall,
     bin_op: BinOp,
     suffix_single_question: Unary,
     unary_op: Unary,
@@ -3085,6 +3099,9 @@ pub const Expr = union(enum) {
                 try tree.pushStaticAtom("e-single-quote");
                 try ast.appendRegionInfoToSexprTree(env, tree, a.region);
                 try tree.pushStringPair("raw", ast.resolve(a.token));
+                if (a.type_ident) |type_ident| {
+                    try tree.pushStringPair("type", env.getIdent(type_ident));
+                }
                 const attrs = tree.beginNode();
                 try tree.endNode(begin, attrs);
             },

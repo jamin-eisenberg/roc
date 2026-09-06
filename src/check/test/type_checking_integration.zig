@@ -4811,9 +4811,9 @@ test "check type - patterns record field mismatch" {
 test "check type - var reassignment" {
     const source =
         \\main = {
-        \\  var x = 1
-        \\  x = x + 1
-        \\  x
+        \\  var $x = 1
+        \\  $x = $x + 1
+        \\  $x
         \\}
     ;
     try checkTypesModule(
@@ -5282,11 +5282,11 @@ test "check type - type module - fn declarations " {
 test "check type - for" {
     const source =
         \\main = {
-        \\  var result = 0
+        \\  var $result = 0
         \\  for x in [1, 2, 3] {
-        \\    result = result + x
+        \\    $result = $result + x
         \\  }
-        \\  result
+        \\  $result
         \\}
     ;
     try checkTypesModule(
@@ -10450,6 +10450,43 @@ test "check type - derived codec - annotated encoder_for body with annotated mod
         \\  }
         \\}
         \\out = Json.to_str({ kind: ItemKind.Basic })
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+}
+
+test "check type - derived codec - generic structural encoder propagates through schemes" {
+    const source =
+        \\to_json = |a, b| Json.to_str({ a, b })
+        \\forward = |a, b| to_json(a, b)
+        \\result = forward("hi", {})
+        \\tuple_json = |a, b| Json.to_str((a, b))
+        \\tuple_result = tuple_json("hi", {})
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+}
+
+test "check type - derived codec - generic structural parser specializes at use" {
+    const source =
+        \\parse_or = |a, b, text| match Json.parse(text) {
+        \\  Ok(value) => value
+        \\  Err(_) => { a, b }
+        \\}
+        \\result = parse_or("", {}, "{}")
+    ;
+    var test_env = try TestEnv.init("Test", source);
+    defer test_env.deinit();
+    try test_env.assertNoErrors();
+}
+
+test "check type - derived codec - value-restricted structural receiver settles from later use" {
+    const source =
+        \\make_encoder = |_| |a, b| Json.to_str({ a, b })
+        \\to_json = make_encoder({})
+        \\result = to_json("hi", {})
     ;
     var test_env = try TestEnv.init("Test", source);
     defer test_env.deinit();
