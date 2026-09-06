@@ -244,7 +244,7 @@ pub const BoxyTables = struct {
     dict_refs: []const LirProgram.BoxyDictRef = &.{},
     tag_variants: []const LirProgram.BoxyTagVariant = &.{},
     tag_payload_descs: []const LirProgram.BoxyTagPayloadDesc = &.{},
-    field_names: []const base.StringLiteral.Idx = &.{},
+    field_names: []const LIR.BoxyNameId = &.{},
     adapt_steps: []const LirProgram.BoxyAdaptStep = &.{},
     payload_steps: []const LirProgram.BoxyPayloadStep = &.{},
     method_slots: []const LirProgram.BoxyMethodSlot = &.{},
@@ -502,7 +502,7 @@ pub const BoxyRuntime = struct {
     pub fn findLocalBoxyTagVariant(
         self: *const BoxyRuntime,
         desc: *const LirProgram.BoxyTypeDesc,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
     ) ?*const LirProgram.BoxyTagVariant {
         for (self.requireBoxyTagVariants(desc.tag_variants)) |*variant| {
             if (tag_name == variant.name) return variant;
@@ -1089,7 +1089,7 @@ pub const BoxyRuntime = struct {
         source_value: Value,
         source_layout: layout_mod.Idx,
         source_desc: *const LirProgram.BoxyTypeDesc,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
     ) Error!bool {
         const tag_base = self.resolveBoxyTagBaseValue(source_value, source_layout, source_desc);
         const disc = self.helper.readTagDiscriminant(tag_base.value, tag_base.layout);
@@ -1100,7 +1100,7 @@ pub const BoxyRuntime = struct {
         const ext_discriminant = self.boxyTagExtDiscriminant(source_desc) orelse {
             return self.invariantFailedError(
                 "LIR/interpreter invariant violated: boxy tag match descriptor had no variant named {s}; checked_type={any} payload_layout={d} variants={d}",
-                .{ self.store.getString(tag_name), source_desc.debug_checked_type, @intFromEnum(source_desc.payload_layout), source_desc.tag_variants.len },
+                .{ self.store.getBoxyName(tag_name), source_desc.debug_checked_type, @intFromEnum(source_desc.payload_layout), source_desc.tag_variants.len },
             );
         };
         if (disc != ext_discriminant) return false;
@@ -1226,7 +1226,7 @@ pub const BoxyRuntime = struct {
         self: *const BoxyRuntime,
         hooks: anytype,
         desc_ref: LIR.BoxyDescRef,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
         payload_index: u32,
         captures: LIR.LocalSpan,
     ) Error!*const LirProgram.BoxyTypeDesc {
@@ -1642,7 +1642,7 @@ pub const BoxyRuntime = struct {
         self: *const BoxyRuntime,
         hooks: anytype,
         desc: *const LirProgram.BoxyTypeDesc,
-        name: base.StringLiteral.Idx,
+        name: LIR.BoxyNameId,
         depth: u16,
     ) Error!?LirProgram.BoxyTagVariant {
         if (depth == 1024) {
@@ -2329,7 +2329,7 @@ pub const BoxyRuntime = struct {
                                     @intFromEnum(union_layout),
                                     @intFromEnum(desc.payload_layout),
                                     desc.debug_checked_type,
-                                    self.store.getString(variant.name),
+                                    self.store.getBoxyName(variant.name),
                                     @intFromEnum(actual_payload_layout),
                                     @intFromEnum(field_layout),
                                 },
@@ -2355,7 +2355,7 @@ pub const BoxyRuntime = struct {
             => {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: multi-payload tag {s} used non-struct payload layout {d}",
-                    .{ self.store.getString(variant.name), @intFromEnum(actual_payload_layout) },
+                    .{ self.store.getBoxyName(variant.name), @intFromEnum(actual_payload_layout) },
                 );
             },
         }
@@ -2715,7 +2715,7 @@ pub const BoxyRuntime = struct {
                         if (result_disc != variant.discriminant) {
                             return self.invariantFailedError(
                                 "LIR/interpreter invariant violated: moved target tag {s} expected discriminant {d} but observed {d}",
-                                .{ self.store.getString(source_variant.name), variant.discriminant, result_disc },
+                                .{ self.store.getBoxyName(source_variant.name), variant.discriminant, result_disc },
                             );
                         }
                         break :result_variant variant;
@@ -2724,13 +2724,13 @@ pub const BoxyRuntime = struct {
                     const result_ext_discriminant = self.boxyTagExtDiscriminant(resolved) orelse {
                         return self.invariantFailedError(
                             "LIR/interpreter invariant violated: moved target descriptor had no tag named {s}",
-                            .{self.store.getString(source_variant.name)},
+                            .{self.store.getBoxyName(source_variant.name)},
                         );
                     };
                     if (result_disc != result_ext_discriminant) {
                         return self.invariantFailedError(
                             "LIR/interpreter invariant violated: moved target extension for tag {s} expected discriminant {d} but observed {d}",
-                            .{ self.store.getString(source_variant.name), result_ext_discriminant, result_disc },
+                            .{ self.store.getBoxyName(source_variant.name), result_ext_discriminant, result_disc },
                         );
                     }
                     const result_ext_desc = try self.resolveBoxyTagExtDesc(hooks, resolved);
@@ -2765,7 +2765,7 @@ pub const BoxyRuntime = struct {
                             if (variant.payload_count != 1) {
                                 return self.invariantFailedError(
                                     "LIR/interpreter invariant violated: moved tag result changed payload arity for {s}",
-                                    .{self.store.getString(source_variant.name)},
+                                    .{self.store.getBoxyName(source_variant.name)},
                                 );
                             }
                             const result_desc_ref = self.findBoxyPayloadDesc(variant, 0) orelse break :blk null;
@@ -2859,7 +2859,7 @@ pub const BoxyRuntime = struct {
         self: *const BoxyRuntime,
         hooks: anytype,
         desc: *const LirProgram.BoxyTypeDesc,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
         payload: ?Value,
         payload_layout: layout_mod.Idx,
         payload_desc: ?*const LirProgram.BoxyTypeDesc,
@@ -2902,7 +2902,7 @@ pub const BoxyRuntime = struct {
             } else if (self.helper.sizeOf(variant.payload_layout) != 0) {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: boxy tag {s} required a payload but construction had none",
-                    .{self.store.getString(tag_name)},
+                    .{self.store.getBoxyName(tag_name)},
                 );
             }
             const result = try self.allocBoxyDynamicPayload(hooks, allocated.outer, desc.payload_layout, desc, target_layout);
@@ -2921,7 +2921,7 @@ pub const BoxyRuntime = struct {
         const ext_discriminant = self.boxyTagExtDiscriminant(desc) orelse {
             return self.invariantFailedError(
                 "LIR/interpreter invariant violated: boxy tag construction descriptor had no variant named {s}; checked_type={any} payload_layout={d} variants={d}",
-                .{ self.store.getString(tag_name), desc.debug_checked_type, @intFromEnum(desc.payload_layout), desc.tag_variants.len },
+                .{ self.store.getBoxyName(tag_name), desc.debug_checked_type, @intFromEnum(desc.payload_layout), desc.tag_variants.len },
             );
         };
         const ext_desc = try self.resolveBoxyTagExtDesc(hooks, desc);
@@ -2979,7 +2979,7 @@ pub const BoxyRuntime = struct {
             const payload_desc_ref = self.findBoxyPayloadDesc(variant, 0) orelse {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: constructed single tag payload for {s} lacked its descriptor",
-                    .{self.store.getString(variant.name)},
+                    .{self.store.getBoxyName(variant.name)},
                 );
             };
             const payload_desc = try hooks.resolveDescRef(payload_desc_ref);
@@ -3049,7 +3049,7 @@ pub const BoxyRuntime = struct {
         source_value: Value,
         source_layout: layout_mod.Idx,
         source_desc: *const LirProgram.BoxyTypeDesc,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
         payload_index: u32,
         target_layout: layout_mod.Idx,
         source_mode: LIR.BoxyTransferMode,
@@ -3113,7 +3113,7 @@ pub const BoxyRuntime = struct {
         const ext_discriminant = self.boxyTagExtDiscriminant(source_desc) orelse {
             return self.invariantFailedError(
                 "LIR/interpreter invariant violated: boxy tag payload descriptor had no variant named {s}; checked_type={any} payload_layout={d} variants={d}",
-                .{ self.store.getString(tag_name), source_desc.debug_checked_type, @intFromEnum(source_desc.payload_layout), source_desc.tag_variants.len },
+                .{ self.store.getBoxyName(tag_name), source_desc.debug_checked_type, @intFromEnum(source_desc.payload_layout), source_desc.tag_variants.len },
             );
         };
         if (disc != ext_discriminant) {
@@ -3298,7 +3298,7 @@ pub const BoxyRuntime = struct {
             if (variant.payload_layout != .zst or variant.payload_descs.len != 0) {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: zero-sized boxy tag payload descriptor variant {s} had nonzero payload metadata",
-                    .{self.store.getString(variant.name)},
+                    .{self.store.getBoxyName(variant.name)},
                 );
             }
             const target = try self.allocTagValue(hooks, expected_layout);
@@ -3923,7 +3923,7 @@ pub const BoxyRuntime = struct {
                 if (source_info.name != target_info.name) {
                     return self.invariantFailedError(
                         "LIR/interpreter invariant violated: borrowed tag materialization changed variant from {s} to {s}",
-                        .{ self.store.getString(source_info.name), self.store.getString(target_info.name) },
+                        .{ self.store.getBoxyName(source_info.name), self.store.getBoxyName(target_info.name) },
                     );
                 }
             }
@@ -4476,7 +4476,7 @@ pub const BoxyRuntime = struct {
         if (source_variant.payload_layout != .zst) {
             return self.invariantFailedError(
                 "LIR/interpreter invariant violated: zero-sized source boxy tag payload descriptor variant {s} had a nonzero payload layout",
-                .{self.store.getString(source_variant.name)},
+                .{self.store.getBoxyName(source_variant.name)},
             );
         }
 
@@ -4486,7 +4486,7 @@ pub const BoxyRuntime = struct {
                     "LIR/interpreter invariant violated: target boxy tag descriptor for layout {d} had no variant named {s}; target_type={any} target_variants={d} source_type={any}",
                     .{
                         @intFromEnum(expected_layout),
-                        self.store.getString(source_variant.name),
+                        self.store.getBoxyName(source_variant.name),
                         target_desc.debug_checked_type,
                         target_desc.tag_variants.len,
                         source_desc.debug_checked_type,
@@ -5119,7 +5119,7 @@ pub const BoxyRuntime = struct {
             const target_ext_discriminant = self.boxyTagExtDiscriminant(target_desc) orelse {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: target boxy tag descriptor for layout {d} had no variant named {s}",
-                    .{ @intFromEnum(expected_layout), self.store.getString(source_variant.name) },
+                    .{ @intFromEnum(expected_layout), self.store.getBoxyName(source_variant.name) },
                 );
             };
             const target_ext_desc = try self.resolveBoxyTagExtDesc(hooks, target_desc);
@@ -5256,7 +5256,7 @@ pub const BoxyRuntime = struct {
             if (target_variant.payload_count != 1) {
                 return self.invariantFailedError(
                     "LIR/interpreter invariant violated: tag adaptation changed payload arity for {s}",
-                    .{self.store.getString(source_variant.name)},
+                    .{self.store.getBoxyName(source_variant.name)},
                 );
             }
             const source_payload_desc = if (self.findBoxyPayloadDesc(source_variant, 0)) |desc_ref|
@@ -5393,7 +5393,7 @@ pub const BoxyRuntime = struct {
         };
     }
 
-    pub fn requireBoxyFieldNames(self: *const BoxyRuntime, span: LIR.BoxySpan) []const base.StringLiteral.Idx {
+    pub fn requireBoxyFieldNames(self: *const BoxyRuntime, span: LIR.BoxySpan) []const LIR.BoxyNameId {
         const start: usize = span.start;
         const end = start + span.len;
         if (end > self.boxy_tables.field_names.len) {
@@ -5736,7 +5736,7 @@ pub const BoxyRuntime = struct {
             if (written != 0) try out.appendSlice(self.eval_arena, ", ");
 
             if (named) {
-                try out.appendSlice(self.eval_arena, self.store.getString(field_names[original_index]));
+                try out.appendSlice(self.eval_arena, self.store.getBoxyName(field_names[original_index]));
                 try out.appendSlice(self.eval_arena, ": ");
             }
             const field_offset = self.layout_store.getStructFieldOffsetByOriginalIndex(struct_idx, original_index);
@@ -5763,7 +5763,7 @@ pub const BoxyRuntime = struct {
         desc: *const LirProgram.BoxyTypeDesc,
     ) Error!void {
         const variant = self.requireBoxyTagVariantByDiscriminant(desc, 0);
-        try out.appendSlice(self.eval_arena, self.store.getString(variant.name));
+        try out.appendSlice(self.eval_arena, self.store.getBoxyName(variant.name));
         if (self.findBoxyPayloadDesc(variant, 0)) |payload_desc_ref| {
             const payload_desc = try hooks.resolveDescRef(payload_desc_ref);
             if (payload_desc.tag_variants.len > 0) {
@@ -5794,7 +5794,7 @@ pub const BoxyRuntime = struct {
         }
 
         const variant = self.requireBoxyTagVariantByDiscriminant(desc, discriminant);
-        try out.appendSlice(self.eval_arena, self.store.getString(variant.name));
+        try out.appendSlice(self.eval_arena, self.store.getBoxyName(variant.name));
 
         const payload_size = self.helper.sizeOf(variant.payload_layout);
         if (payload_size == 0) {

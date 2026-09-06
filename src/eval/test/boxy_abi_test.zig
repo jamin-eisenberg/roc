@@ -607,7 +607,7 @@ test "boxy abi call result transfers nested tag list ownership" {
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const branch_name = try setup.store.insertString("Branch");
+    const branch_name = try setup.store.insertBoxyName("Branch");
     const list_str_layout = try setup.layouts.insertLayout(layout_mod.Layout.list(.str));
     const node_layout = try setup.layouts.putTagUnion(&.{list_str_layout});
     const list_node_layout = try setup.layouts.insertLayout(layout_mod.Layout.list(node_layout));
@@ -833,9 +833,9 @@ test "boxy abi move adapter releases tag payloads across differing discriminants
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const name_a = try setup.store.insertString("A");
-    const name_b = try setup.store.insertString("B");
-    const name_c = try setup.store.insertString("C");
+    const name_a = try setup.store.insertBoxyName("A");
+    const name_b = try setup.store.insertBoxyName("B");
+    const name_c = try setup.store.insertBoxyName("C");
     const box_layout = try setup.layouts.insertLayout(layout_mod.Layout.erasedBox());
     const source_union_layout = try setup.layouts.putTagUnion(&.{ .u64, box_layout });
     const target_union_layout = try setup.layouts.putTagUnion(&.{ .u64, .u64 });
@@ -935,8 +935,8 @@ test "boxy abi move adapter transfers a dynamic box into a target tag extension"
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const name_ok = try setup.store.insertString("Ok");
-    const name_err = try setup.store.insertString("Err");
+    const name_ok = try setup.store.insertBoxyName("Ok");
+    const name_err = try setup.store.insertBoxyName("Err");
     const box_layout = try setup.layouts.insertLayout(layout_mod.Layout.erasedBox());
     const source_union_layout = try setup.layouts.putTagUnion(&.{.str});
     const target_union_layout = try setup.layouts.putTagUnion(&.{ .zst, box_layout });
@@ -1130,8 +1130,8 @@ test "boxy abi copied recursive tag retains boxed children" {
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const leaf_name = try setup.store.insertString("Leaf");
-    const node_name = try setup.store.insertString("Node");
+    const leaf_name = try setup.store.insertBoxyName("Leaf");
+    const node_name = try setup.store.insertBoxyName("Node");
     const erased_box_layout = try setup.layouts.insertLayout(layout_mod.Layout.erasedBox());
     const node_layout = try setup.layouts.putStructFields(&.{
         .{ .index = 0, .layout = erased_box_layout },
@@ -1339,8 +1339,8 @@ test "boxy abi unbox specializes a concrete tag descriptor before materializatio
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const name_err = try setup.store.insertString("Err");
-    const name_ok = try setup.store.insertString("Ok");
+    const name_err = try setup.store.insertBoxyName("Err");
+    const name_ok = try setup.store.insertBoxyName("Ok");
     const erased_box_layout = try setup.layouts.insertLayout(layout_mod.Layout.erasedBox());
     const source_union_layout = try setup.layouts.putTagUnion(&.{erased_box_layout});
     const target_union_layout = try setup.layouts.putTagUnion(&.{ .zst, .u8 });
@@ -1458,8 +1458,8 @@ test "boxy abi tag construction, matching, and payload reads" {
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const name_a = try setup.store.insertString("A");
-    const name_b = try setup.store.insertString("B");
+    const name_a = try setup.store.insertBoxyName("A");
+    const name_b = try setup.store.insertBoxyName("B");
     const union_layout = try setup.layouts.putTagUnion(&.{ .u64, .u64 });
 
     const variants = [_]LirProgram.BoxyTagVariant{
@@ -1521,8 +1521,8 @@ test "boxy abi copied tag payload owns its nested list" {
     var setup = try TestSetup.init(allocator);
     defer setup.deinit();
 
-    const empty_name = try setup.store.insertString("Empty");
-    const values_name = try setup.store.insertString("Values");
+    const empty_name = try setup.store.insertBoxyName("Empty");
+    const values_name = try setup.store.insertBoxyName("Values");
     const list_str_layout = try setup.layouts.insertLayout(layout_mod.Layout.list(.str));
     const union_layout = try setup.layouts.putTagUnion(&.{ .zst, list_str_layout });
     const desc_refs = [_]LIR.BoxyDescRef{.{ .static = @enumFromInt(fixtureTableIndex(0)) }};
@@ -1922,7 +1922,7 @@ test "boxy abi sidecar view initializes the global runtime from image bytes" {
     lowered.boxy_erased_arg_desc_offsets = .empty;
     lowered.boxy_erased_arg_desc_params = .empty;
 
-    const tag_name = try lowered.store.insertString("Only");
+    const tag_name = try lowered.store.insertBoxyName("Only");
     try lowered.boxy_type_descs.append(fba_alloc, .{
         .payload_layout = .u64,
         .contains_refcounted = false,
@@ -1940,7 +1940,7 @@ test "boxy abi sidecar view initializes the global runtime from image bytes" {
 
     try std.testing.expectEqual(@as(usize, 1), view.tables.type_descs.len);
     try std.testing.expectEqual(layout_mod.Idx.u64, view.tables.type_descs[0].payload_layout);
-    try std.testing.expectEqualStrings("Only", view.strings.get(view.tables.tag_variants[0].name));
+    try std.testing.expectEqualStrings("Only", view.names.get(view.tables.tag_variants[0].name));
 
     var env = RuntimeHostEnv.init(allocator);
     defer env.deinit();
@@ -1955,6 +1955,76 @@ test "boxy abi sidecar view initializes the global runtime from image bytes" {
         @intFromEnum(layout_mod.Idx.u64),
         &view.tables.type_descs[0],
     ));
+}
+
+test "boxy abi standalone sidecar preserves producer tag identities after literal removal" {
+    const allocator = std.testing.allocator;
+    const compiled = blk: {
+        var lowered = try LirProgram.Result.init(allocator, base.target.TargetUsize.native);
+        defer lowered.deinit();
+        _ = try lowered.store.insertStringViewAligned("folded constant payload" ** 1024, 0, 23, 4);
+        const only = try lowered.store.insertBoxyName("Only");
+        const missing = try lowered.store.insertBoxyName("Missing");
+        const union_layout = try lowered.layouts.putTagUnion(&.{ .u64, .zst });
+        try lowered.boxy_type_descs.appendSlice(allocator, &.{
+            .{ .payload_layout = .u64, .contains_refcounted = false },
+            .{
+                .payload_layout = union_layout,
+                .contains_refcounted = false,
+                .tag_variants = .{ .start = 0, .len = 2 },
+            },
+        });
+        try lowered.boxy_tag_payload_descs.append(allocator, .{
+            .payload_index = 0,
+            .desc = .{ .static = @enumFromInt(fixtureTableIndex(0)) },
+        });
+        try lowered.boxy_tag_variants.appendSlice(allocator, &.{
+            .{
+                .name = only,
+                .discriminant = 0,
+                .payload_layout = .u64,
+                .payload_count = 1,
+                .payload_descs = .{ .start = 0, .len = 1 },
+            },
+            .{ .name = missing, .discriminant = 1, .payload_layout = .zst },
+        });
+        const box_layout = try lowered.layouts.insertLayout(layout_mod.Layout.erasedBox());
+        break :blk .{
+            .blob = try lir.LirImage.buildSidecarBlob(allocator, &lowered),
+            .only = @intFromEnum(only),
+            .missing = @intFromEnum(missing),
+            .layout = @intFromEnum(box_layout),
+        };
+    };
+    var blob = compiled.blob;
+    defer blob.deinit(allocator);
+    var view = try blob.sidecar.view(blob.bytes.ptr, blob.bytes.len, base.target.TargetUsize.native, allocator);
+    defer view.deinit();
+    var env = RuntimeHostEnv.init(allocator);
+    defer env.deinit();
+    try boxy_abi.initGlobalFromSidecarView(allocator, &view, env.get_ops());
+    defer boxy_abi.deinitGlobal();
+
+    // These are the original producer ids, as embedded by every backend.
+    // Source LIR and its literal/name stores have already been freed.
+    const desc = &view.tables.type_descs[1];
+    var value: [32]u8 align(16) = @splat(0);
+    var payload: u64 = 42;
+    boxy_abi.roc_boxy_tag(&value, desc, compiled.only, @ptrCast(&payload), @intFromEnum(layout_mod.Idx.u64), null, @intFromEnum(LIR.BoxyTransferMode.borrow), compiled.layout);
+    try std.testing.expect(boxy_abi.roc_boxy_tag_match(&value, compiled.layout, desc, compiled.only));
+    try std.testing.expect(!boxy_abi.roc_boxy_tag_match(&value, compiled.layout, desc, compiled.missing));
+    try std.testing.expectEqual(&view.tables.type_descs[0], boxy_abi.roc_boxy_tag_payload_desc(desc, compiled.only, 0));
+    var read: u64 = 0;
+    var read_desc: ?*const BoxyTypeDesc = null;
+    boxy_abi.roc_boxy_tag_payload(@ptrCast(&read), &read_desc, &value, compiled.layout, desc, compiled.only, 0, @intFromEnum(layout_mod.Idx.u64), @intFromEnum(LIR.BoxyTransferMode.borrow));
+    try std.testing.expectEqual(payload, read);
+    try std.testing.expectEqual(&view.tables.type_descs[0], read_desc.?);
+    var rendered: builtins.str.RocStr = undefined;
+    boxy_abi.roc_boxy_inspect(@ptrCast(&rendered), null, &value, compiled.layout, desc);
+    try std.testing.expectEqualStrings("Only(42)", rendered.asSlice());
+    rendered.decref(env.get_ops());
+    boxy_abi.roc_boxy_drop(&value, compiled.layout, desc, 1, 1, 0);
+    try env.checkForLeaks();
 }
 
 test "boxy builtin parameter ABI sizes match the wrapper declarations" {
