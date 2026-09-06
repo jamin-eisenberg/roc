@@ -4158,11 +4158,44 @@ test "check type - unary not" {
     try checkTypesModule(source, .{ .pass = .last_def }, "Bool");
 }
 
+test "check type - unary not infers Bool argument" {
+    try checkTypesModule("negate = |value| !value", .{ .pass = .last_def }, "Bool -> Bool");
+}
+
+test "check type - unary not mutable boolean in loop" {
+    const source =
+        \\run = |values| {
+        \\    var $swapped = False
+        \\    while True {
+        \\        for value in values {
+        \\            if value > 0 { $swapped = True }
+        \\        }
+        \\        if !$swapped { break }
+        \\        $swapped = False
+        \\    }
+        \\    !$swapped
+        \\}
+        \\result = run([0, 0])
+    ;
+    try checkTypesModule(source, .{ .pass = .last_def }, "Bool");
+}
+
 test "check type - unary not mismatch" {
     const source =
         \\x = !"Hello"
     ;
-    try checkTypesModule(source, .fail, "Missing Method");
+    try checkTypesModule(source, .fail, "Type Mismatch");
+}
+
+test "check type - unary not rejects custom not method" {
+    const source =
+        \\Custom := [Value].{
+        \\    not : Custom -> Custom
+        \\    not = |value| value
+        \\}
+        \\result = !Custom.Value
+    ;
+    try checkTypesModule(source, .fail, "Type Mismatch");
 }
 
 // unary minus

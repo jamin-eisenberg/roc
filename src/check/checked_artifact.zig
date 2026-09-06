@@ -8063,7 +8063,6 @@ fn appendStaticDispatchTypeRoots(
             .e_lambda,
             .e_binop,
             .e_unary_minus,
-            .e_unary_not,
             .e_field_access,
             .e_method_call,
             .e_structural_eq,
@@ -11467,7 +11466,6 @@ const CheckedSourceNodes = struct {
                 try self.markExpr(binop.rhs, work);
             },
             .e_unary_minus => |unary| try self.markExpr(unary.expr, work),
-            .e_unary_not => |unary| try self.markExpr(unary.expr, work),
             .e_field_access => |field| try self.markExpr(field.receiver, work),
             .e_method_call => |call| {
                 try self.markExpr(call.receiver, work);
@@ -14063,7 +14061,6 @@ const CheckedBodyPayloadCopier = struct {
                 .rhs = self.checkedExpr(binop.rhs),
             } },
             .e_unary_minus => |unary| .{ .unary_minus = self.checkedExpr(unary.expr) },
-            .e_unary_not => |unary| .{ .unary_not = self.checkedExpr(unary.expr) },
             .e_field_access => |field_access| .{ .field_access = .{
                 .receiver = self.checkedExpr(field_access.receiver),
                 .segments = try self.copyFieldAccessSegments(field_access.receiver, field_access.segments),
@@ -16071,7 +16068,6 @@ fn categorizeValueRef(
         .e_lambda,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_method_call,
         .e_dispatch_call,
@@ -33627,7 +33623,6 @@ fn scanLoweringVisibleNames(module_env: *const ModuleEnv, visitor: anytype) Allo
                     .e_lambda,
                     .e_binop,
                     .e_unary_minus,
-                    .e_unary_not,
                     .e_interpolation,
                     .e_structural_eq,
                     .e_structural_hash,
@@ -33773,7 +33768,6 @@ fn scanLoweringVisibleNames(module_env: *const ModuleEnv, visitor: anytype) Allo
             .expr_record_update,
             .expr_bin_op,
             .expr_unary_minus,
-            .expr_unary_not,
             .expr_suffix_single_question,
             .expr_if_then_else,
             .expr_match,

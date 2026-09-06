@@ -1402,6 +1402,12 @@ compiler-owned builtin scope before source declarations are introduced. If that
 proof stops being local and obvious, the initialization path must use the same
 type-binding API.
 
+Logical negation `!expr` desugars in `Can` to an ordinary call to the
+compiler-owned `Bool.not`, with type `Bool -> Bool`. It does not introduce a
+static-dispatch constraint on the operand. Source declarations shadowing `Bool`
+do not change this target; within Builtin.roc the call refers to its local
+`Bool.not` definition. Checking and later stages consume the ordinary call.
+
 Result suffix desugaring has a separate owner inside `Can`. The suffix forms
 `expr?`, `expr ? handler`, and `expr ?? default` all lower to a match over the
 same `Try` shape. They must share one concrete builder for the common structure:
@@ -9130,7 +9136,8 @@ ABI directly; they do not select numeric payload layouts or descriptor data.
 Checked unary operator nodes use that same primitive path when they remain in a
 checked body. Unary `-` lowers as `num_negate`, so signed-integer
 lowest-value protection is emitted by the low-level expander before the raw
-operation. Unary `!` lowers as `bool_not` over the checked Bool representation.
+operation. The ordinary `Bool.not` call produced for unary `!` uses the builtin
+`bool_not` path over the checked Bool representation.
 If checking resolved the source operator to a static-dispatch call instead, the
 boxy lowerer consumes the checked dispatch plan for that call rather than
 reinterpreting the original source operator.

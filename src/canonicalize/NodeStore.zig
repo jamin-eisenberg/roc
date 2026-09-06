@@ -105,7 +105,6 @@ const ExprNodeTag = enum {
     expr_dbg,
     expr_expect_err,
     expr_unary_minus,
-    expr_unary_not,
     expr_static_dispatch,
     expr_apply,
     expr_record_update,
@@ -774,7 +773,7 @@ pub fn relocate(store: *NodeStore, offset: isize) void {
 /// Count of the diagnostic nodes in the ModuleEnv
 pub const MODULEENV_DIAGNOSTIC_NODE_COUNT = 97;
 /// Count of the expression nodes in the ModuleEnv
-pub const MODULEENV_EXPR_NODE_COUNT = 59;
+pub const MODULEENV_EXPR_NODE_COUNT = 58;
 /// Count of the statement nodes in the ModuleEnv
 pub const MODULEENV_STATEMENT_NODE_COUNT = 21;
 /// Count of the type annotation nodes in the ModuleEnv
@@ -1113,9 +1112,9 @@ fn addMethodCallData(store: *NodeStore, args: CIR.Expr.Span, method_name_region:
 }
 
 // Bidirectional u32 encoding for `CIR.Expr.SurfaceOrigin` in `MethodCallData`.
-// Binop ops are offset past the three unit tags so every `Binop.Op` value has
+// Binop ops are offset past the two unit tags so every `Binop.Op` value has
 // a distinct slot.
-const surface_origin_binop_offset: u32 = 3;
+const surface_origin_binop_offset: u32 = 2;
 comptime {
     // The binop range starts after the unit (payload-less) tags; keep the offset
     // in sync so a new unit variant can't collide with a `Binop.Op` slot.
@@ -1131,7 +1130,6 @@ pub fn encodeSurfaceOrigin(origin: CIR.Expr.SurfaceOrigin) u32 {
     return switch (origin) {
         .method_call => 0,
         .unary_minus => 1,
-        .unary_not => 2,
         .binop => |op| surface_origin_binop_offset + @as(u32, @intFromEnum(op)),
     };
 }
@@ -1141,7 +1139,6 @@ pub fn decodeSurfaceOrigin(encoded: u32) CIR.Expr.SurfaceOrigin {
     return switch (encoded) {
         0 => .method_call,
         1 => .unary_minus,
-        2 => .unary_not,
         else => .{ .binop = @enumFromInt(encoded - surface_origin_binop_offset) },
     };
 }
@@ -1718,12 +1715,6 @@ pub fn getExpr(store: *const NodeStore, expr: CIR.Expr.Idx) CIR.Expr {
         .expr_unary_minus => {
             const p = payload.expr_unary;
             return CIR.Expr{ .e_unary_minus = .{
-                .expr = @enumFromInt(p.expr),
-            } };
-        },
-        .expr_unary_not => {
-            const p = payload.expr_unary;
-            return CIR.Expr{ .e_unary_not = .{
                 .expr = @enumFromInt(p.expr),
             } };
         },
@@ -3459,12 +3450,6 @@ pub fn addExpr(store: *NodeStore, expr: CIR.Expr, region: base.Region) Allocator
         },
         .e_unary_minus => |e| {
             node.tag = .expr_unary_minus;
-            node.setPayload(.{ .expr_unary = .{
-                .expr = @intFromEnum(e.expr),
-            } });
-        },
-        .e_unary_not => |e| {
-            node.tag = .expr_unary_not;
             node.setPayload(.{ .expr_unary = .{
                 .expr = @intFromEnum(e.expr),
             } });

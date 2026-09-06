@@ -3408,7 +3408,6 @@ pub const BuildEnv = struct {
                 try collectDbgRegionsInExpr(allocator, env, regions, binop.rhs);
             },
             .e_unary_minus => |unary| try collectDbgRegionsInExpr(allocator, env, regions, unary.expr),
-            .e_unary_not => |unary| try collectDbgRegionsInExpr(allocator, env, regions, unary.expr),
             .e_field_access => |field| try collectDbgRegionsInExpr(allocator, env, regions, field.receiver),
             .e_method_call => |call| {
                 try collectDbgRegionsInExpr(allocator, env, regions, call.receiver);
