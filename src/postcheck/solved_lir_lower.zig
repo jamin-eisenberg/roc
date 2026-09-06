@@ -4234,7 +4234,7 @@ const Lowerer = struct {
     }
 
     /// Whole-value consumers, including retained join locals, must request the
-    /// same definition-site materialization before using a physical local.
+    /// same definition-site aggregate construction before using an LIR local.
     fn materializeRecordBinding(self: *Lowerer, local: Lifted.LocalId) Common.LowerError!?struct { local: LIR.LocalId, ty: Type.TypeId } {
         const aggregates = self.aggregate_bindings orelse return null;
         const id = aggregates.bindings.get(local) orelse return null;

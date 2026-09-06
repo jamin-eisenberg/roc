@@ -9724,8 +9724,8 @@ The direct solved-to-LIR builder keeps by-value record bindings as persistent
 field-value trees while lowering a lexical block. Leaves are fresh LIR locals
 whose expressions execute at the original binding, including fields later
 overwritten or unused. This preserves effects, failure, divergence, and
-snapshot order. Record versions share unchanged components; an update copies
-only the paths to changed fields, and projections select those evaluated locals.
+snapshot order. Record versions share unchanged component-tree nodes; an update
+copies only the tree paths to changed fields, and field reads select those evaluated locals.
 Field names map to committed field indices once per type in the procedure.
 A whole-value use requests one materialization at the original binding; it does
 not rebuild the record at each consumer. Boxed representations remain explicit
@@ -9734,8 +9734,8 @@ Their depth is logarithmic in field count, independent of update-chain length.
 The existing unique erased-result component demand follows these bindings back
 to the evaluated field producer, using the same ambiguity and repeatable-region
 rules as ordinary local return forwarding. Layout padding is excluded through
-its explicit committed padding marker, not by comparing physical and logical
-field counts.
+its explicit committed padding marker, not by comparing layout and type field
+counts.
 
 ### Join-Parameter Scalarization
 
@@ -9762,7 +9762,7 @@ matching descriptor parameter for every resulting field local.
 
 Alias transparency is solved along explicit source dependencies. Every opaque
 alias contributes a whole-value use before propagation starts, each transparent
-alias can be demoted once, and canonical roots share already resolved paths.
+alias can be demoted once, and equivalent alias roots share already resolved paths.
 Reverse alias edges are intrusive links in the alias-definition table, so
 closure queries visit their own members without allocating a list per alias.
 Independent ordinary constructor eliminations share one analysis and edge
