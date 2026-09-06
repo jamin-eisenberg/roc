@@ -21,6 +21,59 @@ const simd_tests = @import("eval_simd_tests.zig");
 /// Every value-producing test is observed solely through `Str.inspect(...)`.
 const core_tests = [_]TestCase{
     .{
+        .name = "issue 11024: implicit empty nominal records materialize defaults at every site",
+        .source_kind = .module,
+        .source =
+        \\Foo := { bar : U64 ?? 3, baz : U64 ?? 7 }
+        \\top : Foo
+        \\top = {}
+        \\make : U64 -> Foo
+        \\make = |n| if n == 0 {} else { bar: n }
+        \\main = {
+        \\    local : Foo
+        \\    local = {}
+        \\    xs : List(Foo)
+        \\    xs = [{}, {}]
+        \\    total = List.fold(xs, 0, |sum, foo| sum + foo.bar + foo.baz)
+        \\    top.bar + top.baz + local.bar + local.baz + make(0).bar + make(5).bar + total
+        \\}
+        ,
+        .expected = .{ .inspect_str = "48" },
+    },
+    .{
+        .name = "issue 11024: implicit empty record mixes missing optional and heap defaults",
+        .source_kind = .module,
+        .source =
+        \\Foo := { text : Str ?? "a heap-allocated default string longer than the inline capacity", count ?: U64 }
+        \\make : {} -> Foo
+        \\make = |_| {}
+        \\main = {
+        \\    first = make({})
+        \\    second = make({})
+        \\    if (first.text == second.text) and ((first.?count ?? 9) == 9) first.text else "wrong"
+        \\}
+        ,
+        .expected = .{ .inspect_str = "\"a heap-allocated default string longer than the inline capacity\"" },
+    },
+    .{
+        .name = "issue 11024: imported implicit empty records materialize callable defaults",
+        .source_kind = .module,
+        .imports = &.{.{ .name = "Cfg", .source = "Cfg := { f : U8 -> U8 ?? |n| n + 5 }\n" }},
+        .source =
+        \\import Cfg
+        \\cfg : Cfg.Cfg
+        \\cfg = {}
+        \\make : {} -> Cfg.Cfg
+        \\make = |_| {}
+        \\main = {
+        \\    first = cfg.f
+        \\    second = make({}).f
+        \\    first(1) + second(2)
+        \\}
+        ,
+        .expected = .{ .inspect_str = "13" },
+    },
+    .{
         .name = "defaulted record field: omitted at construction materializes the default",
         .source_kind = .module,
         .source =

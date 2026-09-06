@@ -970,6 +970,91 @@ test "unify - anonymous tag union with multiple tags unifies" {
     try std.testing.expect(resolved.desc.content.structure == .nominal_type);
 }
 
+test "unify - issue 11024 - empty nominal row absorption respects field kinds and width in both orders" {
+    const Kind = enum { optional, defaulted, required, unresolved };
+    for ([_]Kind{ .optional, .defaulted, .required, .unresolved }) |kind| {
+        for ([_]bool{ false, true }) |exact| {
+            for (0..2) |order| {
+                var env = try TestEnv.init(std.testing.allocator);
+                defer env.deinit();
+                const store = &env.module_env.types;
+                const value = try store.freshFromContent(.{ .structure = .empty_record });
+                const default_id = types_mod.DefaultId{
+                    .origin_module = env.module_env.selfModuleIdentity(),
+                    .expr_node = 123,
+                };
+                const presence = try store.freshFromContent(switch (kind) {
+                    .optional => .{ .field_presence = .optional },
+                    .defaulted => .{ .field_presence = .{ .defaulted = default_id } },
+                    .required => .{ .field_presence = .required },
+                    .unresolved => .{ .flex = Flex.init() },
+                });
+                const backing = try store.freshFromContent((try env.mkRecordClosed(&.{
+                    try env.mkUnknownRecordField("field", presence, value),
+                })).content);
+                const nominal = try store.freshFromContent(try env.mkNominalType("Cfg", backing, &.{}));
+                const empty = try store.freshFromContent(.{ .structure = .empty_record });
+                const a = if (order == 0) nominal else empty;
+                const b = if (order == 0) empty else nominal;
+                const result = if (exact) try env.unifyExact(a, b) else try env.unifyWriteNoReport(a, b);
+                const accepts = !exact and (kind == .optional or kind == .defaulted);
+                try std.testing.expectEqual(@as(Result, if (accepts) .unified else .mismatch), result);
+                if (accepts) {
+                    try std.testing.expect(store.resolveVar(empty).desc.content.structure == .nominal_type);
+                    try std.testing.expect(store.resolveVar(backing).desc.content.structure == .record);
+                }
+                const omissions = env.scratch.absorbed_record_defaults.items.items;
+                try std.testing.expectEqual(@as(usize, if (accepts and kind == .defaulted) 1 else 0), omissions.len);
+                if (omissions.len != 0) {
+                    try std.testing.expectEqual(empty, omissions[0].record_var);
+                    try std.testing.expectEqual(default_id, omissions[0].default);
+                }
+            }
+        }
+    }
+}
+
+test "unify - issue 11024 - zero-field nominal head still checks its required extension" {
+    for (0..2) |order| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const store = &env.module_env.types;
+        const value = try store.freshFromContent(.{ .structure = .empty_record });
+        const tail = try store.freshFromContent((try env.mkRecordClosed(&.{
+            try env.mkRecordField("required_tail", value),
+        })).content);
+        const backing = try store.freshFromContent((try env.mkRecord(&.{}, tail)).content);
+        const nominal = try store.freshFromContent(try env.mkNominalType("Cfg", backing, &.{}));
+        const empty = try store.freshFromContent(.{ .structure = .empty_record });
+        const result = if (order == 0)
+            try env.unifyWriteNoReport(nominal, empty)
+        else
+            try env.unifyWriteNoReport(empty, nominal);
+        try std.testing.expectEqual(Result.mismatch, result);
+        try std.testing.expectEqual(Content{ .structure = .empty_record }, store.resolveVar(empty).desc.content);
+    }
+}
+
+test "unify - issue 11024 - zero-field nominal backing stays structural across constructions" {
+    for (0..2) |order| {
+        var env = try TestEnv.init(std.testing.allocator);
+        defer env.deinit();
+        const store = &env.module_env.types;
+        const backing = try store.freshFromContent((try env.mkRecordClosed(&.{})).content);
+        const nominal = try store.freshFromContent(try env.mkNominalType("Cfg", backing, &.{}));
+        for (0..2) |_| {
+            const empty = try store.freshFromContent(.{ .structure = .empty_record });
+            const result = if (order == 0)
+                try env.unifyExact(nominal, empty)
+            else
+                try env.unifyExact(empty, nominal);
+            try std.testing.expectEqual(Result.unified, result);
+            const record = store.resolveVar(backing).desc.content.structure.record;
+            try std.testing.expectEqual(Content{ .structure = .empty_record }, store.resolveVar(record.ext).desc.content);
+        }
+    }
+}
+
 // unification - empty nominal types //
 
 test "unify - empty nominal type with empty tag union (nominal on left)" {

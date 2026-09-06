@@ -5600,9 +5600,13 @@ Restrictions:
   default-incompatible—the `defaulted(d1) ~ defaulted(d2)` conflict and its
   "Incompatible Defaults" report are no longer constructible from source and
   remain as identity-skew invariants, pinned at the unify level—and every
-  omission site of a defaulted field is a syntactically explicit nominal
-  construction (`Cfg.{...}`), which is what enables canonicalize-side
-  default-cycle analysis for the pure-expression defaults work. Derived
+  omission site of a defaulted field constructs a nominal, either explicitly
+  (`Cfg.{...}`) or through an expected nominal type (`cfg : Cfg; cfg = {}`).
+  Empty and nonempty literals use the same backing-row relation: omission
+  validates every field and the complete extension before retaining the nominal
+  result, and records each default on its source construction. Canonicalization
+  analyzes cycles through explicit constructors; checking also analyzes the
+  omissions determined by expected types. Derived
   codecs reach defaulted fields through the nominal's derived methods
   (`parser_for : _` etc.), which derive against the backing row.
 - `?:` and `??` do not combine: a default makes the field never missing,
@@ -5635,8 +5639,8 @@ Restrictions:
     (lookups resolving to same-module defs, walked into their bodies—
     except lambda bodies, per the function-value rule below) and
     OMISSION edges (a LOCAL nominal construction whose literal omits a
-    declared defaulted field—syntactically explicit post the nominal-only
-    restriction). Value references only point down the import DAG, so a
+    declared defaulted field through an explicit constructor). Value references
+    only point down the import DAG, so a
     name-resolvable cycle can never leave the declaring module; the pass
     is module-local without loss. Each cyclic SCC containing a default
     reports `record_default_reference_cycle` ("Default Value Cycle")
@@ -5683,8 +5687,12 @@ Restrictions:
     `defaultMaterializationIsRecursive` walk descends every expression
     form and additionally follows same-module reference edges,
     DISPATCH-RESOLVED call targets, type-dispatch method bindings, and
-    omitted defaulted fields on SOLVED rows (which also covers
-    foreign-omission edges). It applies the same invoked-ness rules as
+    the exact omitted-default entries emitted by unification (which also
+    covers implicit nominal lifting and foreign-omission edges). A dense
+    construction index and links into the omission table are built once per
+    judgment, so each walk visits only that construction's omissions rather
+    than scanning the module or reconstructing omissions from solved types.
+    It applies the same invoked-ness rules as
     CAN—a lambda or closure reached as a value walks its captures but
     not its body; invoked-ness follows name-resolvable reference chains
     to the def body they name (re-traversed by necessity: a mixed cycle
