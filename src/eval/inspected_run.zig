@@ -402,7 +402,7 @@ fn runDev(allocator: Allocator, program: Program) DevError!Result {
             allocator,
             program.store,
             program.layouts,
-            static_strings.entries,
+            static_strings.view(),
             program.boxy_tables.erased_arg_desc_offsets,
             program.boxy_tables.erased_arg_desc_params,
             program.boxy_tables.worker_procs,
