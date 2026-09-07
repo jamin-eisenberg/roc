@@ -760,7 +760,7 @@ test "Monotype open specialization lookup covers the complete function interface
         "fn draftNestedSpecRequestNode(",
     );
     try expectContains(interface_registration, "indexed_nodes.getOrPut(interface_node)");
-    try expectContains(interface_registration, "draftOpenRequestKey(interface_node)");
+    try expectContains(interface_registration, ".node = interface_node");
     try expectContains(nested_source, "std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)");
 }
 

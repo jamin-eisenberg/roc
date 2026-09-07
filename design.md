@@ -7505,7 +7505,11 @@ one class. The index interns the exact family and evidence-digest prefix once
 per request, using an append-only index-local ID in each interface key. Growing
 the index during recursive lowering does not invalidate those IDs. Request
 kinds remain disjoint, and interning a prefix does not replace exact candidate
-validation.
+validation. Permanent-node requests use the prefix ID and node ID directly in
+a separate index; only structural type and open-shape requests carry digests.
+Each bucket stores its first candidate inline. Additional candidates occupy
+an append-only table of overflow lists, retaining insertion order and exact
+duplicate detection across index and table growth.
 
 Type-shaped inspection that can escape relation production or become durable
 specialization identity is allowed only for a fully resolved graph node. It
