@@ -13066,6 +13066,22 @@ checked platform contract. An unexpected definition, an unresolved builtin or
 compiler-rt call, or an undeclared host requirement is a compiler error; it is
 never passed through to the platform linker as a best-effort import.
 
+The prebuilt machine-code run shim has the same explicit dependency boundary,
+verified when building Roc itself. Before an archive can be installed or
+embedded, a host executable checks every ELF, Mach-O, or COFF global symbol
+against the shim's declared exports, host runtime/table imports, and target
+C/OS ABI dependencies. Weak and hidden globals are checked too. COFF preparation
+localizes compiler-owned definitions, removes their COMDAT participation, and
+rebuilds the archive index from the public roots before verification; symbol
+indices and relocations remain intact. Unknown helpers, extra exports, missing entrypoints, and malformed
+or uninspectable archives fail the build. This check is unconditional across
+optimization modes and runs only in Roc's build graph: neither the released
+compiler nor user executables contain or execute the verifier. The focused
+archive test cross-builds all shipped native architectures and object formats.
+Compiler-private cache synchronization and stack probing are local to the
+shim; exported builtins payloads and the interpreter's assembly trampoline
+are not machine-code run-shim inputs.
+
 Every object-format address embedded in compiler-owned code or data remains a
 relocation through this boundary. In particular, Wasm function pointers are
 relocations against their function symbols, never raw indices into the
