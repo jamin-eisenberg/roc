@@ -13013,6 +13013,7 @@ test "LLVM erased callable explicit arguments exclude capture and reuse" {
 
 test "LLVM fixed stack slots dominate entry and loop uses" {
     const allocator = std.testing.allocator;
+    const byte_alignment = LlvmBuilder.Alignment.fromByteUnits(@alignOf(u8));
     var store = lir.LirStore.init(allocator);
     defer store.deinit();
     var codegen = MonoLlvmCodeGen.init(allocator, &store, &.{}, &.{}, &.{});
@@ -13027,16 +13028,16 @@ test "LLVM fixed stack slots dominate entry and loop uses" {
     const entry = try wip.block(0, "entry");
     const loop = try wip.block(1, "loop");
     wip.cursor = .{ .block = entry };
-    const first = try codegen.allocEntryBlockSlot(.i8, 1, @enumFromInt(0), "first");
-    _ = try wip.store(.normal, try builder.intValue(.i8, 1), first, @enumFromInt(0));
-    const second = try codegen.allocEntryBlockSlot(.i8, 1, @enumFromInt(0), "second");
-    _ = try wip.store(.normal, try builder.intValue(.i8, 2), second, @enumFromInt(0));
+    const first = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "first");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 1), first, byte_alignment);
+    const second = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "second");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 2), second, byte_alignment);
     const branch = try wip.br(loop);
     wip.cursor = .{ .block = loop };
-    const loop_slot = try codegen.allocEntryBlockSlot(.i8, 1, @enumFromInt(0), "loop_slot");
+    const loop_slot = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "loop_slot");
     try std.testing.expectEqual(loop, wip.cursor.block);
     try std.testing.expectEqual(@as(u32, 0), wip.cursor.instruction);
-    _ = try wip.store(.normal, try builder.intValue(.i8, 3), loop_slot, @enumFromInt(0));
+    _ = try wip.store(.normal, try builder.intValue(.i8, 3), loop_slot, byte_alignment);
     _ = try wip.br(loop);
     try wip.flushEntryAllocas();
     const instructions = entry.ptrConst(&wip).instructions.items;
