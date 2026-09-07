@@ -80,7 +80,6 @@ EndOfFile,
 			(ty (name "L"))
 			(where
 				(method (mod-of "o") (name "h")
-					(args)
 					(ty-var (raw "a")))))))
 ~~~
 # FORMATTED
@@ -101,7 +100,6 @@ c : L
 			(ty-malformed)
 			(where
 				(method (ty-rigid-var (name "o")) (name "h")
-					(args)
 					(ty-rigid-var (name "a")))))))
 ~~~
 # TYPES

@@ -9,18 +9,18 @@ process : a -> U64 where [a.convert : a -> U64, a.convert : a -> Str]
 process = |x| x.convert()
 ~~~
 # EXPECTED
-TYPE MISMATCH - duplicate_where_requirements_share_one_callable.md:1:49:1:69
+TYPE MISMATCH - duplicate_where_requirements_share_one_callable.md:1:61:1:69
 # PROBLEMS
 ~~~clojure
 (reports
 	(report
 		(severity runtime_error)
 		(title "Type Mismatch")
-		(region (start 1 49) (end 1 69))
+		(region (start 1 61) (end 1 69))
 		(headline
 			(reflow "This expression is used in an unexpected way."))
 		(document
-			(source-region (file "duplicate_where_requirements_share_one_callable.md") (start 1 49) (end 1 69) (annotation error) (line-text "process : a -> U64 where [a.convert : a -> U64, a.convert : a -> Str]"))
+			(source-region (file "duplicate_where_requirements_share_one_callable.md") (start 1 61) (end 1 69) (annotation error) (line-text "process : a -> U64 where [a.convert : a -> U64, a.convert : a -> Str]"))
 			(line-break)
 			(reflow "It has the type:")
 			(line-break)
@@ -56,13 +56,13 @@ EndOfFile,
 				(ty (name "U64")))
 			(where
 				(method (mod-of "a") (name "convert")
-					(args
-						(ty-var (raw "a")))
-					(ty (name "U64")))
+					(ty-fn
+						(ty-var (raw "a"))
+						(ty (name "U64"))))
 				(method (mod-of "a") (name "convert")
-					(args
-						(ty-var (raw "a")))
-					(ty (name "Str")))))
+					(ty-fn
+						(ty-var (raw "a"))
+						(ty (name "Str"))))))
 		(s-decl
 			(p-ident (raw "process"))
 			(e-lambda
@@ -85,7 +85,7 @@ NO CHANGE
 		(e-lambda
 			(args
 				(p-assign (ident "x")))
-			(e-dispatch-call (method "convert") (constraint-fn-var 240)
+			(e-dispatch-call (method "convert") (constraint-fn-var 238)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "x"))))
@@ -96,13 +96,13 @@ NO CHANGE
 				(ty-lookup (name "U64") (builtin)))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "convert")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
-					(ty-lookup (name "U64") (builtin)))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
+						(ty-lookup (name "U64") (builtin))))
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "convert")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
-					(ty-lookup (name "Str") (builtin)))))))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
+						(ty-lookup (name "Str") (builtin))))))))
 ~~~
 # TYPES
 ~~~clojure

@@ -39,6 +39,9 @@ pub const ResourceError = std.mem.Allocator.Error;
 /// and profiling. Not updated in release builds.
 pub var solver_iterations: u64 = 0;
 
+/// Debug-only count of locals examined by borrow-group liveness queries.
+pub var group_liveness_member_visits: u64 = 0;
+
 /// Options for ARC insertion.
 pub const InsertOptions = struct {
     /// Root procs whose ownership signature is pinned all-owned by ABI.
@@ -271,6 +274,76 @@ const ProcArcDomain = struct {
     }
 };
 
+/// Immutable raw-liveness numbering, built once with a source's graph and
+/// shared by its ownership variants. Ownership keeps its original indices
+/// and release order; only raw liveness bits are grouped by solved leader.
+const GroupLivenessIndex = struct {
+    const Range = struct { start: u32 = 0, end: u32 = 0 };
+
+    /// Ownership resource index -> raw liveness bit. Empty means identity,
+    /// which needs no storage when every frame group is a singleton.
+    raw_bits: []const u32 = &.{},
+    /// Indexed by the domain's existing multi-member group ordinal. Groups
+    /// containing only non-resource locals have empty ranges.
+    ranges: []const Range = &.{},
+
+    fn init(allocator: Allocator, domain: *const ProcArcDomain, solution: *const arc_solve.Solution) ResourceError!GroupLivenessIndex {
+        if (domain.group_leaders.len == 0) return .{};
+        const raw_bits = try allocator.alloc(u32, domain.resource_locals.len);
+        const ranges = try allocator.alloc(Range, domain.group_leaders.len);
+        @memset(ranges, .{});
+        var singletons: u32 = 0;
+        for (domain.resource_locals) |local| {
+            if (domain.groupBitOf(solution.leaderOf(local))) |bit| {
+                ranges[bit - raw_bits.len].end += 1;
+            } else {
+                singletons += 1;
+            }
+        }
+        var offset = singletons;
+        for (ranges) |*range| {
+            const count = range.end;
+            range.* = .{ .start = offset, .end = offset };
+            offset += count;
+        }
+        std.debug.assert(offset == raw_bits.len);
+        var singleton_bit: u32 = 0;
+        for (domain.resource_locals, raw_bits) |local, *raw_bit| {
+            if (domain.groupBitOf(solution.leaderOf(local))) |bit| {
+                const range = &ranges[bit - raw_bits.len];
+                raw_bit.* = range.end;
+                range.end += 1;
+            } else {
+                raw_bit.* = singleton_bit;
+                singleton_bit += 1;
+            }
+        }
+        return .{ .raw_bits = raw_bits, .ranges = ranges };
+    }
+
+    fn rawBitOf(self: *const GroupLivenessIndex, domain: *const ProcArcDomain, local: LIR.LocalId) ?usize {
+        const resource_bit = domain.resourceBitOf(local) orelse return null;
+        return if (self.raw_bits.len == 0) resource_bit else self.raw_bits[resource_bit];
+    }
+
+    fn usedExcept(self: *const GroupLivenessIndex, domain: *const ProcArcDomain, reads: *const ExactBitSet, leader: LIR.LocalId, except: LIR.LocalId) bool {
+        const range = if (domain.groupBitOf(leader)) |bit|
+            self.ranges[bit - domain.resource_locals.len]
+        else {
+            if (leader == except) return false;
+            const bit = self.rawBitOf(domain, leader) orelse return false;
+            if (builtin.mode == .Debug) group_liveness_member_visits += 1;
+            return reads.isSet(bit);
+        };
+        if (self.rawBitOf(domain, except)) |bit| {
+            if (range.start <= bit and bit < range.end) {
+                return reads.anySetInRange(range.start, bit) or reads.anySetInRange(bit + 1, range.end);
+            }
+        }
+        return reads.anySetInRange(range.start, range.end);
+    }
+};
+
 /// Public `insert` function.
 pub fn insert(store: *LirStore, layouts: *const layout_mod.Store, options: InsertOptions) ResourceError!void {
     var inserter = Inserter{
@@ -281,13 +354,13 @@ pub fn insert(store: *LirStore, layouts: *const layout_mod.Store, options: Inser
     const boxy_rc_descs = try computeBoxyRcDescs(store);
     defer store.allocator.free(boxy_rc_descs);
 
-    const local_contains_refcounted = try computeLocalContainsRefcounted(store.allocator, store, layouts, boxy_rc_descs);
-    defer store.allocator.free(local_contains_refcounted);
+    const borrow_anchor_refcounted = try arc_solve.computeLocalContainsRefcounted(store.allocator, store, layouts);
+    defer store.allocator.free(borrow_anchor_refcounted);
+    const emission_refcounted = try computeEmissionContainsRefcounted(store.allocator, store, layouts, borrow_anchor_refcounted);
+    defer emission_refcounted.deinit(store.allocator);
+    const local_contains_refcounted = emission_refcounted.slice();
     inserter.local_contains_refcounted = local_contains_refcounted;
     inserter.boxy_rc_descs = boxy_rc_descs;
-
-    const borrow_anchor_refcounted = try computeBorrowAnchorRefcounted(store.allocator, store, layouts, local_contains_refcounted);
-    defer store.allocator.free(borrow_anchor_refcounted);
 
     var solution = try arc_solve.solve(
         store.allocator,
@@ -552,9 +625,7 @@ pub fn insert(store: *LirStore, layouts: *const layout_mod.Store, options: Inser
             else
                 variants.sigs.items[proc_index - solution.sigs.len];
         }
-        const certified_boxy_rc_descs = try computeBoxyRcDescs(store);
-        defer store.allocator.free(certified_boxy_rc_descs);
-        try arc_certify.certifyStoreOrPanic(store.allocator, store, layouts, certified_boxy_rc_descs, .{
+        try arc_certify.certifyStoreOrPanic(store.allocator, store, layouts, .{
             .sigs = all_sigs,
             .outcomes = solution.outcomes,
         }, options.roots);
@@ -577,27 +648,57 @@ fn boxyDescForLocal(descs: []const ?LIR.BoxyDescRef, local: LIR.LocalId) ?LIR.Bo
     return descs[index];
 }
 
-fn computeLocalContainsRefcounted(
+/// Emission shares the immutable solver table unless a capture view must be
+/// excluded. Only the owned variant needs to be freed by the emission consumer.
+const EmissionRefcounted = union(enum) {
+    shared: []const bool,
+    owned: []bool,
+
+    fn slice(self: EmissionRefcounted) []const bool {
+        return switch (self) {
+            .shared => |values| values,
+            .owned => |values| values,
+        };
+    }
+
+    fn deinit(self: EmissionRefcounted, allocator: Allocator) void {
+        switch (self) {
+            .shared => {},
+            .owned => |values| allocator.free(values),
+        }
+    }
+
+    fn exclude(self: *EmissionRefcounted, allocator: Allocator, local: LIR.LocalId) Allocator.Error!void {
+        const index = @intFromEnum(local);
+        if (!self.slice()[index]) return;
+        const values = switch (self.*) {
+            .shared => |shared| values: {
+                const owned = try allocator.dupe(bool, shared);
+                self.* = .{ .owned = owned };
+                break :values owned;
+            },
+            .owned => |owned| owned,
+        };
+        values[index] = false;
+    }
+};
+
+/// Derive RC emission eligibility from the solver's representation table.
+/// A capture view anchors borrows but owns no aggregate RC unit.
+fn computeEmissionContainsRefcounted(
     allocator: Allocator,
     store: *const LirStore,
     layouts: *const layout_mod.Store,
-    boxy_rc_descs: []const ?LIR.BoxyDescRef,
-) ResourceError![]bool {
-    const local_count = store.localCount();
-    if (boxy_rc_descs.len != local_count) arcInvariant("ARC Boxy descriptor table did not cover every local");
-    const contains = try allocator.alloc(bool, local_count);
-    errdefer allocator.free(contains);
-    for (0..local_count) |index| {
-        const local_id: LIR.LocalId = @enumFromInt(@as(u32, @intCast(index)));
-        const local = store.getLocal(local_id);
-        contains[index] = layouts.layoutContainsRefcounted(layouts.getLayout(local.layout_idx));
-    }
+    borrow_anchor_refcounted: []const bool,
+) ResourceError!EmissionRefcounted {
+    if (borrow_anchor_refcounted.len != store.localCount()) arcInvariant("ARC resource table did not cover every local");
+    var contains = EmissionRefcounted{ .shared = borrow_anchor_refcounted };
+    errdefer contains.deinit(allocator);
     // An `erased_capture_load` whose aggregate contains descriptor-driven
     // fields is an explicit borrowed view into the executing callable's capture
     // allocation. The view has no aggregate descriptor of its own, so it cannot
     // use a layout-driven concrete helper. Keep it out of emission;
-    // `computeBorrowAnchorRefcounted` adds it back to the solver domain so its
-    // projected fields remain tied to the callable.
+    // the solver table retains it so projected fields remain tied to the callable.
     var visited = std.AutoHashMap(layout_mod.Idx, void).init(allocator);
     defer visited.deinit();
     var stack = std.ArrayList(layout_mod.Idx).empty;
@@ -609,49 +710,7 @@ fn computeLocalContainsRefcounted(
             const target = stmt.assign_low_level.target;
             const target_layout = store.getLocal(target).layout_idx;
             if (try layoutMayContainBoxyDynamic(allocator, layouts, target_layout, &visited, &stack)) {
-                contains[@intFromEnum(target)] = false;
-            }
-        }
-    }
-
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (0..store.cfStmtCount()) |stmt_index| {
-            const stmt_id: LIR.CFStmtId = @enumFromInt(@as(u32, @intCast(stmt_index)));
-            const stmt = store.getCFStmt(stmt_id);
-            if (stmt == .assign_ref) {
-                const assign = stmt.assign_ref;
-                switch (assign.op) {
-                    .local => |source| changed = markLocalRcIfSourceRc(contains, assign.target, source) or changed,
-                    .nominal => |op| changed = markLocalRcIfSourceRc(contains, assign.target, op.backing_ref) or changed,
-                    .list_reinterpret => |op| changed = markLocalRcIfSourceRc(contains, assign.target, op.backing_ref) or changed,
-                    .field,
-                    .tag_payload,
-                    .tag_payload_struct,
-                    .discriminant,
-                    => {},
-                }
-            } else if (stmt == .assign_list) {
-                const assign = stmt.assign_list;
-                changed = markLocalRcIfSpanContainsRc(store, contains, assign.target, assign.elems) or changed;
-            } else if (stmt == .assign_struct) {
-                const assign = stmt.assign_struct;
-                changed = markLocalRcIfSpanContainsRc(store, contains, assign.target, assign.fields) or changed;
-            } else if (stmt == .assign_tag) {
-                const assign = stmt.assign_tag;
-                if (assign.payload) |payload| {
-                    changed = markLocalRcIfSourceRc(contains, assign.target, payload) or changed;
-                }
-                if (assign.target_desc != null) {
-                    changed = markLocalRc(contains, assign.target) or changed;
-                }
-            } else if (stmt == .assign_boxy_box) {
-                changed = markLocalRc(contains, stmt.assign_boxy_box.target) or changed;
-            } else if (stmt == .assign_boxy_reuse_box) {
-                changed = markLocalRc(contains, stmt.assign_boxy_reuse_box.target) or changed;
-            } else if (stmt == .assign_boxy_tag) {
-                changed = markLocalRc(contains, stmt.assign_boxy_tag.target) or changed;
+                try contains.exclude(allocator, target);
             }
         }
     }
@@ -659,62 +718,8 @@ fn computeLocalContainsRefcounted(
     return contains;
 }
 
-/// Borrow-anchor refcounted set for the ARC solver. Extends the emission-time
-/// refcounted set with payload-read projections (`.field`, `.tag_payload`,
-/// `.tag_payload_struct`) whose result carries descriptor-driven dynamic
-/// (`erased_box`) content borrowed out of a refcounted source. Such a
-/// projection is an alias into its source's allocation whose extracted boxes
-/// stay live past the projection, so the source's release must land after the
-/// projection's last use. An erased capture load similarly produces a view of
-/// the capture storage owned by the pinned callable frame. These intermediate
-/// views own no RC unit: their dynamic payloads are refcounted by descriptor,
-/// which the layout-only refcount check cannot see, so the views carry no Boxy
-/// descriptor of their own. Marking them refcounted for the solver alone lets
-/// projections join an explicit liveness group. Emission keeps consulting the
-/// narrower `local_contains_refcounted`, so a solver-only anchor is never
-/// forced to carry an RC helper it lacks.
-fn computeBorrowAnchorRefcounted(
-    allocator: Allocator,
-    store: *const LirStore,
-    layouts: *const layout_mod.Store,
-    local_contains_refcounted: []const bool,
-) ResourceError![]bool {
-    const anchor = try allocator.dupe(bool, local_contains_refcounted);
-    errdefer allocator.free(anchor);
-
-    var visited = std.AutoHashMap(layout_mod.Idx, void).init(allocator);
-    defer visited.deinit();
-    var stack = std.ArrayList(layout_mod.Idx).empty;
-    defer stack.deinit(allocator);
-
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (0..store.cfStmtCount()) |stmt_index| {
-            const stmt_id: LIR.CFStmtId = @enumFromInt(@as(u32, @intCast(stmt_index)));
-            const stmt = store.getCFStmt(stmt_id);
-            if (stmt == .assign_low_level) {
-                const assign = stmt.assign_low_level;
-                if (assign.op != .erased_capture_load) continue;
-                const target_layout = store.getLocal(assign.target).layout_idx;
-                if (!try layoutMayContainBoxyDynamic(allocator, layouts, target_layout, &visited, &stack)) continue;
-                changed = markLocalRc(anchor, assign.target) or changed;
-            } else if (stmt == .assign_ref) {
-                const assign = stmt.assign_ref;
-                if (assign.op != .field and assign.op != .tag_payload and assign.op != .tag_payload_struct) continue;
-                const source_index = @intFromEnum(refOpSource(assign.op));
-                if (source_index >= anchor.len or !anchor[source_index]) continue;
-                const target_layout = store.getLocal(assign.target).layout_idx;
-                if (!try layoutMayContainBoxyDynamic(allocator, layouts, target_layout, &visited, &stack)) continue;
-                changed = markLocalRc(anchor, assign.target) or changed;
-            }
-        }
-    }
-    return anchor;
-}
-
 /// Cycle-safe check for whether a layout may hold descriptor-driven dynamic
-/// (`box_of_zst`) content. Recursive tag unions reference themselves through
+/// (`erased_box`) content. Recursive tag unions reference themselves through
 /// their layout indices, so the walk tracks visited indices; `visited` and
 /// `stack` are caller-owned scratch reused across queries.
 fn layoutMayContainBoxyDynamic(
@@ -748,29 +753,6 @@ fn layoutMayContainBoxyDynamic(
             },
             .closure => try stack.append(allocator, layout_val.getClosure().captures_layout_idx),
         }
-    }
-    return false;
-}
-
-fn markLocalRc(contains: []bool, local: LIR.LocalId) bool {
-    const index = @intFromEnum(local);
-    if (index >= contains.len or contains[index]) return false;
-    contains[index] = true;
-    return true;
-}
-
-fn markLocalRcIfSourceRc(contains: []bool, target: LIR.LocalId, source: LIR.LocalId) bool {
-    const source_index = @intFromEnum(source);
-    if (source_index >= contains.len or !contains[source_index]) return false;
-    return markLocalRc(contains, target);
-}
-
-fn markLocalRcIfSpanContainsRc(store: *const LirStore, contains: []bool, target: LIR.LocalId, span: LIR.LocalSpan) bool {
-    const locals = store.getLocalSpan(span);
-    for (0..GuardedList.borrowLen(locals)) |span_index| {
-        const local = GuardedList.at(locals, span_index);
-        const local_index = @intFromEnum(local);
-        if (local_index < contains.len and contains[local_index]) return markLocalRc(contains, target);
     }
     return false;
 }
@@ -870,6 +852,20 @@ const ExactBitSet = struct {
         const word_index: u32 = @intCast(bit / 64);
         const mask = @as(u64, 1) << @intCast(bit % 64);
         return self.words.get(word_index) & mask != 0;
+    }
+
+    /// Exact range existence, without enumerating either members or live bits.
+    fn anySetInRange(self: *const ExactBitSet, start: usize, end: usize) bool {
+        std.debug.assert(start <= end and end <= self.bit_len);
+        if (start == end) return false;
+        const first_word: u32 = @intCast(start / 64);
+        const last_word: u32 = @intCast((end - 1) / 64);
+        const first_mask = @as(u64, std.math.maxInt(u64)) << @as(u6, @intCast(start % 64));
+        const last_mask = @as(u64, std.math.maxInt(u64)) >> @as(u6, @intCast(63 - (end - 1) % 64));
+        if (first_word == last_word) return self.words.get(first_word) & first_mask & last_mask != 0;
+        if (self.words.get(first_word) & first_mask != 0) return true;
+        if (self.words.get(last_word) & last_mask != 0) return true;
+        return self.words.hasNonEmptyInRange(first_word + 1, last_word);
     }
 
     fn unsetAll(self: *ExactBitSet) void {
@@ -5812,6 +5808,7 @@ const Inserter = struct {
 
     const ReadBeforeRebindGraph = struct {
         allocator: Allocator,
+        group_liveness: GroupLivenessIndex,
         nodes: std.ArrayList(ReadBeforeRebindNode),
         /// Node indices, resolved exactly once while each edge is appended.
         successors: std.ArrayList(u32),
@@ -5821,9 +5818,10 @@ const Inserter = struct {
         /// Compact node bits whose forward paths can reach a loop boundary.
         reaches_loop_edge: std.bit_set.DynamicBitSetUnmanaged = .{},
 
-        fn init(allocator: Allocator) ReadBeforeRebindGraph {
+        fn init(allocator: Allocator, proc_domain: *const ProcArcDomain, solution: *const arc_solve.Solution) ResourceError!ReadBeforeRebindGraph {
             return .{
                 .allocator = allocator,
+                .group_liveness = try GroupLivenessIndex.init(allocator, proc_domain, solution),
                 .nodes = .empty,
                 .successors = .empty,
             };
@@ -5881,10 +5879,18 @@ const Inserter = struct {
         graph.nodes.items[node_index].successor_len += 1;
     }
 
-    /// Raw liveness-bit position for a refcounted resource local or one of
-    /// its explicit solved ownership-unit / borrow-group representatives.
+    /// Immutable numbering shared by every emission of the source procedure.
+    fn groupLivenessIndex(self: *const Inserter) *const GroupLivenessIndex {
+        const graph = if (self.liveness_graphs[@intFromEnum(self.current_source_proc)]) |*entry|
+            entry
+        else
+            arcInvariant("ARC raw-liveness query lacked its source graph");
+        return &graph.group_liveness;
+    }
+
+    /// Raw liveness-bit position for a concrete resource or solved anchor.
     fn rawLivenessBitOf(self: *const Inserter, local: LIR.LocalId) ?usize {
-        return self.domain().resourceBitOf(local);
+        return self.groupLivenessIndex().rawBitOf(self.domain(), local);
     }
 
     fn noteReadBeforeRebindLocal(self: *const Inserter, reads: *ExactBitSet, local: LIR.LocalId) ResourceError!void {
@@ -6054,7 +6060,7 @@ const Inserter = struct {
         if (source_index >= self.liveness_graphs.len) arcInvariant("ARC liveness source proc exceeded its graph table");
         const graph_slot = &self.liveness_graphs[source_index];
         if (graph_slot.* != null) arcInvariant("ARC keep-free liveness graph existed without its requested row");
-        graph_slot.* = ReadBeforeRebindGraph.init(self.liveness_allocator);
+        graph_slot.* = try ReadBeforeRebindGraph.init(self.liveness_allocator, self.domain(), self.solution);
         var graph = graph_slot.*.?;
         const graph_allocator = graph.allocator;
         var work = std.ArrayList(u32).empty;
@@ -6866,16 +6872,16 @@ const Inserter = struct {
 
     /// Value liveness for one raw local (no group extension). Borrowed call
     /// results have a dedicated value-use bit; other resources use their raw
-    /// ownership bit.
+    /// liveness bit.
     fn valueUsedInPath(
         self: *Inserter,
         start: LIR.CFStmtId,
         needle: LIR.LocalId,
         loop_keep: ?LoopKeep,
     ) ResourceError!bool {
+        const reads = try self.livenessRow(start, loop_keep);
         const bit = self.valueUseBitOf(needle) orelse self.rawLivenessBitOf(needle) orelse
             arcInvariant("ARC value-use query for a local without a value-use bit");
-        const reads = try self.livenessRow(start, loop_keep);
         return reads.isSet(bit);
     }
 
@@ -6937,18 +6943,7 @@ const Inserter = struct {
     ) ResourceError!bool {
         const reads = try self.livenessRow(start, loop_keep);
         const leader = self.solution.leaderOf(local);
-        // Resource locals include concrete RC values plus the solver-authored
-        // ownership-unit and borrow-group representatives. Those synthetic
-        // anchors have liveness bits even though they need no concrete RC
-        // helper of their own, and must participate in lender-death checks.
-        for (self.domain().resource_locals) |member_local| {
-            if (self.solution.leaderOf(member_local) != leader) continue;
-            if (member_local == except) continue;
-            const bit = self.rawLivenessBitOf(member_local) orelse
-                arcInvariant("ARC refcounted borrow-group member missing its raw liveness bit");
-            if (reads.isSet(bit)) return true;
-        }
-        return false;
+        return self.groupLivenessIndex().usedExcept(self.domain(), reads, leader, except);
     }
 
     fn retainSpanExceptPositions(
@@ -7157,34 +7152,6 @@ const Inserter = struct {
             return self.rcHelperForLayout(nestedDropOp(op), layout_val.getClosure().captures_layout_idx);
         }
         return .{ .op = op, .layout_idx = layout_idx };
-    }
-
-    fn layoutMayContainBoxyDynamic(self: *const Inserter, layout_idx: layout_mod.Idx) bool {
-        const layout_val = self.layouts.getLayout(layout_idx);
-        return switch (layout_val.tag) {
-            .box_of_zst => true,
-            .box => self.layoutMayContainBoxyDynamic(layout_val.getIdx()),
-            .list => self.layoutMayContainBoxyDynamic(layout_val.getIdx()),
-            .list_of_zst => false,
-            .struct_ => blk: {
-                const info = self.layouts.getStructInfo(layout_val);
-                for (0..info.fields.len) |index| {
-                    const field = info.fields.get(@intCast(index));
-                    if (self.layoutMayContainBoxyDynamic(field.layout)) break :blk true;
-                }
-                break :blk false;
-            },
-            .tag_union => blk: {
-                const info = self.layouts.getTagUnionInfo(layout_val);
-                for (0..info.variants.len) |index| {
-                    const payload_layout = info.variants.get(@intCast(index)).payload_layout;
-                    if (self.layoutMayContainBoxyDynamic(payload_layout)) break :blk true;
-                }
-                break :blk false;
-            },
-            .closure => self.layoutMayContainBoxyDynamic(layout_val.getClosure().captures_layout_idx),
-            .zst, .scalar, .erased_callable, .ptr => false,
-        };
     }
 
     fn nestedDropOp(op: layout_mod.RcOp) layout_mod.RcOp {
@@ -8342,6 +8309,50 @@ const ArcTest = struct {
     }
 };
 
+test "ARC emission shares solver resources without allocating when no capture is excluded" {
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+
+    _ = try f.local(f.list_str);
+    const result = try f.local(.i64);
+    _ = try f.ret(result);
+    const borrow_anchors = try arc_solve.computeLocalContainsRefcounted(f.allocator, &f.store, &f.layouts);
+    defer f.allocator.free(borrow_anchors);
+
+    const emission = try computeEmissionContainsRefcounted(testing.failing_allocator, &f.store, &f.layouts, borrow_anchors);
+    defer emission.deinit(testing.failing_allocator);
+    try testing.expect(emission.slice().ptr == borrow_anchors.ptr);
+    try testing.expectEqualSlices(bool, &.{ true, false }, emission.slice());
+}
+
+test "ARC emission exclusions copy once and preserve solver resources on allocation failure" {
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+
+    const first_list = try f.local(f.list_str);
+    const scalar = try f.local(.i64);
+    const second_list = try f.local(f.list_str);
+    const borrow_anchors = try arc_solve.computeLocalContainsRefcounted(f.allocator, &f.store, &f.layouts);
+    defer f.allocator.free(borrow_anchors);
+
+    var emission = EmissionRefcounted{ .shared = borrow_anchors };
+    defer emission.deinit(testing.allocator);
+
+    // Already ineligible locals need no copy, even with an allocator that fails.
+    try emission.exclude(testing.failing_allocator, scalar);
+    try testing.expectError(error.OutOfMemory, emission.exclude(testing.failing_allocator, first_list));
+    try testing.expect(emission.slice().ptr == borrow_anchors.ptr);
+    try testing.expectEqualSlices(bool, &.{ true, false, true }, emission.slice());
+
+    try emission.exclude(testing.allocator, first_list);
+    const owned = emission.slice().ptr;
+    try testing.expect(owned != borrow_anchors.ptr);
+    try emission.exclude(testing.failing_allocator, second_list);
+    try testing.expect(emission.slice().ptr == owned);
+    try testing.expectEqualSlices(bool, &.{ false, false, false }, emission.slice());
+    try testing.expectEqualSlices(bool, &.{ true, false, true }, borrow_anchors);
+}
+
 test "ARC uses erased capture views as solver-only Boxy borrow anchors" {
     var f = try ArcTest.init(testing.allocator);
     defer f.deinit();
@@ -8368,25 +8379,22 @@ test "ARC uses erased capture views as solver-only Boxy borrow anchors" {
         .next = field_read,
     } });
 
-    const boxy_descs = try computeBoxyRcDescs(&f.store);
-    defer f.allocator.free(boxy_descs);
-    const local_contains_refcounted = try computeLocalContainsRefcounted(
+    const borrow_anchors = try arc_solve.computeLocalContainsRefcounted(
         f.allocator,
         &f.store,
         &f.layouts,
-        boxy_descs,
-    );
-    defer f.allocator.free(local_contains_refcounted);
-    const borrow_anchors = try computeBorrowAnchorRefcounted(
-        f.allocator,
-        &f.store,
-        &f.layouts,
-        local_contains_refcounted,
     );
     defer f.allocator.free(borrow_anchors);
+    const local_contains_refcounted = try computeEmissionContainsRefcounted(
+        f.allocator,
+        &f.store,
+        &f.layouts,
+        borrow_anchors,
+    );
+    defer local_contains_refcounted.deinit(f.allocator);
 
-    try testing.expect(!local_contains_refcounted[@intFromEnum(capture_view)]);
-    try testing.expect(local_contains_refcounted[@intFromEnum(captured_value)]);
+    try testing.expect(!local_contains_refcounted.slice()[@intFromEnum(capture_view)]);
+    try testing.expect(local_contains_refcounted.slice()[@intFromEnum(captured_value)]);
     try testing.expect(borrow_anchors[@intFromEnum(capture_view)]);
     try testing.expect(borrow_anchors[@intFromEnum(captured_value)]);
 }
@@ -9209,6 +9217,86 @@ test "ARC lender-death query sees a live solver-only borrow anchor" {
     // Scanning `refcounted_locals` here incorrectly reports the lender dead;
     // scanning the exact `resource_locals` domain reports it live.
     try testing.expect(try inserter.groupUsedInPathExcept(use_anchor, concrete, concrete, null));
+}
+
+test "ARC grouped raw liveness agrees with exhaustive resource queries" {
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+    var locals: [513]LIR.LocalId = undefined;
+    for (&locals) |*local| local.* = try f.local(.str);
+    const scalar = try f.local(.i64);
+    var body = try f.ret(scalar);
+    body = try f.assignI64(scalar, 0, body);
+    var index = locals.len;
+    while (index > 0) {
+        index -= 1;
+        const use = try f.expectStmt(locals[index], body);
+        body = if (index < 3)
+            try f.assignStr(locals[index], "root", use)
+        else
+            try f.assignRefLocal(locals[index], locals[index % 3], use);
+    }
+    const proc = try f.addProc(&.{}, body, .i64);
+    var rc = [_]bool{true} ** (locals.len + 1);
+    rc[locals.len] = false;
+    var solution = try arc_solve.solve(testing.allocator, &f.store, &f.layouts, &rc, &.{}, &.{}, true);
+    defer solution.deinit();
+    for (locals, 0..) |local, i| try testing.expectEqual(locals[i % 3], solution.leaderOf(local));
+    var indices = [_]u32{no_proc_local_index} ** rc.len;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var domain = try ProcArcDomain.init(arena.allocator(), &f.store, &solution, &rc, &indices, f.store.getProcSpec(proc).frame_locals);
+    defer domain.clearGlobalIndices();
+    const grouped = try GroupLivenessIndex.init(arena.allocator(), &domain, &solution);
+    var reads = try ExactBitSet.initEmpty(arena.allocator(), domain.livenessBitLen());
+    var expected = [_]bool{false} ** locals.len;
+    var prng = std.Random.DefaultPrng.init(11127);
+    const random = prng.random();
+    for (0..20) |round| {
+        // Include empty rows, one-member rows, dense rows, and shared unions.
+        var next = try ExactBitSet.initEmpty(arena.allocator(), domain.livenessBitLen());
+        for (locals, 0..) |local, i| {
+            const live = if (round == 0) false else if (round == 1) i == 64 else random.boolean();
+            if (live) try next.set(grouped.rawBitOf(&domain, local).?);
+            expected[i] = if (round % 3 == 0) expected[i] or live else live;
+        }
+        if (round % 3 == 0) try reads.setUnion(next) else reads = next;
+        for (locals, 0..) |local, i| {
+            try testing.expectEqual(local, domain.resourceLocalAt(i));
+            try testing.expectEqual(expected[i], reads.isSet(grouped.rawBitOf(&domain, local).?));
+        }
+        for (0..3) |group| {
+            for (0..locals.len + 1) |excluded| {
+                const except = if (excluded == locals.len) scalar else locals[excluded];
+                var used = false;
+                for (locals, 0..) |local, i| {
+                    if (i % 3 == group and local != except and expected[i]) used = true;
+                }
+                try testing.expectEqual(used, grouped.usedExcept(&domain, &reads, locals[group], except));
+            }
+        }
+    }
+}
+
+test "ARC raw-liveness ranges exclude boundary bits without scanning wide empty groups" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var reads = try ExactBitSet.initEmpty(arena.allocator(), 1_000_001);
+    for ([_]usize{ 0, 63, 64, 511, 512, 999999, 1000000 }) |bit| try reads.set(bit);
+    const boundaries = [_]usize{ 0, 1, 63, 64, 65, 511, 512, 513, 999999, 1000000, 1000001 };
+    for (boundaries) |start| {
+        for (boundaries) |end| {
+            if (end < start) continue;
+            var expected = false;
+            for ([_]usize{ 0, 63, 64, 511, 512, 999999, 1000000 }) |bit| {
+                if (start <= bit and bit < end) expected = true;
+            }
+            try testing.expectEqual(expected, reads.anySetInRange(start, end));
+        }
+    }
+    const before = @import("arc_state.zig").range_query_node_visits;
+    try testing.expect(!reads.anySetInRange(513, 999999));
+    if (builtin.mode == .Debug) try testing.expect(@import("arc_state.zig").range_query_node_visits - before <= 2 * 8 * 11);
 }
 
 test "RC pass-through: non-refcounted i64 block unchanged" {
@@ -10565,6 +10653,53 @@ test "RC join summary solver work grows linearly with chained joins" {
     const large = try chainedJoinSolveWork(16);
     // Doubling the join count must stay near double the solver work;
     // per-join region re-walks would grow it quadratically.
+    try testing.expect(large <= small * 3);
+}
+
+/// Chained string concats from https://github.com/roc-lang/roc/issues/11127.
+fn strConcatChainGroupLivenessWork(chain_len: usize) Allocator.Error!u64 {
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+    const seed = try f.local(.str);
+    const literals = try testing.allocator.alloc(LIR.LocalId, chain_len);
+    defer testing.allocator.free(literals);
+    const results = try testing.allocator.alloc(LIR.LocalId, chain_len);
+    defer testing.allocator.free(results);
+    for (literals, results) |*literal, *result| {
+        literal.* = try f.local(.str);
+        result.* = try f.local(.str);
+    }
+    var current = try f.ret(results[chain_len - 1]);
+    var index = chain_len;
+    while (index > 0) {
+        index -= 1;
+        const source = if (index == 0) seed else results[index - 1];
+        current = try f.store.addCFStmt(.{ .assign_low_level = .{
+            .target = results[index],
+            .op = .str_concat,
+            .rc_effect = LIR.LowLevel.str_concat.rcEffect(),
+            .args = try f.span(&.{ source, literals[index] }),
+            .next = current,
+        } });
+        current = try f.assignStr(literals[index], "x", current);
+    }
+    const body = try f.assignStr(seed, "seed", current);
+    _ = try f.addProc(&.{}, body, .str);
+    const before = group_liveness_member_visits;
+    try f.run();
+    return group_liveness_member_visits - before;
+}
+
+test "RC borrow-group liveness work grows linearly with chained string concats" {
+    if (builtin.mode != .Debug) return;
+    const small = try strConcatChainGroupLivenessWork(32);
+    const large = try strConcatChainGroupLivenessWork(64);
+    if (large > small * 3) {
+        std.debug.print(
+            "borrow-group liveness work grew nonlinearly: {d} member visits at 32 concats, {d} at 64\n",
+            .{ small, large },
+        );
+    }
     try testing.expect(large <= small * 3);
 }
 
@@ -12788,6 +12923,62 @@ test "RC outcome restitution solves sixteen independent conditional arguments po
     try testing.expect(work <= count * f.store.cfStmtCount() * 2);
 }
 
+fn outcomeScratchWork(proc_count: usize) (Allocator.Error || error{TestExpectedEqual})!u64 {
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+    const outcome_layout = try f.layouts.putTagUnion(&.{ try f.layouts.ensureZstLayout(), f.list_i64 });
+    for (0..proc_count) |_| {
+        const param = try f.local(f.list_i64);
+        const choose = try f.local(.i64);
+        const changed = try f.local(f.list_i64);
+        const result = try f.local(outcome_layout);
+        const ret = try f.ret(result);
+        const success = try f.assignTag(result, 1, changed, ret);
+        const consume = try f.store.addCFStmt(.{ .assign_low_level = .{
+            .target = changed,
+            .op = .list_reverse,
+            .rc_effect = LIR.LowLevel.list_reverse.rcEffect(),
+            .args = try f.span(&.{param}),
+            .next = success,
+        } });
+        const failure = try f.assignTag(result, 0, null, ret);
+        const body = try f.switchStmt(choose, consume, failure, null);
+        // Explicit disjoint frames, unlike ArcTest's all-locals convenience.
+        _ = try f.store.addProcSpec(.{
+            .name = f.store.freshSyntheticSymbol(),
+            .args = try f.span(&.{ param, choose }),
+            .body = body,
+            .frame_locals = try f.span(&.{ param, choose, changed, result }),
+            .ret_layout = outcome_layout,
+        });
+    }
+    const rc = try testing.allocator.alloc(bool, f.store.localCount());
+    defer testing.allocator.free(rc);
+    for (rc, 0..) |*value, i| value.* = i % 4 != 1;
+    const before = arc_solve.outcome_scratch_entries;
+    var solution = try arc_solve.solve(testing.allocator, &f.store, &f.layouts, rc, &.{}, &.{}, true);
+    defer solution.deinit();
+    for (0..proc_count) |i| {
+        const span = solution.availableOutcomeSpanOf(@enumFromInt(@as(u32, @intCast(i))));
+        try testing.expectEqual(@as(u32, 2), span.len);
+        const failure = solution.outcomes[span.start];
+        const success = solution.outcomes[span.start + 1];
+        try testing.expectEqual(@as(u16, 0), failure.discriminant);
+        try testing.expectEqual(@as(arc_sig.ParamMask, 1), failure.restituted_params);
+        try testing.expectEqual(@as(u16, 1), success.discriminant);
+        try testing.expectEqual(@as(arc_sig.ParamMask, 0), success.restituted_params);
+    }
+    return arc_solve.outcome_scratch_entries - before;
+}
+
+test "RC restitution scratch work scales with disjoint procedure statements" {
+    if (builtin.mode != .Debug) return;
+    const small = try outcomeScratchWork(16);
+    const large = try outcomeScratchWork(32);
+    try testing.expect(small > 0);
+    try testing.expectEqual(small * 2, large);
+}
+
 test "RC outcome restitution follows an exact result through a terminal join" {
     var f = try ArcTest.init(testing.allocator);
     defer f.deinit();
@@ -14150,6 +14341,43 @@ test "RC preserves a surviving source before a consuming boxy adapter" {
     try f.run();
     try f.expectRc(source, 1, 1, 0);
     try f.expectRc(adapted, 0, 1, 0);
+}
+
+test "RC descriptor-bearing tag aliases and aggregates follow their committed layout" {
+    for ([_]layout_mod.Idx{ .i64, .str }) |payload_layout| {
+        var f = try ArcTest.init(testing.allocator);
+        defer f.deinit();
+
+        const tag_layout = try f.layouts.putTagUnion(&.{ .zst, payload_layout });
+        const record_layout = try f.layouts.putStructFields(&.{.{ .index = 0, .layout = tag_layout }});
+        const payload = try f.local(payload_layout);
+        const tag = try f.local(tag_layout);
+        const alias = try f.local(tag_layout);
+        const record = try f.local(record_layout);
+        const result = try f.local(.i64);
+        const ret = try f.ret(result);
+        const result_stmt = try f.assignI64(result, 0, ret);
+        const record_stmt = try f.assignStruct(record, &.{alias}, result_stmt);
+        const alias_stmt = try f.assignRefLocal(alias, tag, record_stmt);
+        const tag_stmt = try f.store.addCFStmt(.{ .assign_tag = .{
+            .target = tag,
+            .target_desc = .{ .static = @enumFromInt(fixtureTableIndex(0)) },
+            .variant_index = 1,
+            .discriminant = 1,
+            .payload = payload,
+            .next = alias_stmt,
+        } });
+        _ = try f.addProc(&.{payload}, tag_stmt, .i64);
+
+        // Certification checks the owning side too: a descriptor must neither
+        // invent a scalar resource nor hide the string stored in the record.
+        try f.run();
+        if (payload_layout == .i64) {
+            try testing.expectEqual(@as(usize, 0), f.countAllRc());
+        } else {
+            try testing.expect(f.countAllRc() > 0);
+        }
+    }
 }
 
 test "RC does not treat a descriptor-bearing scalar dictionary result as refcounted" {

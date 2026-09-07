@@ -65,10 +65,10 @@ EndOfFile,
 				(ty-record))
 			(where
 				(method (mod-of "a") (name "convert")
-					(args
+					(ty-fn
 						(ty-var (raw "a"))
-						(ty (name "Str")))
-					(ty (name "U64")))))
+						(ty (name "Str"))
+						(ty (name "U64"))))))
 		(s-decl
 			(p-ident (raw "f"))
 			(e-lambda
@@ -114,7 +114,7 @@ f = |value| {
 			(e-block
 				(s-let
 					(p-assign (ident "_first"))
-					(e-dispatch-call (method "convert") (constraint-fn-var 256)
+					(e-dispatch-call (method "convert") (constraint-fn-var 255)
 						(receiver
 							(e-lookup-local
 								(p-assign (ident "value"))))
@@ -131,10 +131,10 @@ f = |value| {
 				(ty-record))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "convert")
-					(args
+					(ty-fn (effectful false)
 						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
-						(ty-lookup (name "Str") (builtin)))
-					(ty-lookup (name "U64") (builtin)))))))
+						(ty-lookup (name "Str") (builtin))
+						(ty-lookup (name "U64") (builtin))))))))
 ~~~
 # TYPES
 ~~~clojure

@@ -2689,7 +2689,7 @@ const DeclaringModule = struct {
 };
 
 fn copyIntoConsumer(consumer: *TestEnv, source: *DeclaringModule, var_: Var) std.mem.Allocator.Error!Var {
-    var var_mapping = std.AutoHashMap(Var, Var).init(consumer.module_env.gpa);
+    var var_mapping = @import("collections").DenseMap(Var, Var).init(consumer.module_env.gpa);
     defer var_mapping.deinit();
     return try copy_import.copyVar(
         &source.env.types,
@@ -2716,7 +2716,7 @@ test "cross-module copy substitutes exact source vars without conflating equal r
     const source_tuple = try source.module_env.types.freshFromContent(try source.mkTuple(&.{ substituted_source, copied_source }));
 
     const replacement = try consumer.module_env.types.freshFromContent(.{ .structure = .empty_record });
-    var var_mapping = std.AutoHashMap(Var, Var).init(gpa);
+    var var_mapping = @import("collections").DenseMap(Var, Var).init(gpa);
     defer var_mapping.deinit();
     try var_mapping.put(substituted_source, replacement);
 
@@ -2780,7 +2780,7 @@ test "cross-module copy substitutes every application of an explicit alias decla
     );
 
     const replacement = try consumer.module_env.types.freshFromContent(.{ .structure = .empty_record });
-    var var_mapping = std.AutoHashMap(Var, Var).init(gpa);
+    var var_mapping = @import("collections").DenseMap(Var, Var).init(gpa);
     defer var_mapping.deinit();
     var alias_source_mapping = std.AutoHashMap(copy_import.AliasSource, Var).init(gpa);
     defer alias_source_mapping.deinit();

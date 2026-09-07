@@ -42,7 +42,7 @@ comptime {
 
 /// Decode the markup emitted by the HTML style. This intentionally rejects
 /// unknown entities so escaping changes cannot disappear from parity checks.
-fn visibleHtml(gpa: Allocator, bytes: []const u8) ![]u8 {
+fn visibleHtml(gpa: Allocator, bytes: []const u8) (Allocator.Error || std.Io.Writer.Error || error{ UnclosedHtmlTag, UnknownHtmlEntity })![]u8 {
     var out = std.Io.Writer.Allocating.init(gpa);
     errdefer out.deinit();
     var i: usize = 0;
@@ -486,7 +486,7 @@ test "caret rows are byte-identical across all four targets" {
 
 /// Extract every source row, retaining whitespace and empty lines. The fixture
 /// contains no literal carets; caret rows can therefore be removed exactly.
-fn sourceRows(gpa: Allocator, bytes: []const u8, comptime target: reporting.RenderTarget) ![]u8 {
+fn sourceRows(gpa: Allocator, bytes: []const u8, comptime target: reporting.RenderTarget) (Allocator.Error || std.Io.Writer.Error || error{ UnclosedHtmlTag, UnknownHtmlEntity, MissingSourceFence, MissingSourceGutter })![]u8 {
     var decoded = if (target == .html) try visibleHtml(gpa, bytes) else if (target == .color_terminal) try stripAnsi(gpa, bytes) else try gpa.dupe(u8, bytes);
     defer gpa.free(decoded);
     if (target == .markdown) {

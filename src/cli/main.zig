@@ -16020,7 +16020,7 @@ fn monotypeSpecializationCounters(diagnostics: postcheck.Monotype.Lower.Diagnost
     };
 }
 
-fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [23]progress.Counter {
+fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [25]progress.Counter {
     const graph = diagnostics.graph;
     return .{
         .{ .name = "Graphs created", .count = diagnostics.body.graphs_created },
@@ -16046,10 +16046,12 @@ fn monotypeGraphCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [23]
         .{ .name = "Nominal backing instances scanned", .count = graph.nominal_backing_instances_scanned },
         .{ .name = "Nominal backing tombstone deletions", .count = graph.nominal_backing_tombstone_deletions },
         .{ .name = "Union-find resolutions", .count = graph.union_find_resolutions },
+        .{ .name = "Argument class snapshot nodes", .count = graph.argument_class_members_snapshotted },
+        .{ .name = "Structural backing visited slots", .count = graph.structural_backing_scan_slots },
     };
 }
 
-fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [20]progress.Counter {
+fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [22]progress.Counter {
     const body = diagnostics.body;
     return .{
         .{ .name = "Body contexts created", .count = body.body_contexts_created },
@@ -16072,6 +16074,8 @@ fn monotypeBodyCounters(diagnostics: postcheck.Monotype.Lower.Diagnostics) [20]p
         .{ .name = "Nested callable checks", .count = body.nested_callable_checks },
         .{ .name = "Nested lambdas prepared", .count = body.nested_lambdas_prepared },
         .{ .name = "Nested closures prepared", .count = body.nested_closures_prepared },
+        .{ .name = "Nested lookup probes", .count = body.nested_lookup_probes },
+        .{ .name = "Draft commit lookup steps", .count = body.draft_commit_lookup_steps },
     };
 }
 

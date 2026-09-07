@@ -48,14 +48,14 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "encode")
-					(args
+					(ty-fn
 						(ty-var (raw "a"))
-						(ty-var (raw "fmt")))
-					(ty-var (raw "fmt")))
+						(ty-var (raw "fmt"))
+						(ty-var (raw "fmt"))))
 				(method (mod-of "fmt") (name "finish")
-					(args
-						(ty-var (raw "fmt")))
-					(ty (name "Str")))))))
+					(ty-fn
+						(ty-var (raw "fmt"))
+						(ty (name "Str"))))))))
 ~~~
 # FORMATTED
 ~~~roc
@@ -75,14 +75,14 @@ a.EncodableTo(fmt) :
 		(ty-rigid-var (name "a"))
 		(where
 			(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "encode")
-				(args
+				(ty-fn (effectful false)
 					(ty-rigid-var-lookup (ty-rigid-var (name "a")))
-					(ty-rigid-var-lookup (ty-rigid-var (name "fmt"))))
-				(ty-rigid-var-lookup (ty-rigid-var (name "fmt"))))
+					(ty-rigid-var-lookup (ty-rigid-var (name "fmt")))
+					(ty-rigid-var-lookup (ty-rigid-var (name "fmt")))))
 			(method (ty-rigid-var-lookup (ty-rigid-var (name "fmt"))) (name "finish")
-				(args
-					(ty-rigid-var-lookup (ty-rigid-var (name "fmt"))))
-				(ty-lookup (name "Str") (builtin))))))
+				(ty-fn (effectful false)
+					(ty-rigid-var-lookup (ty-rigid-var (name "fmt")))
+					(ty-lookup (name "Str") (builtin)))))))
 ~~~
 # TYPES
 ~~~clojure

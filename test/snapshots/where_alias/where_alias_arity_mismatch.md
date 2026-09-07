@@ -57,9 +57,9 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "encode")
-					(args
-						(ty-var (raw "fmt")))
-					(ty-var (raw "fmt")))))
+					(ty-fn
+						(ty-var (raw "fmt"))
+						(ty-var (raw "fmt"))))))
 		(s-type-anno (name "encode_once")
 			(ty-fn
 				(ty-var (raw "a"))
@@ -107,9 +107,9 @@ encode_once = |value| value.encode("")
 		(ty-rigid-var (name "a"))
 		(where
 			(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "encode")
-				(args
-					(ty-rigid-var-lookup (ty-rigid-var (name "fmt"))))
-				(ty-rigid-var-lookup (ty-rigid-var (name "fmt")))))))
+				(ty-fn (effectful false)
+					(ty-rigid-var-lookup (ty-rigid-var (name "fmt")))
+					(ty-rigid-var-lookup (ty-rigid-var (name "fmt"))))))))
 ~~~
 # TYPES
 ~~~clojure

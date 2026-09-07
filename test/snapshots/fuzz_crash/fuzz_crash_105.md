@@ -116,11 +116,10 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "a")
-					(args
-						(ty (name "X")))
-					(ty-var (raw "r")))
+					(ty-fn
+						(ty (name "X"))
+						(ty-var (raw "r"))))
 				(method (mod-of "a") (name "a")
-					(args)
 					(ty-var (raw "r")))))
 		(s-type-decl
 			(header (name "B")
@@ -128,7 +127,6 @@ EndOfFile,
 			(ty-var (raw "b"))
 			(where
 				(method (mod-of "b") (name "b")
-					(args)
 					(ty-var (raw "r")))))
 		(s-type-decl
 			(header (name "C")

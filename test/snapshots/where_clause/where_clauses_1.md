@@ -67,9 +67,9 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "hash")
-					(args
-						(ty-var (raw "hasher")))
-					(ty-var (raw "hasher")))
+					(ty-fn
+						(ty-var (raw "hasher"))
+						(ty-var (raw "hasher"))))
 				(alias (mod-of "hasher")
 					(ty (name "Hasher")))))
 		(s-type-decl
@@ -79,11 +79,11 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "decode")
-					(args
+					(ty-fn
 						(ty-apply
 							(ty (name "List"))
-							(ty (name "U8"))))
-					(ty-var (raw "a")))))))
+							(ty (name "U8")))
+						(ty-var (raw "a"))))))))
 ~~~
 # FORMATTED
 ~~~roc

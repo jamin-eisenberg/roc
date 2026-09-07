@@ -171,7 +171,7 @@ unify_scratch: unifier.Scratch,
 /// reusable scratch arrays used in occurs check
 occurs_scratch: occurs.Scratch,
 /// Type annotation nodes already seen while generating one annotation type.
-seen_annos: std.DynamicBitSetUnmanaged,
+seen_annos: collections.ScopedBitSet,
 /// A pool of solver envs
 env_pool: EnvPool,
 /// wrapper around generalization, contains some internal state used to do it's work
@@ -183,7 +183,7 @@ return_constraints: std.ArrayListUnmanaged(ReturnConstraint),
 /// Stack of active lambda-owned return constraint ranges.
 return_constraint_frames: std.ArrayListUnmanaged(ReturnConstraintFrame),
 /// A map from one var to another. Used in instantiation and var copying
-var_map: std.AutoHashMap(Var, Var),
+var_map: collections.DenseMap(Var, Var),
 /// A map from one var to another. Used in instantiation and var copying
 var_set: std.AutoHashMap(Var, void),
 /// Reusable visited set for validating the concrete content of values passed
@@ -896,7 +896,7 @@ effectful_lambda_bodies: std.AutoHashMap(CIR.Expr.Idx, void),
 pending_function_effect_dependencies: std.ArrayListUnmanaged(Var),
 function_effect_dependency_frame_starts: std.ArrayListUnmanaged(usize),
 /// Reusable sparse memo for one directed function-effect graph query.
-function_effect_resolution: std.AutoHashMap(Var, FunctionEffectResolution),
+function_effect_resolution: collections.DenseMap(Var, FunctionEffectResolution),
 /// Scratch for `beginCommitProbe`: the caller env's var-pool length per rank
 /// at probe start, restored on a failed probe's rollback. One buffer suffices
 /// because commit-probes never nest. The type store's trail-based savepoints
@@ -1021,8 +1021,8 @@ fn typeAnnoSeen(self: *const Self, anno_idx: CIR.TypeAnno.Idx) bool {
     return self.seen_annos.isSet(nodeSlot(anno_idx));
 }
 
-fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) void {
-    self.seen_annos.set(nodeSlot(anno_idx));
+fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) std.mem.Allocator.Error!void {
+    try self.seen_annos.set(self.gpa, nodeSlot(anno_idx));
 }
 
 /// A static-dispatch receiver relation copied by instantiating a constrained
@@ -2559,10 +2559,10 @@ fn initAssumePrepared(
         .import_mapping = import_mapping,
         .unify_scratch = try unifier.Scratch.init(gpa),
         .occurs_scratch = try occurs.Scratch.init(gpa),
-        .seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(gpa, node_count),
+        .seen_annos = try collections.ScopedBitSet.initEmpty(gpa, node_count),
         .env_pool = try EnvPool.init(gpa),
         .generalizer = try Generalizer.init(gpa, types),
-        .var_map = std.AutoHashMap(Var, Var).init(gpa),
+        .var_map = collections.DenseMap(Var, Var).init(gpa),
         .constraints = try Constraint.SafeList.initCapacity(gpa, 32),
         .return_constraints = .empty,
         .return_constraint_frames = .empty,
@@ -2682,7 +2682,7 @@ fn initAssumePrepared(
         .effectful_lambda_bodies = std.AutoHashMap(CIR.Expr.Idx, void).init(gpa),
         .pending_function_effect_dependencies = .empty,
         .function_effect_dependency_frame_starts = .empty,
-        .function_effect_resolution = std.AutoHashMap(Var, FunctionEffectResolution).init(gpa),
+        .function_effect_resolution = collections.DenseMap(Var, FunctionEffectResolution).init(gpa),
         .probe_var_pool_lens = .empty,
     };
 
@@ -6575,7 +6575,7 @@ fn instantiateVarWithSubs(
 fn substitutedStructuralOrigin(
     self: *Self,
     origin: StructuralSchemeRequirementOrigin,
-    var_map: *const std.AutoHashMap(Var, Var),
+    var_map: *const collections.DenseMap(Var, Var),
 ) StructuralSchemeRequirementOrigin {
     const receiver_root = self.types.resolveVar(origin.receiver_var).var_;
     const fn_root = self.types.resolveVar(origin.constraint_fn_var).var_;
@@ -13512,10 +13512,7 @@ fn collectAnnotationTypeAnnos(
             switch (self.cir.store.getWhereClause(where_idx)) {
                 .w_method => |method| {
                     try pending.append(allocator, method.var_);
-                    for (self.cir.store.sliceTypeAnnos(method.args)) |arg_idx| {
-                        try pending.append(allocator, arg_idx);
-                    }
-                    try pending.append(allocator, method.ret);
+                    try pending.append(allocator, method.anno);
                 },
                 // A where alias reference's arguments are generated in place
                 // (`generateWhereAliasReferenceArgs`), so its node tree must be
@@ -14444,13 +14441,11 @@ fn ensureTypeDeclGenerated(
     self.setTypeDeclGenerationState(decl_idx, .generating);
     errdefer self.setTypeDeclGenerationState(decl_idx, .not_generated);
 
-    const outer_seen_annos = self.seen_annos;
+    const anno_scope = self.seen_annos.enterScope();
+    defer self.seen_annos.leaveScope(anno_scope);
     const outer_type_decl_rigid_vars = self.type_decl_rigid_vars;
-    self.seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, @intCast(self.cir.store.nodes.len()));
     self.type_decl_rigid_vars = .{};
     defer {
-        self.seen_annos.deinit(self.gpa);
-        self.seen_annos = outer_seen_annos;
         self.type_decl_rigid_vars.deinit(self.gpa);
         self.type_decl_rigid_vars = outer_type_decl_rigid_vars;
     }
@@ -14943,10 +14938,11 @@ fn declareOwnedStaticDispatchConstraints(
     owner_var: Var,
     env: *Env,
 ) std.mem.Allocator.Error!void {
-    const where_region = self.cir.store.getNodeRegion(ModuleEnv.nodeIdxFrom(where_idx));
     switch (self.cir.store.getWhereClause(where_idx)) {
         .w_method => |method| {
-            const func_var = try self.fresh(env, where_region);
+            // The annotation owns the callable variable. Declare its identity
+            // before generating its type so recursive constraints can refer to it.
+            const func_var = ModuleEnv.varFrom(method.anno);
 
             try self.scratch_static_dispatch_constraints.append(ScratchStaticDispatchConstraint{
                 .where_clause = where_idx,
@@ -14985,20 +14981,7 @@ fn completeOwnedStaticDispatchConstraint(
 
     try self.generateAnnoTypeInPlace(method.var_, env, ctx);
 
-    const args_anno_slice = self.cir.store.sliceTypeAnnos(method.args);
-    for (args_anno_slice) |arg_anno_idx| {
-        try self.generateAnnoTypeInPlace(arg_anno_idx, env, ctx);
-    }
-    const anno_arg_vars: []Var = @ptrCast(args_anno_slice);
-
-    try self.generateAnnoTypeInPlace(method.ret, env, ctx);
-    const ret_var = ModuleEnv.varFrom(method.ret);
-
-    const func_content = if (method.effectful)
-        try self.types.mkFuncEffectful(anno_arg_vars, ret_var)
-    else
-        try self.types.mkFuncPure(anno_arg_vars, ret_var);
-    try self.unifyWith(entry.constraint.fn_var, func_content, env);
+    try self.generateAnnoTypeInPlace(method.anno, env, ctx);
     self.scratch_static_dispatch_constraints.items.items[constraint_index].state = .completed;
 }
 
@@ -15356,7 +15339,7 @@ fn generateAnnoTypeInPlace(self: *Self, anno_idx: CIR.TypeAnno.Idx, env: *Env, c
     defer self.recordTypeDeclAnnoResult(ctx, anno_var);
 
     // Put this anno in the "seen" map immediately, to support recursive references
-    self.markTypeAnnoSeen(anno_idx);
+    try self.markTypeAnnoSeen(anno_idx);
 
     switch (anno) {
         .rigid_var => |rigid| {
@@ -37621,12 +37604,7 @@ fn validateDerivedParseVar(
     return switch (resolved.desc.content) {
         .structure => |structure| switch (structure) {
             .nominal_type => |nominal| try self.validateDerivedParseNominal(var_, nominal, encoding_var, state_var, err_var, constraint, env, region, walk, context, failure_expr),
-            .record => blk: {
-                if (walk.visited.contains(resolved.var_)) break :blk .ok;
-                try walk.visited.put(resolved.var_, {});
-                break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .record_unbound => blk: {
+            .record, .record_unbound, .empty_record => blk: {
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
@@ -37640,29 +37618,6 @@ fn validateDerivedParseVar(
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseTuple(resolved.var_, tuple, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .empty_record => blk: {
-                switch (try self.validateRenameFieldMethod(encoding_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_start, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_after_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateSkipRecordFieldMethod(encoding_var, state_var, err_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                break :blk .ok;
             },
             .empty_tag_union => .unsupported,
             .fn_pure, .fn_effectful, .fn_unbound => .unsupported,
