@@ -395,7 +395,7 @@ const RootCompletionState = struct {
             request_root_ids[i] = root_id;
         }
 
-        const visited_templates = try allocator.alloc(u32, module.checked_procedure_templates.templates.len);
+        const visited_templates = try allocator.alloc(u32, module.checked_procedure_templates.templates.items.len);
         errdefer allocator.free(visited_templates);
         @memset(visited_templates, 0);
 

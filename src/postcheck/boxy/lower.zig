@@ -416,7 +416,7 @@ fn topLevelProcedureBindingForExpr(
     module: ProcedureModuleView,
     expr: checked.CheckedExprId,
 ) ?checked.ArtifactTopLevelProcedureBindingRef {
-    for (module.top_level_procedure_bindings.bindings, 0..) |binding, index| {
+    for (module.top_level_procedure_bindings.bindings.items, 0..) |binding, index| {
         const template_ref = switch (binding.body) {
             .direct_template => |direct| switch (direct.template) {
                 .checked => |template| template,
@@ -37803,7 +37803,7 @@ test "boxy lowerer resolves procedure-template workers to checked bodies" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(9), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var plan = Plan.ProgramPlan.init(gpa);
     defer plan.deinit();
@@ -37844,7 +37844,7 @@ test "boxy lowerer resolves top-level direct bindings to checked bodies" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(7), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var bindings = [_]checked.TopLevelProcedureBinding{
         .{
@@ -37855,7 +37855,7 @@ test "boxy lowerer resolves top-level direct bindings to checked bodies" {
             } },
         },
     };
-    checked_module.top_level_procedure_bindings = .{ .bindings = &bindings };
+    checked_module.top_level_procedure_bindings = .{ .bindings = .{ .items = &bindings, .capacity = bindings.len } };
 
     var plan = Plan.ProgramPlan.init(gpa);
     defer plan.deinit();
@@ -37899,7 +37899,7 @@ test "boxy lowerer resolves callable eval bindings to finalized const function e
             .checked_fn_root = @enumFromInt(1),
         },
     };
-    checked_module.callable_eval_templates = .{ .templates = &callable_templates };
+    checked_module.callable_eval_templates = .{ .templates = .{ .items = &callable_templates, .capacity = callable_templates.len } };
 
     const evidence_frames = [_]check.ConstStore.ConstFnEvidenceFrame{
         check.ConstStore.ConstFnEvidenceFrame.init(.root, null, 0, 0),
@@ -37968,7 +37968,7 @@ test "boxy lowerer resolves callable eval bindings to finalized const function e
             .target = .comptime_only,
         },
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var bindings = [_]checked.TopLevelProcedureBinding{
         .{
@@ -37976,7 +37976,7 @@ test "boxy lowerer resolves callable eval bindings to finalized const function e
             .body = .{ .callable_eval_template = @enumFromInt(fixtureTableIndex(0)) },
         },
     };
-    checked_module.top_level_procedure_bindings = .{ .bindings = &bindings };
+    checked_module.top_level_procedure_bindings = .{ .bindings = .{ .items = &bindings, .capacity = bindings.len } };
 
     var plan = Plan.ProgramPlan.init(gpa);
     defer plan.deinit();
@@ -38039,7 +38039,7 @@ test "boxy lowerer emits private worker proc for zero-arg numeric lambda root" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -38170,7 +38170,7 @@ fn expectBoxyTopLevelConstLookup(kind: ConstLookupExprKind) (Allocator.Error || 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var resolved_records = [_]checked.ResolvedValueRefRecord{
         .{
@@ -38272,7 +38272,7 @@ test "boxy lowerer emits small decimal expressions as Dec literals" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -38409,7 +38409,7 @@ test "boxy lowerer emits direct calls to planned private workers" {
         checkedTemplate(root_template, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
         checkedTemplate(callee_template, @enumFromInt(1), @enumFromInt(1)),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var bindings = [_]checked.TopLevelProcedureBinding{
         .{
@@ -38420,7 +38420,7 @@ test "boxy lowerer emits direct calls to planned private workers" {
             } },
         },
     };
-    checked_module.top_level_procedure_bindings = .{ .bindings = &bindings };
+    checked_module.top_level_procedure_bindings = .{ .bindings = .{ .items = &bindings, .capacity = bindings.len } };
 
     var resolved_records = [_]checked.ResolvedValueRefRecord{
         .{
@@ -38588,7 +38588,7 @@ test "boxy lowerer emits direct calls to planned imported workers" {
         checkedTemplate(import_template, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
         checkedTemplate(import_helper_template, @enumFromInt(1), @enumFromInt(1)),
     };
-    import_checked_module.checked_procedure_templates = .{ .templates = &import_templates };
+    import_checked_module.checked_procedure_templates = .{ .templates = .{ .items = &import_templates, .capacity = import_templates.len } };
     var import_bindings = [_]checked.TopLevelProcedureBinding{
         .{
             .source_scheme = typeSchemeKey(3),
@@ -38598,7 +38598,7 @@ test "boxy lowerer emits direct calls to planned imported workers" {
             } },
         },
     };
-    import_checked_module.top_level_procedure_bindings = .{ .bindings = &import_bindings };
+    import_checked_module.top_level_procedure_bindings = .{ .bindings = .{ .items = &import_bindings, .capacity = import_bindings.len } };
     const import_helper_use = checked.ProcedureUseTemplate{
         .binding = .{ .top_level = .{ .artifact = import_checked_module.key, .binding = @enumFromInt(fixtureTableIndex(0)) } },
         .source_fn_ty_template = canonicalTypeKey(3),
@@ -38689,7 +38689,7 @@ test "boxy lowerer emits direct calls to planned imported workers" {
     var root_templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(root_template, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    root_checked_module.checked_procedure_templates = .{ .templates = &root_templates };
+    root_checked_module.checked_procedure_templates = .{ .templates = .{ .items = &root_templates, .capacity = root_templates.len } };
 
     const imported_use = checked.ProcedureUseTemplate{
         .binding = .{ .imported = imported_binding },
@@ -38859,7 +38859,7 @@ test "boxy lowerer emits recursive direct calls to the current private worker" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     var bindings = [_]checked.TopLevelProcedureBinding{
         .{
@@ -38870,7 +38870,7 @@ test "boxy lowerer emits recursive direct calls to the current private worker" {
             } },
         },
     };
-    checked_module.top_level_procedure_bindings = .{ .bindings = &bindings };
+    checked_module.top_level_procedure_bindings = .{ .bindings = .{ .items = &bindings, .capacity = bindings.len } };
 
     var resolved_records = [_]checked.ResolvedValueRefRecord{
         .{
@@ -38987,7 +38987,7 @@ test "boxy lowerer emits checked crash as terminal LIR crash" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39063,7 +39063,7 @@ test "boxy lowerer emits checked ellipsis as identity not-implemented crash" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39149,7 +39149,7 @@ test "boxy lowerer emits checked return expressions as terminal ret" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39252,7 +39252,7 @@ test "boxy lowerer emits checked return statements as terminal ret" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39330,7 +39330,7 @@ test "boxy lowerer emits checked runtime error expressions as terminal runtime_e
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39417,7 +39417,7 @@ test "boxy lowerer emits checked runtime error statements as terminal runtime_er
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39528,7 +39528,7 @@ test "boxy lowerer emits checked while statements as join-backed loops" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39660,7 +39660,7 @@ test "boxy lowerer emits checked break as the active loop exit" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39783,7 +39783,7 @@ test "boxy lowerer emits checked if expressions with a shared continuation join"
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -39939,7 +39939,7 @@ test "boxy lowerer emits checked tag matches as ordered discriminant tests" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40126,7 +40126,7 @@ test "boxy lowerer binds checked tag payload match patterns before branch bodies
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40316,7 +40316,7 @@ test "boxy lowerer emits checked list match patterns as length checks and elemen
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40497,7 +40497,7 @@ test "boxy lowerer emits checked string interpolation match patterns" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40683,7 +40683,7 @@ test "boxy lowerer maps checked alternative binders onto representative match lo
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40829,7 +40829,7 @@ test "boxy lowerer emits checked numeric literal match patterns as equality test
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -40975,7 +40975,7 @@ test "boxy lowerer emits checked small decimal match patterns as Dec equality te
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41131,7 +41131,7 @@ test "boxy lowerer emits checked string literal match patterns as string equalit
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41222,7 +41222,7 @@ test "boxy lowerer emits checked unary not as bool low-level call" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41327,7 +41327,7 @@ test "boxy lowerer emits short-circuit checked boolean and" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41432,7 +41432,7 @@ test "boxy lowerer emits primitive structural equality as low-level equality" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41576,7 +41576,7 @@ test "boxy lowerer emits tuple structural equality with field short-circuiting" 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41690,7 +41690,7 @@ test "boxy lowerer emits primitive structural hash as hasher low-level" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41816,7 +41816,7 @@ test "boxy lowerer emits tuple structural hash by threading hasher through field
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41912,7 +41912,7 @@ test "boxy lowerer emits checked string segment literals" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -41995,7 +41995,7 @@ test "boxy lowerer emits checked bytes literals as byte-backed LIR literals" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42101,7 +42101,7 @@ test "boxy lowerer emits checked string interpolation segments as concat chain" 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42210,7 +42210,7 @@ test "boxy lowerer emits checked dbg expressions before unit result" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42307,7 +42307,7 @@ test "boxy lowerer emits checked expect expressions before unit result" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42396,7 +42396,7 @@ test "boxy lowerer emits expect_err messages from inspected payloads" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42535,7 +42535,7 @@ test "boxy lowerer emits checked dbg statements in block order" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42657,7 +42657,7 @@ test "boxy lowerer emits block declaration bindings with checked type layouts" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42769,7 +42769,7 @@ test "boxy lowerer emits uninitialized mutable block bindings" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -42905,7 +42905,7 @@ test "boxy lowerer emits mutable reassignment as set_local replace" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43089,7 +43089,7 @@ test "boxy lowerer destructures tuple declaration patterns" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43292,7 +43292,7 @@ test "boxy lowerer materializes record rest declaration patterns" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(4), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43456,7 +43456,7 @@ test "boxy lowerer binds irrefutable list rest declaration patterns" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43570,7 +43570,7 @@ test "boxy lowerer emits tuple construction in element order" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43688,7 +43688,7 @@ test "boxy lowerer emits tuple access as field_read" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43802,7 +43802,7 @@ test "boxy lowerer emits record construction in layout order after source-order 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -43927,7 +43927,7 @@ test "boxy lowerer evaluates empty record extensions before explicit fields" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44069,7 +44069,7 @@ test "boxy lowerer emits record field access using layout field index" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44188,7 +44188,7 @@ test "boxy lowerer emits nominal construction for representation-equivalent back
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44443,7 +44443,7 @@ test "boxy lowerer emits nominal boundary before backing record pattern binding"
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(5), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44626,7 +44626,7 @@ test "boxy lowerer inspects declared-field nominals through backing field_read" 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(5), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44833,7 +44833,7 @@ test "boxy lowerer hashes declared-field nominals through backing field_read" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(6), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -44948,7 +44948,7 @@ test "boxy lowerer emits builtin Bool tags by checked Bool names" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45054,7 +45054,7 @@ test "boxy lowerer emits payload tag construction using planned variant payload 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45163,7 +45163,7 @@ test "boxy lowerer emits list construction with committed element layout" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45300,7 +45300,7 @@ test "boxy lowerer stores dynamic list elements with boxy storage layout" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45444,7 +45444,7 @@ test "boxy lowerer inspects concrete lists with an index and string accumulator 
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45562,7 +45562,7 @@ test "boxy lowerer emits empty list construction" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45655,7 +45655,7 @@ test "boxy lowerer emits checked low-level calls after source-order argument low
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45760,7 +45760,7 @@ test "boxy lowerer boxes concrete values with ordinary box low-level" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -45870,7 +45870,7 @@ test "boxy lowerer reuses dynamic boxes for Box(a)" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -46012,7 +46012,7 @@ test "boxy lowerer unboxes concrete values with ordinary box low-level" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(2), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -46121,7 +46121,7 @@ test "boxy lowerer inspects concrete Box payloads" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(3), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -46309,7 +46309,7 @@ test "boxy lowerer emits checked integer division low-level calls" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
@@ -46402,7 +46402,7 @@ test "boxy lowerer publishes host wrapper proc for exported roots" {
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(1), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 11,
@@ -46896,7 +46896,7 @@ fn lowerListMapCanReuseFixture(
     var templates = [_]checked.CheckedProcedureTemplate{
         checkedTemplate(template_ref, @enumFromInt(4), @enumFromInt(fixtureTableIndex(0))),
     };
-    checked_module.checked_procedure_templates = .{ .templates = &templates };
+    checked_module.checked_procedure_templates = .{ .templates = .{ .items = &templates, .capacity = templates.len } };
 
     const root = checked.RootRequest{
         .order = 0,
