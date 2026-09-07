@@ -49,7 +49,9 @@ pub const MAGIC: u32 = 0x52494c52; // "RLIR" in little-endian bytes.
 /// v27: `expect` statements optionally carry a test observation site.
 /// v28: Boxy names have a separate dense identity domain and byte/range columns.
 /// v29: procedures and calls carry producer-authored self-tail proofs.
-pub const FORMAT_VERSION: u32 = 29;
+/// v30: SIMD byte alignment carries a proven constant count, alongside v29's
+///      self-tail proofs.
+pub const FORMAT_VERSION: u32 = 30;
 
 /// Public `ImageError` declaration.
 pub const ImageError = error{
