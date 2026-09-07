@@ -919,6 +919,10 @@ const Transform = struct {
     /// params while fresh locals take their place as proc args.
     old_args: []LocalId,
     join_id: JoinPointId,
+    /// Parameter membership and scheduling storage are reused at every site.
+    move_targets: collections.DenseMap(LocalId, usize),
+    moves: std.ArrayList(LoopMove) = .empty,
+    ready_moves: std.ArrayList(usize) = .empty,
     hole: LocalId = undefined,
     head: LocalId = undefined,
 
@@ -931,6 +935,7 @@ const Transform = struct {
             .detection = detection,
             .new_locals = .empty,
             .old_args = &.{},
+            .move_targets = .init(gpa),
             .join_id = if (store.getProcSpec(proc_id).tail_calls) |sites|
                 sites.loop
             else
@@ -941,6 +946,9 @@ const Transform = struct {
     fn deinit(self: *Transform) void {
         self.new_locals.deinit(self.gpa);
         self.gpa.free(self.old_args);
+        self.move_targets.deinit();
+        self.moves.deinit(self.gpa);
+        self.ready_moves.deinit(self.gpa);
     }
 
     fn addLocal(self: *Transform, layout_idx: layout_mod.Idx) ResourceError!LocalId {
@@ -958,6 +966,7 @@ const Transform = struct {
         self.hole = try self.addLocal(ptr_ret);
         self.head = try self.addLocal(ptr_ret);
         const initial = try self.addLocal(ptr_ret);
+        try self.initLoopMoves(self.hole);
 
         // Rewrite every original ret into the hole-fill epilogue. Confirmed
         // site terminals (which may be rets in hand-built shapes) are excluded:
@@ -981,6 +990,7 @@ const Transform = struct {
     fn applyTce(self: *Transform) ResourceError!void {
         const proc = self.store.getProcSpec(self.proc_id);
         self.old_args = try GuardedList.dupe(self.gpa, LocalId, self.store.getLocalSpan(proc.args));
+        try self.initLoopMoves(null);
 
         try self.rewriteTailSites();
         try self.installTceLoop();
@@ -1063,7 +1073,7 @@ const Transform = struct {
         // 5. The terminal becomes: fill the current hole with the node value,
         //    thread the args + new hole, and loop.
         const st = try self.addLocal(.zst);
-        const loop_back = try self.buildLoopBack(candidate.call_args, &.{.{ .target = self.hole, .value = next_hole }});
+        const loop_back = try self.buildLoopBack(candidate.call_args, .{ .target = self.hole, .value = next_hole });
         const store_args = try self.store.addLocalSpan(&.{ self.hole, candidate.head_local });
         self.store.getCFStmtPtr(candidate.terminal_stmt).* = .{ .assign_low_level = .{
             .target = st,
@@ -1079,7 +1089,7 @@ const Transform = struct {
         while (site) |id| {
             const call = self.store.getCFStmt(id).assign_call;
             site = call.tail_call.?.next;
-            const loop_back = try self.buildLoopBack(call.args, &.{});
+            const loop_back = try self.buildLoopBack(call.args, null);
             // Every incoming reference reaches the same replacement. The
             // shared return continuation remains available to other paths.
             self.store.getCFStmtPtr(id).* = self.store.getCFStmt(loop_back);
@@ -1088,65 +1098,111 @@ const Transform = struct {
 
     const ExtraParamWrite = struct { target: LocalId, value: LocalId };
 
-    /// Build `set_local param := arg` writes for each recursive-call arg (plus
-    /// extras), ending in `jump J`. Returns the chain head. Args that are
-    /// themselves param locals are copied through fresh temps first, since the
-    /// sequential writes would otherwise clobber a param another arg reads.
-    fn buildLoopBack(self: *Transform, call_args: LIR.LocalSpan, extras: []const ExtraParamWrite) ResourceError!CFStmtId {
-        const arg_view = self.store.getLocalSpan(call_args);
-        const args = try GuardedList.dupe(self.gpa, LocalId, arg_view);
-        defer self.gpa.free(args);
-        std.debug.assert(args.len == self.old_args.len);
+    const LoopMove = struct {
+        target: LocalId,
+        source: LocalId = undefined,
+        source_index: ?usize = null,
+        readers: usize = 0,
+        pending: bool = false,
+    };
 
-        var copy_head: ?CFStmtId = null;
-        var copy_tail: ?CFStmtId = null;
-        for (args, 0..) |*arg, idx| {
-            if (arg.* == self.old_args[idx]) continue; // self-assign, skipped below
-            const is_param = std.mem.findScalar(LocalId, self.old_args, arg.*) != null;
-            if (!is_param) continue;
-            const tmp = try self.addLocal(self.store.getLocal(arg.*).layout_idx);
-            const copy = try self.store.addCFStmt(.{ .assign_ref = .{
-                .target = tmp,
-                .op = .{ .local = arg.* },
+    fn initLoopMoves(self: *Transform, extra: ?LocalId) ResourceError!void {
+        for (self.old_args) |param| try self.addLoopMoveTarget(param);
+        // The generated hole can be far from the original argument IDs. Keep
+        // its single index explicit instead of spanning that gap in the ID map.
+        if (extra) |param| try self.moves.append(self.gpa, .{ .target = param });
+    }
+
+    fn addLoopMoveTarget(self: *Transform, param: LocalId) ResourceError!void {
+        try self.move_targets.putNoClobber(param, self.moves.items.len);
+        try self.moves.append(self.gpa, .{ .target = param });
+    }
+
+    /// Schedule simultaneous parameter writes in linear time. A destination
+    /// can be overwritten once no pending move reads it. After those moves
+    /// drain, the remaining components are disjoint cycles, each requiring
+    /// just one temporary. Identity writes are omitted, including the hole
+    /// preserved by an ordinary tail site inside a TRMC procedure.
+    fn buildLoopBack(self: *Transform, call_args: LIR.LocalSpan, extra: ?ExtraParamWrite) ResourceError!CFStmtId {
+        const args = self.store.getLocalSpan(call_args);
+        std.debug.assert(args.len == self.old_args.len);
+        const moves = self.moves.items;
+        for (moves) |*move| {
+            move.source = move.target;
+            move.source_index = null;
+            move.readers = 0;
+            move.pending = false;
+        }
+        for (moves[0..args.len], 0..) |*move, index| move.source = GuardedList.at(args, index);
+        if (extra) |write| {
+            const move = &moves[args.len];
+            std.debug.assert(move.target == write.target);
+            move.source = write.value;
+        }
+        for (moves) |*move| {
+            if (move.source == move.target) continue;
+            move.pending = true;
+            move.source_index = if (moves.len > args.len and move.source == moves[args.len].target)
+                args.len
+            else
+                self.move_targets.get(move.source);
+            if (move.source_index) |index| moves[index].readers += 1;
+        }
+        self.ready_moves.clearRetainingCapacity();
+        for (moves, 0..) |move, index| {
+            if (move.pending and move.readers == 0) try self.ready_moves.append(self.gpa, index);
+        }
+
+        var first: ?CFStmtId = null;
+        var last: ?CFStmtId = null;
+        while (self.ready_moves.pop()) |index| {
+            const move = &moves[index];
+            try self.appendLoopBackStmt(&first, &last, .{ .set_local = .{
+                .target = move.target,
+                .value = move.source,
+                .mode = .initialize_join_param,
                 .next = undefined,
             } });
-            if (copy_tail) |tail| {
-                self.setNext(tail, copy);
-            } else {
-                copy_head = copy;
+            move.pending = false;
+            if (move.source_index) |source_index| {
+                const source = &moves[source_index];
+                source.readers -= 1;
+                if (source.pending and source.readers == 0) try self.ready_moves.append(self.gpa, source_index);
             }
-            copy_tail = copy;
-            arg.* = tmp;
         }
 
-        var current = try self.store.addCFStmt(.{ .jump = .{ .target = self.join_id } });
-        var i = extras.len;
-        while (i > 0) {
-            i -= 1;
-            current = try self.store.addCFStmt(.{ .set_local = .{
-                .target = extras[i].target,
-                .value = extras[i].value,
-                .mode = .initialize_join_param,
-                .next = current,
+        for (moves, 0..) |move, start| {
+            if (!move.pending) continue;
+            const tmp = try self.addLocal(self.store.getLocal(move.target).layout_idx);
+            try self.appendLoopBackStmt(&first, &last, .{ .assign_ref = .{
+                .target = tmp,
+                .op = .{ .local = move.target },
+                .next = undefined,
             } });
+            var index = start;
+            while (true) {
+                const cycle_move = &moves[index];
+                std.debug.assert(cycle_move.pending and cycle_move.readers == 1);
+                const source_index = cycle_move.source_index.?;
+                try self.appendLoopBackStmt(&first, &last, .{ .set_local = .{
+                    .target = cycle_move.target,
+                    .value = if (source_index == start) tmp else cycle_move.source,
+                    .mode = .initialize_join_param,
+                    .next = undefined,
+                } });
+                cycle_move.pending = false;
+                if (source_index == start) break;
+                index = source_index;
+            }
         }
-        var j = args.len;
-        while (j > 0) {
-            j -= 1;
-            if (args[j] == self.old_args[j]) continue; // value already in the param
-            current = try self.store.addCFStmt(.{ .set_local = .{
-                .target = self.old_args[j],
-                .value = args[j],
-                .mode = .initialize_join_param,
-                .next = current,
-            } });
-        }
+        try self.appendLoopBackStmt(&first, &last, .{ .jump = .{ .target = self.join_id } });
+        return first.?;
+    }
 
-        if (copy_tail) |tail| {
-            self.setNext(tail, current);
-            return copy_head.?;
-        }
-        return current;
+    fn appendLoopBackStmt(self: *Transform, first: *?CFStmtId, last: *?CFStmtId, stmt: LIR.CFStmt) ResourceError!void {
+        const id = try self.store.addCFStmt(stmt);
+        if (last.*) |previous| self.setNext(previous, id) else first.* = id;
+        last.* = id;
     }
 
     /// Wrap the (rewritten) body in the loop join and re-point the proc at

@@ -1111,8 +1111,8 @@ test "golden: repeat IR before and after the trmc transform" {
         \\              l8:struct_#27 = struct(l7)
         \\              l9:tag_union#25 = tag v1 d1 (l8)
         \\              l16:zst = low_level ptr_store(l10, l9)
-        \\              set l0 := l5 (initialize_join_param)
         \\              set l10 := l15 (initialize_join_param)
+        \\              set l0 := l5 (initialize_join_param)
         \\              jump j1
         \\        body:
         \\          l14:zst = low_level ptr_store(l10, l1)
@@ -1449,5 +1449,105 @@ test "tail-call proof consumes the explicit boxy adapter operation" {
         store.getProcSpecPtr(proc).body = call;
         const sites = try builder.finish(&store);
         try std.testing.expectEqual(operation == .relabel, sites != null);
+    }
+}
+
+test "tce parallel transfers preserve every small source graph" {
+    const allocator = std.testing.allocator;
+    // Each of three destinations can read any old parameter or a fresh value.
+    // Exhausting this space covers identity writes, chains, cycles, and fanout.
+    for (0..64) |encoding| {
+        var store = LirStore.init(allocator);
+        defer store.deinit();
+        var layouts = try layout.Store.init(allocator, base.target.TargetUsize.native);
+        defer layouts.deinit();
+        var runtime_env = RuntimeHostEnv.init(allocator);
+        defer runtime_env.deinit();
+        var b = ProcBuilder.init(&store);
+        defer b.deinit(allocator);
+        var args: [4]LocalId = undefined;
+        for (&args) |*arg| arg.* = try b.addLocal(allocator, .u64);
+        const proc = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .args = try store.addLocalSpan(&args),
+            .ret_layout = .u64,
+        });
+        var builder = lir.TailCallBuilder.init(allocator, proc);
+        defer builder.deinit();
+        store.tail_call_builder = &builder;
+        defer store.tail_call_builder = null;
+        const result = try b.addLocal(allocator, .u64);
+        const one = try b.addLocal(allocator, .u64);
+        const fresh = try b.addLocal(allocator, .u64);
+        const remaining = try b.addLocal(allocator, .u64);
+        const radix = try b.addLocal(allocator, .u64);
+        const scaled = try b.addLocal(allocator, .u64);
+        const sum = try b.addLocal(allocator, .u64);
+        const scaled_again = try b.addLocal(allocator, .u64);
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+        var base_case = try lowLevelStmt(&store, result, .num_int_add_wrap, &.{ args[0], scaled_again }, ret);
+        base_case = try lowLevelStmt(&store, scaled_again, .num_int_mul_wrap, &.{ sum, radix }, base_case);
+        base_case = try lowLevelStmt(&store, sum, .num_int_add_wrap, &.{ args[1], scaled }, base_case);
+        base_case = try lowLevelStmt(&store, scaled, .num_int_mul_wrap, &.{ args[2], radix }, base_case);
+        base_case = try store.addCFStmt(.{ .assign_literal = .{
+            .target = radix,
+            .value = .{ .i64_literal = .{ .value = 64, .layout_idx = .u64 } },
+            .next = base_case,
+        } });
+        var sources: [3]usize = undefined;
+        var call_args: [4]LocalId = undefined;
+        var code = encoding;
+        for (&sources, call_args[0..3]) |*source, *arg| {
+            source.* = code % 4;
+            code /= 4;
+            arg.* = if (source.* == 3) fresh else args[source.*];
+        }
+        call_args[3] = remaining;
+        const call = try store.addCFStmt(.{ .assign_call = .{
+            .target = result,
+            .proc = proc,
+            .args = try store.addLocalSpan(&call_args),
+            .next = ret,
+        } });
+        var recur = try lowLevelStmt(&store, remaining, .num_int_sub_wrap, &.{ args[3], one }, call);
+        recur = try store.addCFStmt(.{ .assign_literal = .{
+            .target = fresh,
+            .value = .{ .i64_literal = .{ .value = 31, .layout_idx = .u64 } },
+            .next = recur,
+        } });
+        recur = try store.addCFStmt(.{ .assign_literal = .{
+            .target = one,
+            .value = .{ .i64_literal = .{ .value = 1, .layout_idx = .u64 } },
+            .next = recur,
+        } });
+        const body = try store.addCFStmt(.{ .switch_stmt = .{
+            .cond = args[3],
+            .branches = try store.addCFSwitchBranches(&.{.{ .value = 0, .body = base_case }}),
+            .default_branch = recur,
+        } });
+        store.getProcSpecPtr(proc).body = body;
+        store.getProcSpecPtr(proc).frame_locals = try store.addLocalSpan(b.locals.items);
+        const sites = try builder.finish(&store);
+        store.getProcSpecPtr(proc).tail_calls = sites;
+        store.tail_call_builder = null;
+        const locals_before = store.localCount();
+        try lir.Trmc.run(&store, &layouts);
+        const has_cycle = (sources[0] == 1 and sources[1] == 0) or
+            (sources[0] == 2 and sources[2] == 0) or
+            (sources[1] == 2 and sources[2] == 1) or
+            (sources[0] == 1 and sources[1] == 2 and sources[2] == 0) or
+            (sources[0] == 2 and sources[2] == 1 and sources[1] == 0);
+        try std.testing.expectEqual(@as(usize, @intFromBool(has_cycle)), store.localCount() - locals_before);
+        try lir.Arc.insert(&store, &layouts, .{});
+        for ([_]u64{ 1, 2, 7 }) |iterations| {
+            var expected = [_]u64{ 11, 17, 23, 31 };
+            for (0..iterations) |_| {
+                const previous = expected;
+                for (sources, 0..) |source, index| expected[index] = previous[source];
+            }
+            const actual = try runProcU64Args(allocator, &store, &layouts, proc, &runtime_env, &.{ 11, 17, 23, iterations });
+            try std.testing.expectEqual(expected[0] + 64 * expected[1] + 4096 * expected[2], actual);
+        }
+        try runtime_env.checkForLeaks();
     }
 }

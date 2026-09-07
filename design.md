@@ -3846,7 +3846,11 @@ it replaces each call node with simultaneous argument transfer followed by a
 loop jump. It never splices a predecessor, overwrites a shared return terminal,
 duplicates a continuation, or consults TRMC's constructor candidate limits.
 All actual arguments, including hidden captures and dictionaries, participate
-in the transfer. ARC runs afterward and owns every resulting RC operation.
+in the transfer. The transfer scheduler indexes destinations once per procedure
+and reuses its storage at each site. It emits writes only after their destinations
+have no remaining readers, then breaks each remaining cycle with one temporary.
+Identity writes are omitted. ARC runs afterward and owns every resulting RC
+operation.
 
 Constructor rewriting retains its separate value-use and shared-path proof.
 Mixed procedures use one loop for both kinds of recursive site; ordinary tails

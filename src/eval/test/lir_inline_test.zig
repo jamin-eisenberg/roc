@@ -10087,3 +10087,61 @@ test "tail-call lowering preserves owning argument permutations" {
         try runtime_env.checkForLeaks();
     }
 }
+
+test "tail-call transfers preserve owning cycles and duplicated sources" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, expected: u64 }{
+        .{
+            .source =
+            \\walk : List(U64), List(U64), List(U64), U64 -> { a: List(U64), b: List(U64), c: List(U64) }
+            \\walk = |a, b, c, n| {
+            \\    if n == 0 { { a, b, c } }
+            \\    else if n % 2 == 0 { walk(b, c, a, n - 1) }
+            \\    else { walk(b, List.append(a, 0), b, n - 1) }
+            \\}
+            \\main : U64 -> U64
+            \\main = |count| {
+            \\    result = walk(List.repeat(1, count), List.repeat(2, count + 1), List.repeat(3, count + 2), 2001)
+            \\    List.len(result.a) + 10 * List.len(result.b) + 100 * List.len(result.c)
+            \\}
+            ,
+            .expected = 10666,
+        },
+        .{
+            .source =
+            \\walk : List(U64), List(U64), List(U64), List(U64), U64 -> { a: List(U64), b: List(U64), c: List(U64), d: List(U64) }
+            \\walk = |a, b, c, d, n| {
+            \\    if n == 0 { { a, b, c, d } }
+            \\    else { walk(b, a, d, c, n - 1) }
+            \\}
+            \\main : U64 -> U64
+            \\main = |count| {
+            \\    result = walk(List.repeat(1, count), List.repeat(2, count + 1), List.repeat(3, count + 2), List.repeat(4, count + 3), 2001)
+            \\    List.len(result.a) + 10 * List.len(result.b) + 100 * List.len(result.c) + 1000 * List.len(result.d)
+            \\}
+            ,
+            .expected = 7856,
+        },
+    };
+    for (cases) |case| {
+        for ([_]lir.CheckedPipeline.InlineMode{ .none, .wrappers }) |inline_mode| {
+            var lowered = try lowerModule(allocator, case.source, inline_mode);
+            defer lowered.deinit(allocator);
+            var runtime_env = eval.RuntimeHostEnv.init(allocator);
+            defer runtime_env.deinit();
+            {
+                const result = &lowered.lowered.lir_result;
+                var interpreter = try eval.Interpreter.init(allocator, &result.store, &result.layouts, runtime_env.get_ops(), .preserve);
+                defer interpreter.deinit();
+                var count: u64 = 5;
+                const evaluated = try interpreter.eval(.{
+                    .proc_id = try rootProc(&lowered.lowered),
+                    .arg_layouts = &.{.u64},
+                    .arg_ptr = @ptrCast(&count),
+                });
+                try std.testing.expectEqual(case.expected, evaluated.value.read(u64));
+            }
+            try runtime_env.checkForLeaks();
+        }
+    }
+}
