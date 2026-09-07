@@ -7554,6 +7554,8 @@ test "iterdiff: coarse custom is_eq set dedup keeps same representative across i
         \\Bucket := { key : I64, tag : I64 }.{
         \\    is_eq : Bucket, Bucket -> Bool
         \\    is_eq = |a, b| a.key == b.key
+        \\    to_hash : Bucket, Hasher -> Hasher
+        \\    to_hash = |value, hasher| value.key.to_hash(hasher)
         \\}
         \\
         \\main : I64

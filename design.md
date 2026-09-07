@@ -831,6 +831,28 @@ data, ARC data, LirImage data, and test reporting. If code uses a sentinel
 as a placeholder for data that must be produced, stop and redesign the producer
 ownership and presence model.
 
+## Set Storage
+
+`Set(item)` wraps `Dict(item, {})`. The empty-record value carries no runtime
+payload; Set shares Dict's dense entries, hash buckets, load-factor capacity,
+seed-domain metadata, collision handling, and rehashing implementation.
+Set operations remain ordinary Roc functions, with no backend-specific Set
+representation or ownership policy.
+
+Membership and insertion require `item.is_eq` and `item.to_hash`. Equal items
+must hash equally, including when a nominal type defines a custom equality
+method. Insertion performs one dictionary lookup and retains an existing equal
+item, including its representative and position. New items append; removal may
+move the last item into the removed slot, as with Dict. Set equality and hashing
+are independent of iteration order.
+
+Iteration maps the dictionary's entry iterator to its keys without materializing
+a key list. Folds traverse the entries directly. `from_iter` consumes the
+iterator's explicit length hint for initial capacity and inserts each yielded
+item, ignoring `Skip` steps. `reserve` takes an additional item count;
+`capacity` reports the hash table's growth threshold. `clear` preserves that
+capacity, while `release_excess_capacity` rebuilds for the live item count.
+
 ## Source Parsing Boundary
 
 Parsing is a token-first stage. Tokenization produces the only cursor input for

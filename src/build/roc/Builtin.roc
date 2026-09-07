@@ -6226,47 +6226,28 @@ Builtin :: [].{
 		}
 	}
 
-	Set(item) :: [Items(List(item))].{
+	Set(item) :: [Items(Dict(item, {}))].{
 		parser_for : _
 		encoder_for : _
 
 		## Returns `Bool.True` if the two sets contain the same values, and `Bool.False` otherwise.
 		is_eq : Set(a), Set(a) -> Bool
-			where [a.is_eq : a, a -> Bool]
-		is_eq = |set_a, set_b| {
-			list_a = Set.to_list(set_a)
-			list_b = Set.to_list(set_b)
-
-			if List.len(list_a) != List.len(list_b) {
-				False
-			} else {
-				state = List.fold(
-					list_a,
-					{ all_found: Bool.True, check: list_b },
-					|st, item|
-						if List.contains(st.check, item) {
-							st
-						} else {
-							{ all_found: Bool.False, check: st.check }
-						},
-				)
-				state.all_found
-			}
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		is_eq = |Items(a), Items(b)| Dict.is_eq(a, b)
 
 		## Feed a [Set] into a [Hasher]. The hash is independent of insertion order.
 		to_hash : Set(a), Hasher -> Hasher
 			where [a.to_hash : a, Hasher -> Hasher]
 		to_hash = |set, hasher| match set {
-			Items(items) => {
+			Items(dict) => {
 				var $item_hashes = 0
 
-				for item in items {
+				for (item, _) in Dict.iter(dict) {
 					item_hash = hasher_finish(item.to_hash(hasher))
 					$item_hashes = combine_unordered_hashes($item_hashes, item_hash)
 				}
 
-				Hasher.write_u64(Hasher.write_u64(hasher, List.len(items)), $item_hashes)
+				Hasher.write_u64(Hasher.write_u64(hasher, Dict.len(dict)), $item_hashes)
 			}
 		}
 
@@ -6280,61 +6261,51 @@ Builtin :: [].{
 
 		## Creates a new empty `Set`.
 		empty : () -> Set(_item)
-		empty = || Items([])
+		empty = || Items(Dict.empty())
 
 		## Creates a new `Set` with a single value.
 		## ```roc
 		## Set.single(42.I64)
 		## ```
 		single : item -> Set(item)
-		single = |item| Items([item])
+			where [item.is_eq : item, item -> Bool, item.to_hash : item, Hasher -> Hasher]
+		single = |item| Items(Dict.single(item, {}))
 
 		## Counts the number of values in a given `Set`.
 		## ```roc
 		## expect Set.single(42).len() == 1
 		## ```
 		len : Set(_item) -> U64
-		len = |set| match set {
-			Items(list) => List.len(list)
-		}
+		len = |Items(dict)| Dict.len(dict)
 
 		## Check if the set is empty.
 		is_empty : Set(_item) -> Bool
-		is_empty = |set| match set {
-			Items(list) => List.is_empty(list)
-		}
+		is_empty = |Items(dict)| Dict.is_empty(dict)
 
 		## Test if a value is in the `Set`.
 		contains : Set(a), a -> Bool
-			where [a.is_eq : a, a -> Bool]
-		contains = |set, item| match set {
-			Items(list) => List.contains(list, item)
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		contains = |Items(dict), item| Dict.contains(dict, item)
 
-		## Insert a value into a `Set`.
+		## Insert a value into a `Set`. An equal value already present is retained.
 		insert : Set(a), a -> Set(a)
-			where [a.is_eq : a, a -> Bool]
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
 		insert = |set, item| match set {
-			Items(list) => Items(
-				List.append(
-					List.keep_if(list, |x| x != item),
-					item,
-				),
-			)
+			Items(HashMap(data)) => match dict_find(data, item) {
+				Found(_) => set
+				Missing(missing) => Items(HashMap(dict_insert_absent_data(data, missing, item, {})))
+			}
 		}
 
-		## Removes the value from the given `Set`.
+		## Removes the value from the given `Set`. May reorder the remaining values
+		## by moving the last value into the removed value's position.
 		remove : Set(a), a -> Set(a)
-			where [a.is_eq : a, a -> Bool]
-		remove = |set, item| match set {
-			Items(list) => Items(List.keep_if(list, |x| x != item))
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		remove = |Items(dict), item| Items(Dict.remove(dict, item))
 
 		## Retrieve the values in a `Set` as a `List`.
 		to_list : Set(a) -> List(a)
-		to_list = |set| match set {
-			Items(list) => list
-		}
+		to_list = |Items(dict)| Dict.keys(dict)
 
 		## Build a value by folding through each value in the set. Starting with
 		## a given `state` value, this runs the given `step` function on each
@@ -6346,51 +6317,22 @@ Builtin :: [].{
 		## expect Set.empty().fold(0, |sum, item| sum + item) == 0.U64
 		## ```
 		fold : Set(a), state, (state, a -> state) -> state
-		fold = |set, init, step| match set {
-			Items(list) => List.fold(list, init, step)
-		}
+		fold = |Items(dict), init, step| Dict.fold(dict, init, |state, item, _| step(state, item))
 
-		## Iterate over the set's values in their current backing order.
-		## [Set.from_list] keeps the first insertion order, but inserting a value
-		## that is already present removes and re-appends it, which changes that
-		## value's position.
-		## ```roc
-		## expect Iter.fold(Set.from_list([1, 2, 3.U64]).iter(), [], |acc, item| acc.append(item)) == [1, 2, 3]
-		## ```
+		## Iterate over the set's values without allocating a list of keys.
+		## New values are appended, and inserting an existing value preserves its
+		## position. [Set.remove] may reorder the remaining values.
 		iter : Set(a) -> Iter(a)
-		iter = |set| match set {
-			Items(list) => List.iter(list)
-		}
+		iter = |Items(dict)| Iter.map(Dict.iter(dict), |(item, _)| item)
 
-		## Iterate over the set's values in reverse current backing order. Like
-		## [List.iter_rev], this reads the values in place rather than building a
-		## reversed copy. Inserting an already-present value can change this order,
-		## as described by [Set.iter].
-		## ```roc
-		## expect Iter.fold(Set.from_list([1, 2, 3.U64]).iter_rev(), [], |acc, item| acc.append(item)) == [3, 2, 1]
-		## ```
+		## Iterate in reverse of [Set.iter]'s order without allocating a reversed list.
 		iter_rev : Set(a) -> Iter(a)
-		iter_rev = |set| match set {
-			Items(list) => List.iter_rev(list)
-		}
+		iter_rev = |Items(dict)| Iter.map(Dict.iter_rev(dict), |(item, _)| item)
 
 		## Create a `Set` from a `List` of values.
 		from_list : List(a) -> Set(a)
-			where [a.is_eq : a, a -> Bool]
-		from_list = |list| {
-			Items(
-				List.fold(
-					list,
-					[],
-					|acc, item|
-						if List.contains(acc, item) {
-							acc
-						} else {
-							List.append(acc, item)
-						},
-				),
-			)
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		from_list = |list| List.fold(list, Set.with_capacity(List.len(list)), |set, item| Set.insert(set, item))
 
 		## Run the given function on each item in the `Set`, and return
 		## a `Set` with just the items for which the function returned `Bool.True`.
@@ -6398,9 +6340,8 @@ Builtin :: [].{
 		## expect Set.from_list([1, 2, 3, 4]).keep_if(|num| num > 2) == Set.from_list([3, 4])
 		## ```
 		keep_if : Set(a), (a -> Bool) -> Set(a)
-		keep_if = |set, predicate| match set {
-			Items(list) => Items(List.keep_if(list, predicate))
-		}
+			where [a.to_hash : a, Hasher -> Hasher]
+		keep_if = |Items(dict), predicate| Items(Dict.keep_if(dict, |(item, _)| predicate(item)))
 
 		## Run the given function on each item in the `Set`, and return
 		## a `Set` with just the items for which the function returned `Bool.False`.
@@ -6408,9 +6349,8 @@ Builtin :: [].{
 		## expect Set.from_list([1, 2, 3, 4]).drop_if(|num| num > 2) == Set.from_list([1, 2])
 		## ```
 		drop_if : Set(a), (a -> Bool) -> Set(a)
-		drop_if = |set, predicate| match set {
-			Items(list) => Items(List.drop_if(list, predicate))
-		}
+			where [a.to_hash : a, Hasher -> Hasher]
+		drop_if = |set, predicate| Set.keep_if(set, |item| !predicate(item))
 
 		## Combine two `Set`s by keeping the
 		## [union](https://en.wikipedia.org/wiki/Union_(set_theory))
@@ -6423,9 +6363,8 @@ Builtin :: [].{
 		## }
 		## ```
 		union : Set(a), Set(a) -> Set(a)
-			where [a.is_eq : a, a -> Bool]
-		union = |set_a, set_b|
-			List.fold(Set.to_list(set_b), set_a, |acc, item| Set.insert(acc, item))
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		union = |set_a, set_b| Set.fold(set_b, set_a, |acc, item| Set.insert(acc, item))
 
 		## Combine two `Set`s by keeping the
 		## [intersection](https://en.wikipedia.org/wiki/Intersection_(set_theory))
@@ -6438,23 +6377,8 @@ Builtin :: [].{
 		## }
 		## ```
 		intersection : Set(a), Set(a) -> Set(a)
-			where [a.is_eq : a, a -> Bool]
-		intersection = |set_a, set_b| {
-			list_a = Set.to_list(set_a)
-			list_b = Set.to_list(set_b)
-
-			state = List.fold(
-				list_a,
-				{ result: [], check: list_b },
-				|st, item|
-					if List.contains(st.check, item) {
-						{ result: List.append(st.result, item), check: st.check }
-					} else {
-						st
-					},
-			)
-			Items(state.result)
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		intersection = |set_a, set_b| Set.keep_if(set_a, |item| Set.contains(set_b, item))
 
 		## Remove the values in the first `Set` that are also in the second `Set`
 		## using the [set difference](https://en.wikipedia.org/wiki/Complement_(set_theory)#Relative_complement).
@@ -6466,23 +6390,8 @@ Builtin :: [].{
 		## }
 		## ```
 		difference : Set(a), Set(a) -> Set(a)
-			where [a.is_eq : a, a -> Bool]
-		difference = |set_a, set_b| {
-			list_a = Set.to_list(set_a)
-			list_b = Set.to_list(set_b)
-
-			state = List.fold(
-				list_a,
-				{ result: [], check: list_b },
-				|st, item|
-					if List.contains(st.check, item) {
-						st
-					} else {
-						{ result: List.append(st.result, item), check: st.check }
-					},
-			)
-			Items(state.result)
-		}
+			where [a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]
+		difference = |set_a, set_b| Set.drop_if(set_a, |item| Set.contains(set_b, item))
 
 		## Convert each value in the set to something new, by calling a conversion
 		## function on each of them. Then return a new set containing the unique
@@ -6494,24 +6403,57 @@ Builtin :: [].{
 		## expect Set.from_list([1, -1, 2, -2]).map(|n| n * n) == Set.from_list([1, 4])
 		## ```
 		map : Set(a), (a -> b) -> Set(b)
-			where [b.is_eq : b, b -> Bool]
-		map = |set, transform| match set {
-			Items(list) =>
-				Items(
-					List.fold(
-						list,
-						[],
-						|acc, item| {
-							new_item = transform(item)
-							if List.contains(acc, new_item) {
-								acc
-							} else {
-								List.append(acc, new_item)
-							}
-						},
-					),
-				)
+			where [b.is_eq : b, b -> Bool, b.to_hash : b, Hasher -> Hasher]
+		map = |set, transform| Set.fold(set, Set.empty(), |acc, item| Set.insert(acc, transform(item)))
+
+		## Creates an empty set with room for at least the requested number of values.
+		with_capacity : U64 -> Set(_item)
+		with_capacity = |requested| Items(Dict.with_capacity(requested))
+
+		## Returns the number of values the set can hold before growing its hash table.
+		capacity : Set(_item) -> U64
+		capacity = |Items(dict)| Dict.capacity(dict)
+
+		## Ensures room for at least this many additional values.
+		reserve : Set(item), U64 -> Set(item)
+			where [item.to_hash : item, Hasher -> Hasher]
+		reserve = |Items(dict), additional| Items(Dict.reserve(dict, additional))
+
+		## Reduces unused capacity while retaining every value.
+		release_excess_capacity : Set(item) -> Set(item)
+			where [item.to_hash : item, Hasher -> Hasher]
+		release_excess_capacity = |Items(dict)| Items(Dict.release_excess_capacity(dict))
+
+		## Removes every value while preserving the current capacity.
+		clear : Set(item) -> Set(item)
+		clear = |Items(dict)| Items(Dict.clear(dict))
+
+		## Alias for [Set.contains].
+		subscript : Set(item), item -> Bool
+			where [item.is_eq : item, item -> Bool, item.to_hash : item, Hasher -> Hasher]
+		subscript = |set, item| Set.contains(set, item)
+
+		## Creates a set from an iterator, retaining the first position of each value.
+		## Uses the iterator's known length to reserve storage when available.
+		from_iter : Iter(item) -> Set(item)
+			where [item.is_eq : item, item -> Bool, item.to_hash : item, Hasher -> Hasher]
+		from_iter = |iterator| {
+			initial = match iterator.len_if_known {
+				Known(n) => Set.with_capacity(n)
+				Unknown => Set.empty()
 			}
+			Iter.fold(iterator, initial, |set, item| Set.insert(set, item))
+		}
+
+		## Folds values in iteration order, stopping immediately on `Break(state)`.
+		## Returns the initial state when the set is empty.
+		fold_until : Set(item), state, (state, item -> [Continue(state), Break(state)]) -> state
+		fold_until = |Items(dict), init, step| Dict.fold_until(dict, init, |state, item, _| step(state, item))
+
+		## Transforms each value into a set and combines the results, removing duplicates.
+		join_map : Set(a), (a -> Set(b)) -> Set(b)
+			where [b.is_eq : b, b -> Bool, b.to_hash : b, Hasher -> Hasher]
+		join_map = |set, transform| Set.fold(set, Set.empty(), |acc, item| Set.union(acc, transform(item)))
 	}
 
 	Num :: {}.{
