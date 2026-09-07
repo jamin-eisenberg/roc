@@ -13512,10 +13512,7 @@ fn collectAnnotationTypeAnnos(
             switch (self.cir.store.getWhereClause(where_idx)) {
                 .w_method => |method| {
                     try pending.append(allocator, method.var_);
-                    for (self.cir.store.sliceTypeAnnos(method.args)) |arg_idx| {
-                        try pending.append(allocator, arg_idx);
-                    }
-                    try pending.append(allocator, method.ret);
+                    try pending.append(allocator, method.anno);
                 },
                 // A where alias reference's arguments are generated in place
                 // (`generateWhereAliasReferenceArgs`), so its node tree must be
@@ -14943,10 +14940,11 @@ fn declareOwnedStaticDispatchConstraints(
     owner_var: Var,
     env: *Env,
 ) std.mem.Allocator.Error!void {
-    const where_region = self.cir.store.getNodeRegion(ModuleEnv.nodeIdxFrom(where_idx));
     switch (self.cir.store.getWhereClause(where_idx)) {
         .w_method => |method| {
-            const func_var = try self.fresh(env, where_region);
+            // The annotation owns the callable variable. Declare its identity
+            // before generating its type so recursive constraints can refer to it.
+            const func_var = ModuleEnv.varFrom(method.anno);
 
             try self.scratch_static_dispatch_constraints.append(ScratchStaticDispatchConstraint{
                 .where_clause = where_idx,
@@ -14985,20 +14983,7 @@ fn completeOwnedStaticDispatchConstraint(
 
     try self.generateAnnoTypeInPlace(method.var_, env, ctx);
 
-    const args_anno_slice = self.cir.store.sliceTypeAnnos(method.args);
-    for (args_anno_slice) |arg_anno_idx| {
-        try self.generateAnnoTypeInPlace(arg_anno_idx, env, ctx);
-    }
-    const anno_arg_vars: []Var = @ptrCast(args_anno_slice);
-
-    try self.generateAnnoTypeInPlace(method.ret, env, ctx);
-    const ret_var = ModuleEnv.varFrom(method.ret);
-
-    const func_content = if (method.effectful)
-        try self.types.mkFuncEffectful(anno_arg_vars, ret_var)
-    else
-        try self.types.mkFuncPure(anno_arg_vars, ret_var);
-    try self.unifyWith(entry.constraint.fn_var, func_content, env);
+    try self.generateAnnoTypeInPlace(method.anno, env, ctx);
     self.scratch_static_dispatch_constraints.items.items[constraint_index].state = .completed;
 }
 

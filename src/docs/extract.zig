@@ -1473,40 +1473,8 @@ fn extractWhereMethodSignature(
     reference_routing: PublicReferenceRouting,
     method: @TypeOf(@as(CIR.WhereClause, undefined).w_method),
 ) Allocator.Error!*const DocType {
-    const args_slice = module_env.store.sliceTypeAnnos(method.args);
-    const args = try gpa.alloc(*const DocType, args_slice.len);
-    var args_len: usize = 0;
-    var args_moved = false;
-    errdefer if (!args_moved) {
-        for (args[0..args_len]) |arg| {
-            arg.deinit(gpa);
-            gpa.destroy(arg);
-        }
-        gpa.free(args);
-    };
-
-    for (args_slice) |arg_idx| {
-        args[args_len] = try extractTypeAnnoAsDocType(gpa, module_env, local_module_path, reference_routing, arg_idx) orelse
-            try allocDocType(gpa, .@"error");
-        args_len += 1;
-    }
-
-    const ret = try extractTypeAnnoAsDocType(gpa, module_env, local_module_path, reference_routing, method.ret) orelse
+    return try extractTypeAnnoAsDocType(gpa, module_env, local_module_path, reference_routing, method.anno) orelse
         try allocDocType(gpa, .@"error");
-    var ret_moved = false;
-    errdefer if (!ret_moved) {
-        ret.deinit(gpa);
-        gpa.destroy(ret);
-    };
-
-    const signature = try allocDocType(gpa, .{ .function = .{
-        .args = args,
-        .ret = ret,
-        .effectful = method.effectful,
-    } });
-    args_moved = true;
-    ret_moved = true;
-    return signature;
 }
 
 fn extractWhereTypeVarName(
