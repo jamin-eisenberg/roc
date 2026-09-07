@@ -3029,14 +3029,14 @@ const ProcedureBuilder = struct {
             const start: u32 = @intCast(self.result.boxy_tag_variants.items.len);
             try self.result.boxy_tag_variants.appendSlice(self.allocator, &.{
                 .{
-                    .name = try self.result.store.insertString("False"),
+                    .name = try self.result.store.insertBoxyName("False"),
                     .discriminant = 0,
                     .payload_count = 0,
                     .payload_layout = .zst,
                     .payload_descs = .{},
                 },
                 .{
-                    .name = try self.result.store.insertString("True"),
+                    .name = try self.result.store.insertBoxyName("True"),
                     .discriminant = 1,
                     .payload_count = 0,
                     .payload_layout = .zst,
@@ -3083,7 +3083,7 @@ const ProcedureBuilder = struct {
                 break :blk self.plan.childSlice(source_variant.payloads);
             } else &[_]Plan.RepChild{};
             try entries.append(self.allocator, .{
-                .name = try self.result.store.insertString(self.tagVariantNameText(variant)),
+                .name = try self.result.store.insertBoxyName(self.tagVariantNameText(variant)),
                 .discriminant = @intCast(index),
                 .payload_count = @intCast(payloads.len),
                 .payload_layout = tag_info.variants.get(index).payload_layout,
@@ -3170,7 +3170,7 @@ const ProcedureBuilder = struct {
             descriptor_sources,
             context,
         );
-        const name = try self.result.store.insertString(self.tagVariantNameText(variant));
+        const name = try self.result.store.insertBoxyName(self.tagVariantNameText(variant));
         const start: u32 = @intCast(self.result.boxy_tag_variants.items.len);
         try self.result.boxy_tag_variants.append(self.allocator, .{
             .name = name,
@@ -3195,7 +3195,7 @@ const ProcedureBuilder = struct {
 
         const variant = variants[0];
         const payload_descs = try self.staticPayloadDescRefsForTagVariant(variant, .zst);
-        const name = try self.result.store.insertString(self.tagVariantNameText(variant));
+        const name = try self.result.store.insertBoxyName(self.tagVariantNameText(variant));
         const start: u32 = @intCast(self.result.boxy_tag_variants.items.len);
         try self.result.boxy_tag_variants.append(self.allocator, .{
             .name = name,
@@ -3824,14 +3824,14 @@ const ProcedureBuilder = struct {
             const start: u32 = @intCast(self.result.boxy_tag_variants.items.len);
             try self.result.boxy_tag_variants.appendSlice(self.allocator, &.{
                 .{
-                    .name = try self.result.store.insertString("False"),
+                    .name = try self.result.store.insertBoxyName("False"),
                     .discriminant = 0,
                     .payload_count = 0,
                     .payload_layout = .zst,
                     .payload_descs = .{},
                 },
                 .{
-                    .name = try self.result.store.insertString("True"),
+                    .name = try self.result.store.insertBoxyName("True"),
                     .discriminant = 1,
                     .payload_count = 0,
                     .payload_layout = .zst,
@@ -3858,7 +3858,7 @@ const ProcedureBuilder = struct {
             const variant_payload_layout = tag_info.variants.get(index).payload_layout;
             const payload_descs = try self.staticPayloadDescRefsForTagVariant(variant, variant_payload_layout);
             try entries.append(self.allocator, .{
-                .name = try self.result.store.insertString(self.tagVariantNameText(variant)),
+                .name = try self.result.store.insertBoxyName(self.tagVariantNameText(variant)),
                 .discriminant = @intCast(index),
                 .payload_count = @intCast(self.plan.childSlice(variant.payloads).len),
                 .payload_layout = tag_info.variants.get(index).payload_layout,
@@ -4220,13 +4220,13 @@ const ProcedureBuilder = struct {
         const rep = self.plan.representations.items[@intFromEnum(rep_id)];
         const view = procedureModuleById(self.modules, rep.source_type.module);
 
-        var field_name_ids = std.ArrayList(base.StringLiteral.Idx).empty;
+        var field_name_ids = std.ArrayList(LIR.BoxyNameId).empty;
         defer field_name_ids.deinit(self.allocator);
         for (self.plan.childSlice(rep.children)) |child| {
             if (child.role == .record_field) {
                 try field_name_ids.append(
                     self.allocator,
-                    try self.result.store.insertString(view.canonical_names.recordFieldLabelText(child.role.record_field)),
+                    try self.result.store.insertBoxyName(view.canonical_names.recordFieldLabelText(child.role.record_field)),
                 );
             } else if (child.role != .record_ext) {
                 return .{};
@@ -13359,7 +13359,7 @@ const ProcBodyBuilder = struct {
                 payload.desc_local,
                 source,
                 source_rep,
-                try self.parent.result.store.insertString("Ok"),
+                try self.parent.result.store.insertBoxyName("Ok"),
                 0,
                 moved,
             )
@@ -13384,7 +13384,7 @@ const ProcBodyBuilder = struct {
             return try self.parent.result.store.addCFStmt(.{ .boxy_tag_match = .{
                 .source = source,
                 .source_desc = try self.descriptorRefForSourceLocalRep(source, source_rep),
-                .tag_name = try self.parent.result.store.insertString("Ok"),
+                .tag_name = try self.parent.result.store.insertBoxyName("Ok"),
                 .on_match = read_ok,
                 .on_miss = invalid,
             } });
@@ -18918,7 +18918,7 @@ const ProcBodyBuilder = struct {
 
             for (target_template_variants) |target_variant| {
                 var specialized_variant = target_variant;
-                const target_name = self.parent.result.store.getString(target_variant.name);
+                const target_name = self.parent.result.store.getBoxyName(target_variant.name);
                 var target_plan_variant: ?Plan.TagVariant = null;
                 for (target_plan_variants) |plan_variant| {
                     if (std.mem.eql(u8, target_name, self.tagVariantNameText(plan_variant))) {
@@ -18935,7 +18935,7 @@ const ProcBodyBuilder = struct {
                 }
                 var source_variant: ?LirProgram.BoxyTagVariant = null;
                 for (source_template_variants) |candidate| {
-                    if (std.mem.eql(u8, target_name, self.parent.result.store.getString(candidate.name))) {
+                    if (target_variant.name == candidate.name) {
                         source_variant = candidate;
                         break;
                     }
@@ -19041,10 +19041,9 @@ const ProcBodyBuilder = struct {
             const source_variants = self.parent.result.boxy_tag_variants.items[source_template_value.tag_variants.start..][0..source_template_value.tag_variants.len];
             var has_residual_variant = false;
             for (source_variants) |source_variant| {
-                const source_name = self.parent.result.store.getString(source_variant.name);
                 var belongs_to_target = false;
                 for (target_variants) |target_variant| {
-                    if (std.mem.eql(u8, source_name, self.parent.result.store.getString(target_variant.name))) {
+                    if (source_variant.name == target_variant.name) {
                         belongs_to_target = true;
                         break;
                     }
@@ -23123,7 +23122,7 @@ const ProcBodyBuilder = struct {
         target_desc: ?LIR.LocalId,
         source: LIR.LocalId,
         source_rep: Plan.TypeRepId,
-        tag_name: base.StringLiteral.Idx,
+        tag_name: LIR.BoxyNameId,
         payload_index: u32,
         next: LIR.CFStmtId,
     ) Allocator.Error!LIR.CFStmtId {
@@ -24129,21 +24128,21 @@ const ProcBodyBuilder = struct {
             const skip_match = try self.parent.result.store.addCFStmt(.{ .boxy_tag_match = .{
                 .source = step_local,
                 .source_desc = source_desc,
-                .tag_name = try self.parent.result.store.insertString(step.module.canonical_names.tagLabelText(step.skip_tag)),
+                .tag_name = try self.parent.result.store.insertBoxyName(step.module.canonical_names.tagLabelText(step.skip_tag)),
                 .on_match = skip_body,
                 .on_miss = impossible,
             } });
             const one_match = try self.parent.result.store.addCFStmt(.{ .boxy_tag_match = .{
                 .source = step_local,
                 .source_desc = source_desc,
-                .tag_name = try self.parent.result.store.insertString(step.module.canonical_names.tagLabelText(step.one_tag)),
+                .tag_name = try self.parent.result.store.insertBoxyName(step.module.canonical_names.tagLabelText(step.one_tag)),
                 .on_match = one_body,
                 .on_miss = skip_match,
             } });
             const done_match = try self.parent.result.store.addCFStmt(.{ .boxy_tag_match = .{
                 .source = step_local,
                 .source_desc = source_desc,
-                .tag_name = try self.parent.result.store.insertString(step.module.canonical_names.tagLabelText(step.done_tag)),
+                .tag_name = try self.parent.result.store.insertBoxyName(step.module.canonical_names.tagLabelText(step.done_tag)),
                 .on_match = done_body,
                 .on_miss = one_match,
             } });
@@ -27383,7 +27382,7 @@ const ProcBodyBuilder = struct {
         for (variants, 0..) |variant, index| {
             const variant_payload_layout = tag_info.variants.get(index).payload_layout;
             try entries.append(self.parent.allocator, .{
-                .name = try self.parent.result.store.insertString(self.tagVariantNameText(variant)),
+                .name = try self.parent.result.store.insertBoxyName(self.tagVariantNameText(variant)),
                 .discriminant = @intCast(index),
                 .payload_count = @intCast(self.parent.plan.childSlice(variant.payloads).len),
                 .payload_layout = variant_payload_layout,
@@ -27424,7 +27423,7 @@ const ProcBodyBuilder = struct {
             captures,
             context,
         );
-        const name = try self.parent.result.store.insertString(self.tagVariantNameText(variant));
+        const name = try self.parent.result.store.insertBoxyName(self.tagVariantNameText(variant));
         const start: u32 = @intCast(self.parent.result.boxy_tag_variants.items.len);
         try self.parent.result.boxy_tag_variants.append(self.parent.allocator, .{
             .name = name,
@@ -36734,33 +36733,33 @@ const ProcBodyBuilder = struct {
     fn lirTagName(
         self: *ProcBodyBuilder,
         tag_name: names.TagNameId,
-    ) Allocator.Error!base.StringLiteral.Idx {
-        return try self.parent.result.store.insertString(self.module.canonical_names.tagLabelText(tag_name));
+    ) Allocator.Error!LIR.BoxyNameId {
+        return try self.parent.result.store.insertBoxyName(self.module.canonical_names.tagLabelText(tag_name));
     }
 
     fn lirTagNameForRep(
         self: *ProcBodyBuilder,
         rep_id: Plan.TypeRepId,
         tag_name: names.TagNameId,
-    ) Allocator.Error!base.StringLiteral.Idx {
+    ) Allocator.Error!LIR.BoxyNameId {
         const rep = self.parent.plan.representations.items[@intFromEnum(rep_id)];
         const module = procedureModuleById(self.parent.modules, rep.source_type.module);
-        return try self.parent.result.store.insertString(module.canonical_names.tagLabelText(tag_name));
+        return try self.parent.result.store.insertBoxyName(module.canonical_names.tagLabelText(tag_name));
     }
 
     fn lirTagNameForVariant(
         self: *ProcBodyBuilder,
         variant: Plan.TagVariant,
-    ) Allocator.Error!base.StringLiteral.Idx {
-        return try self.parent.result.store.insertString(self.tagVariantNameText(variant));
+    ) Allocator.Error!LIR.BoxyNameId {
+        return try self.parent.result.store.insertBoxyName(self.tagVariantNameText(variant));
     }
 
     fn lirTagNameForLookup(
         self: *ProcBodyBuilder,
         variant: TagVariantLookup,
-    ) Allocator.Error!base.StringLiteral.Idx {
+    ) Allocator.Error!LIR.BoxyNameId {
         const module = procedureModuleById(self.parent.modules, variant.name_module);
-        return try self.parent.result.store.insertString(module.canonical_names.tagLabelText(variant.name));
+        return try self.parent.result.store.insertBoxyName(module.canonical_names.tagLabelText(variant.name));
     }
 
     fn boolVariantIndex(self: *const ProcBodyBuilder, name: names.TagNameId) u16 {

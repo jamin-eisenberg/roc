@@ -15,7 +15,7 @@ const StaticDataRelocation = @import("StaticDataExport.zig").StaticDataRelocatio
 const Allocator = std.mem.Allocator;
 
 /// Boxy runtime sidecar embedded in a dev run image: descriptor tables, the
-/// committed layout store, and the string store the descriptors index. Its
+/// committed layout store, and the name store the descriptors index. Its
 /// offsets are relative to the run image's boxy blob region.
 pub const BoxySidecar = lir.LirImage.BoxySidecar;
 
@@ -23,7 +23,8 @@ pub const BoxySidecar = lir.LirImage.BoxySidecar;
 pub const MAGIC: u32 = 0x56454452;
 
 /// Version of the shared-memory dev run image format.
-pub const FORMAT_VERSION: u32 = 4;
+/// v5: embedded Boxy sidecars carry dense name identities and byte/range columns.
+pub const FORMAT_VERSION: u32 = 5;
 
 /// Maximum bytes reserved per host jump stub on the supported dev-shim hosts.
 /// The machine-code shim owns the per-arch emitted sizes and asserts at compile

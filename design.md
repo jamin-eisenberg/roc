@@ -9702,6 +9702,20 @@ not by a backend. Their contents are serialized into LirImage when any reachable
 LIR statement references them. A backend may cache lowered helper code for a
 descriptor, dictionary, or adapter, but it must not change that data's meaning.
 
+Boxy tag and field names belong to `LirStore.boxy_names`, separate from literal
+backings. Lowering interns each spelling through the shared serial string
+interner and assigns its dense `BoxyNameId` once. Variant metadata, tag
+construction and matching, payload reads, and reads of tag payload descriptors
+all carry that same identity. Backends pass it unchanged through the Boxy ABI;
+runtime identity comparisons never depend on literal byte offsets. Field and
+tag inspection resolve text through the same name store.
+
+Full LIR images and standalone Boxy sidecars serialize only the name store's
+byte and range columns, preserving ids and excluding the transient interning
+index. Full LIR images also retain the literal store for LIR procedure bodies;
+standalone sidecars carry no literal store. Serialization does not rediscover
+names, scan literal payloads, or remap identities after code generation.
+
 After reachable-procedure compaction, `LirProgram.Result.boxy_worker_procs` is
 the dense, deduplicated list named by every live, present, non-structural Boxy
 method slot. This includes descriptor-carried inspect methods as well as
