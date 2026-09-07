@@ -3,7 +3,14 @@
 
 const std = @import("std");
 const roc_target = @import("roc_target");
-const BuildEnv = @import("../compile_build.zig").BuildEnv;
+const compile_build = @import("../compile_build.zig");
+const BuildEnv = compile_build.BuildEnv;
+
+const PatternTestError = compile_build.InitError ||
+    compile_build.BuildRootError ||
+    std.Io.Dir.WriteFileError ||
+    std.Io.Dir.RealPathFileAllocError ||
+    error{ TestUnexpectedResult, TestExpectedEqual };
 
 test "issue 11175: a numeral parameter pattern typed as a nominal reports rather than aborting publication" {
     const gpa = std.testing.allocator;
@@ -48,7 +55,7 @@ test "issue 11175: a numeral parameter pattern typed as a nominal reports rather
     try std.testing.expect(found_name_not_in_scope);
 }
 
-fn expectPublishedPatterns(body: []const u8, expected_error: ?[]const u8) !void {
+fn expectPublishedPatterns(body: []const u8, expected_error: ?[]const u8) PatternTestError!void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     const source = try std.fmt.allocPrint(gpa,
