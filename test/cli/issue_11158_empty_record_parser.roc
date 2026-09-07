@@ -59,21 +59,21 @@ parse_empty : Str -> Try({}, [InvalidJson(Str)])
 parse_empty = |input| Json.parse(input)
 
 expect parse_empty("{}") == Ok({})
-expect parse_empty("{\"unknown\": [1, {\"nested\": true}]}") == Ok({})
+expect Json.parse("{\"unknown\": [1, {\"nested\": true}]}") == Ok({})
 
-expect match parse_empty("{") {
+expect match Json.parse("{") {
 	Err(InvalidJson(_)) => True
-	Ok(_) => False
+	Ok({}) => False
 }
 
-expect match parse_empty("{\"unknown\": }") {
+expect match Json.parse("{\"unknown\": }") {
 	Err(InvalidJson(_)) => True
-	Ok(_) => False
+	Ok({}) => False
 }
 
-expect match parse_empty("[]") {
+expect match Json.parse("[]") {
 	Err(InvalidJson(_)) => True
-	Ok(_) => False
+	Ok({}) => False
 }
 
 # A derivation containing only empty records has no rename call to share.
