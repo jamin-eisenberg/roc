@@ -3865,7 +3865,13 @@ analyzer records the complete decision before LIR generation; direct
 Solved-to-LIR lowering only substitutes arguments and dumbly lowers a selected
 body at its unique call site. The existing wrapper eligibility remains available
 for proven small call-through and low-level wrappers even when they have multiple
-direct uses.
+direct uses. Checked call-through wrappers also qualify when a single-condition
+`if` has a literal-crash arm and a continuing wrapper arm. The guard and both
+arms must read only arguments or constants; there are no captures or local
+statements other than the terminal literal crash. Argument substitution preserves
+evaluation and the guard, while exposing constant arguments to the existing
+LIR range pass. Conditionals with two continuing arms do not qualify under this
+wrapper rule, including conditionals nested in call arguments.
 
 Each post-lift capture operand explicitly names the callee capture slot it
 supplies. Capture finalization preserves that key while rewriting the operand
@@ -13803,6 +13809,15 @@ host ABI classification.
 
 LLVM emits generic vector IR for ordinary operations and target intrinsics for
 operations whose pinned edge behavior or instruction selection requires them.
+LLVM bitmask lowering compares the lane bits as signed integers against zero,
+then bitcasts the predicate vector to the packed lane-count integer and
+zero-extends to the result layout. This preserves arbitrary-input MSB semantics
+and lets vector instruction selection consume the complete operation.
+The existing LIR range pass records an exact in-range `concat_shift_bytes`
+count in `assign_low_level.simd_concat_count`. Cloning and ARC preserve that
+fact. LLVM consumes it as a two-input byte shuffle; an unannotated operation
+retains the exact dynamic-count shifts, including the zero and sixteen cases.
+Recording a count does not change dataflow or request an extra proof round.
 The generic `dot_pairs_saturated` lowering widens unsigned and signed bytes to
 32-bit lanes, multiplies and pairwise-adds at that width, clamps to signed
 16-bit bounds, and narrows only after saturation; no intermediate 16-bit sum

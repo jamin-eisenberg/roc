@@ -2055,6 +2055,7 @@ const Inserter = struct {
                     .unique_args = step.unique_args,
                     .args = assign.args,
                     .interchangeable = assign.interchangeable,
+                    .simd_concat_count = assign.simd_concat_count,
                     .next = next,
                 } });
             },
