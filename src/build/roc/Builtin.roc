@@ -2226,9 +2226,22 @@ Builtin :: [].{
 			is_eq : Utf8Problem, Utf8Problem -> Bool
 		}
 
-		## A stub function to help people discover [how they should handle this in Roc](https://www.roc-lang.org/faq.html#strings-in-roc).
+		## Returns guidance about string length instead of a number.
+		##
+		## A string can have different lengths depending on what you count: UTF-8
+		## bytes, Unicode code points, or grapheme clusters (an approximation of
+		## user-perceived characters). For example, `é` can be represented as one
+		## code point or as `e` followed by a combining accent. These representations
+		## use different numbers of bytes and code points, but each is one grapheme
+		## cluster. A grapheme cluster's display width also depends on how it is rendered.
+		##
+		## Use `Str.count_utf8_bytes` when you need the byte count, or `Str.is_empty`
+		## to check whether a string is empty. For other measurements, choose a
+		## Unicode library that supports the unit you need. For text known to be
+		## ASCII, each code point occupies one byte; this does not hold for arbitrary
+		## Unicode text.
 		len : Str -> [LearnAboutStringsInRoc(Str)]
-		len = |_str| LearnAboutStringsInRoc("We want to help you make reliable software, so we aim to make sure that you're aware of all the pitfalls when handling strings. For (professional) software that needs to be reliable, check out the explainer [here](https://www.roc-lang.org/builtins/Str) and the [unicode package](https://github.com/roc-lang/unicode). For personal scripts or things like advent of code, the [roc-ascii package](https://github.com/Hasnep/roc-ascii) can cover your needs.")
+		len = |_str| LearnAboutStringsInRoc("String length depends on what you count: UTF-8 bytes, Unicode code points, or grapheme clusters (an approximation of user-perceived characters). A single grapheme cluster can contain multiple code points, and a code point can occupy multiple UTF-8 bytes. Display width also depends on how the text is rendered. Use Str.count_utf8_bytes for the byte count, or Str.is_empty to check whether a string is empty. For other measurements, choose a Unicode library that supports the unit you need. For text known to be ASCII, each code point occupies one byte; this does not hold for arbitrary Unicode text.")
 
 		is_empty : Str -> Bool
 		is_empty = |str| Str.count_utf8_bytes(str) == 0
