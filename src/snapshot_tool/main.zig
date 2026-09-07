@@ -341,7 +341,7 @@ fn renderReportsToProblemsSection(output: *DualOutput, reports: *const std.array
         for (reports.items) |*report| {
             if (output.html_writer) |writer| {
                 try writer.writer.writeAll("                    <div class=\"problem\">");
-                report.render(&writer.writer, .markdown) catch |err| {
+                report.render(&writer.writer, .html) catch |err| {
                     std.debug.panic("Failed to render report to HTML: {s}", .{@errorName(err)});
                 };
                 try writer.writer.writeAll("</div>\n");
@@ -2216,11 +2216,14 @@ fn generateReportingSections(output: *DualOutput, reports: *const std.array_list
     try output.begin_section("REPORT");
     if (reports.items.len == 0) {
         try output.md_writer.writer.writeAll("NIL\n");
+        try writeReportingHtmlPayload(output, "NIL\n", false);
     } else {
         try output.begin_code_block("clojure");
+        const payload_start = output.md_writer.written().len;
         writeReportsSExpr(output.gpa, reports.items, &output.md_writer.writer) catch |err| {
             std.debug.panic("Failed to render canonical report S-expression: {s}", .{@errorName(err)});
         };
+        try writeReportingHtmlPayload(output, output.md_writer.written()[payload_start..], false);
         try output.end_code_block();
     }
     try output.end_section();
@@ -2228,13 +2231,14 @@ fn generateReportingSections(output: *DualOutput, reports: *const std.array_list
     const RendererSection = struct {
         name: []const u8,
         language: []const u8,
+        html_is_markup: bool = false,
         render: *const fn (*const reporting.Report, *std.Io.Writer, reporting.ReportingConfig) (Allocator.Error || error{WriteFailed})!void,
         config: reporting.ReportingConfig,
     };
     const renderer_sections = [_]RendererSection{
         .{ .name = "CLI", .language = "text", .render = reporting.renderReportToPlain, .config = reporting.ReportingConfig.initColorTerminal() },
         .{ .name = "MARKDOWN", .language = "markdown", .render = reporting.renderReportToMarkdown, .config = reporting.ReportingConfig.initMarkdown() },
-        .{ .name = "HTML", .language = "html", .render = reporting.renderReportToHtml, .config = reporting.ReportingConfig.initHtml() },
+        .{ .name = "HTML", .language = "html", .html_is_markup = true, .render = reporting.renderReportToHtml, .config = reporting.ReportingConfig.initHtml() },
         .{ .name = "LSP", .language = "text", .render = reporting.renderReportToLsp, .config = reporting.ReportingConfig.initLsp() },
     };
 
@@ -2242,8 +2246,10 @@ fn generateReportingSections(output: *DualOutput, reports: *const std.array_list
         try output.begin_section(section.name);
         if (reports.items.len == 0) {
             try output.md_writer.writer.writeAll("NIL\n");
+            try writeReportingHtmlPayload(output, "NIL\n", false);
         } else {
             try output.begin_code_block(section.language);
+            const payload_start = output.md_writer.written().len;
             for (reports.items) |*report| {
                 section.render(report, &output.md_writer.writer, section.config) catch |err| {
                     std.debug.panic("Failed to render report for {s} section: {s}", .{ section.name, @errorName(err) });
@@ -2255,9 +2261,23 @@ fn generateReportingSections(output: *DualOutput, reports: *const std.array_list
             if (writer.end == 0 or writer.buffer[writer.end - 1] != '\n') {
                 try writer.writeAll("\n");
             }
+            try writeReportingHtmlPayload(output, output.md_writer.written()[payload_start..], section.html_is_markup);
             try output.end_code_block();
         }
         try output.end_section();
+    }
+}
+
+/// Show textual renderer output verbatim, and HTML renderer output as markup.
+fn writeReportingHtmlPayload(output: *DualOutput, payload: []const u8, is_html: bool) error{WriteFailed}!void {
+    if (output.html_writer) |html| {
+        if (is_html) {
+            try html.writer.writeAll(payload);
+        } else {
+            try html.writer.writeAll("<pre><code>");
+            for (payload) |char| try escapeHtmlChar(&html.writer, char);
+            try html.writer.writeAll("</code></pre>\n");
+        }
     }
 }
 
@@ -6025,5 +6045,76 @@ test "snapshot CSS covers every diagnostic annotation class" {
             offset = end;
         }
         try std.testing.expect(found);
+    }
+}
+
+test "snapshot diagnostic sections preserve semantics and render HTML" {
+    const gpa = std.testing.allocator;
+    var report = try reporting.Report.init(gpa, "Syntax Problem", "", .runtime_error);
+    defer report.deinit();
+    try report.document.addReflowingText("Compare <left> & right.");
+    var reports = std.array_list.Managed(reporting.Report).init(gpa);
+    defer reports.deinit();
+    try reports.append(report);
+
+    var md = std.Io.Writer.Allocating.init(gpa);
+    defer md.deinit();
+    var html = std.Io.Writer.Allocating.init(gpa);
+    defer html.deinit();
+    var output = DualOutput.init(gpa, &md, &html);
+    try generateProblemsSection(&output, &reports);
+
+    var canonical = std.Io.Writer.Allocating.init(gpa);
+    defer canonical.deinit();
+    try canonical.writer.writeAll("# PROBLEMS\n~~~clojure\n");
+    try writeReportsSExpr(gpa, reports.items, &canonical.writer);
+    try canonical.writer.writeAll("~~~\n");
+    try std.testing.expectEqualStrings(canonical.written(), md.written());
+    var rendered_html = std.Io.Writer.Allocating.init(gpa);
+    defer rendered_html.deinit();
+    try report.render(&rendered_html.writer, .html);
+    try std.testing.expect(std.mem.find(u8, html.written(), rendered_html.written()) != null);
+    try std.testing.expect(std.mem.find(u8, html.written(), "&lt;left&gt; &amp; right.") != null);
+}
+
+test "snapshot reporting sections populate both outputs including empty reports" {
+    const gpa = std.testing.allocator;
+    var report = try reporting.Report.init(gpa, "Syntax Problem", "", .runtime_error);
+    defer report.deinit();
+    try report.document.addReflowingText("Compare <left> & right.");
+    var reports = std.array_list.Managed(reporting.Report).init(gpa);
+    defer reports.deinit();
+
+    for ([_]bool{ false, true }) |has_report| {
+        if (has_report) try reports.append(report);
+        var md = std.Io.Writer.Allocating.init(gpa);
+        defer md.deinit();
+        var html = std.Io.Writer.Allocating.init(gpa);
+        defer html.deinit();
+        var output = DualOutput.init(gpa, &md, &html);
+        try generateReportingSections(&output, &reports);
+        inline for (.{ "REPORT", "CLI", "MARKDOWN", "HTML", "LSP" }) |name| {
+            const md_heading = "# " ++ name ++ "\n";
+            const md_start = std.mem.find(u8, md.written(), md_heading).? + md_heading.len;
+            const md_end = if (std.mem.findPos(u8, md.written(), md_start, "\n# ")) |end| end + 1 else md.written().len;
+            const html_heading = "data-section=\"" ++ name ++ "\"";
+            const html_start = std.mem.find(u8, html.written(), html_heading).?;
+            const html_end = std.mem.findPos(u8, html.written(), html_start + html_heading.len, "data-section=") orelse html.written().len;
+            const md_section = md.written()[md_start..md_end];
+            const html_section = html.written()[html_start..html_end];
+            if (has_report) {
+                try std.testing.expect(std.mem.find(u8, md_section, "Compare") != null);
+                try std.testing.expect(std.mem.find(u8, html_section, "Compare") != null);
+                try std.testing.expect(std.mem.find(u8, html_section, "&lt;left&gt; &amp; right.") != null);
+                if (comptime std.mem.eql(u8, name, "HTML")) {
+                    try std.testing.expect(std.mem.find(u8, html_section, "<pre><code>") == null);
+                } else {
+                    try std.testing.expect(std.mem.find(u8, html_section, "<pre><code>") != null);
+                }
+            } else {
+                try std.testing.expectEqualStrings("NIL\n", md_section);
+                try std.testing.expect(std.mem.find(u8, html_section, "<pre><code>NIL\n</code></pre>") != null);
+            }
+        }
     }
 }

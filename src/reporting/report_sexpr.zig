@@ -314,6 +314,26 @@ test "canonical S-expression covers every document element variant" {
         },
     );
 
+    try doc.addSourceLocation(.{
+        .start_line_idx = 4,
+        .start_col_idx = 2,
+        .end_line_idx = 4,
+        .end_col_idx = 5,
+    }, "/some/snapshots/example.md");
+    try doc.addSourceLocation(.{
+        .start_line_idx = 5,
+        .start_col_idx = 0,
+        .end_line_idx = 5,
+        .end_col_idx = 1,
+    }, null);
+
+    // Keep this corpus exhaustive as the document model grows.
+    var covered = std.EnumSet(std.meta.Tag(DocumentElement)).initEmpty();
+    for (doc.elements.items) |element| covered.insert(std.meta.activeTag(element));
+    inline for (@typeInfo(DocumentElement).@"union".fields) |field| {
+        try std.testing.expect(covered.contains(@field(std.meta.Tag(DocumentElement), field.name)));
+    }
+
     var tree = SExprTree.init(gpa);
     defer tree.deinit();
     try pushReportToSExprTree(&report, &tree);
@@ -355,7 +375,14 @@ test "canonical S-expression covers every document element variant" {
         "\t\t\t(region (start 2 5) (end 2 8) (annotation warning)))\n" ++
         "\t\t(source-underlines\n" ++
         "\t\t\t(display (start 4 1) (end 4 8) (annotation source-region) (line-text \"y = bar\"))\n" ++
-        "\t\t\t(underline (start 4 5) (end 4 8) (annotation underline)))))";
+        "\t\t\t(underline (start 4 5) (end 4 8) (annotation underline)))\n" ++
+        "\t\t(source-location\n" ++
+        "\t\t\t(file \"example.md\")\n" ++
+        "\t\t\t(line 5)\n" ++
+        "\t\t\t(column 3))\n" ++
+        "\t\t(source-location\n" ++
+        "\t\t\t(line 6)\n" ++
+        "\t\t\t(column 1))))";
     try std.testing.expectEqualStrings(expected, actual);
 }
 
@@ -398,7 +425,7 @@ test "empty report list serializes as (reports)" {
 test "serialization is deterministic across runs" {
     const gpa = std.testing.allocator;
 
-    var report = try Report.init(gpa, "Determinism Test", "Same input gives same output.", .info);
+    var report = try Report.init(gpa, "Determinism Test", "Same input gives same output.", .warning);
     defer report.deinit();
     try report.document.addReflowingText("body text");
 

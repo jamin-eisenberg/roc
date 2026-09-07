@@ -23,7 +23,7 @@ semantic changes and presentation changes never show up in the same files:
 - **Reporting snapshots** (`type=reporting`, in `reporting/`) pin renderer
   *output*. Each one compiles its `SOURCE` normally, then renders the same
   semantic reports through every user-facing format, one section per renderer:
-  `REPORT` (the canonical S-expression), `CLI` (plain-text box layout),
+  `REPORT` (the canonical S-expression), `CLI` (plain terminal layout),
   `MARKDOWN`, `HTML`, and `LSP`. Layout, wrapping, punctuation, and markup are
   pinned here and only here.
 

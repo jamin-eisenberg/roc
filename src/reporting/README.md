@@ -45,6 +45,12 @@ together. This keeps the primary and secondary report snippets aligned using
 the same calculations. Title uppercasing is shared with the snapshot tool
 through the exported `writeShouted` helper.
 
+`report_sexpr.zig` serializes the semantic report structure independently of
+presentation layout. Ordinary compiler snapshots store that canonical form in
+`PROBLEMS`. The `type=reporting` fixtures in `test/snapshots/reporting/` pin the
+canonical report alongside all four rendered forms; they complement the
+exhaustive model-variant unit corpus.
+
 ## Rendering checks
 
 `parity_test.zig` enumerates the document and annotation variants at compile
