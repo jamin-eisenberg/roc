@@ -13811,11 +13811,12 @@ LLVM emits generic vector IR for ordinary operations and target intrinsics for
 operations whose pinned edge behavior or instruction selection requires them.
 LLVM bitmask lowering compares the lane bits as signed integers against zero,
 then bitcasts the predicate vector to the packed lane-count integer and
-zero-extends to the result layout. This preserves arbitrary-input MSB semantics
-and lets vector instruction selection consume the complete operation.
+zero-extends to the result layout. This preserves each lane's most significant
+bit for arbitrary inputs and lets vector instruction selection consume the
+complete operation.
 The existing LIR range pass records an exact in-range `concat_shift_bytes`
 count in `assign_low_level.simd_concat_count`. Cloning and ARC preserve that
-fact. LLVM consumes it as a two-input byte shuffle; an unannotated operation
+count. LLVM consumes it as a two-input byte shuffle; an unannotated operation
 retains the exact dynamic-count shifts, including the zero and sixteen cases.
 Recording a count does not change dataflow or request an extra proof round.
 The generic `dot_pairs_saturated` lowering widens unsigned and signed bytes to
