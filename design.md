@@ -7480,7 +7480,11 @@ is local to the scan and uses pooled scratch, so a later lookup observes any
 intervening unions. Evidence, capture, and exact interface checks still decide
 whether a candidate may be reused. Probe work is proportional to interface
 positions plus the members of distinct classes, even when many positions share
-one class.
+one class. The index interns the exact family and evidence-digest prefix once
+per request, using an append-only index-local ID in each interface key. Growing
+the index during recursive lowering does not invalidate those IDs. Request
+kinds remain disjoint, and interning a prefix does not replace exact candidate
+validation.
 
 Type-shaped inspection that can escape relation production or become durable
 specialization identity is allowed only for a fully resolved graph node. It

@@ -5978,14 +5978,14 @@ const Builder = struct {
         // a repeat skips the graph-native recursive lookup below. The latter
         // view does not mutate the live request; a hit joins the live
         // interfaces below.
+        const lookup_prefix = try source_ctx.draft.template_spec_lookup.internPrefix(family, evidence_digest.bytes);
         const resolved_lookup_address: ?DraftTemplateLookupAddress = if (resolved_request_ty) |request_fn_ty| .{
-            .family = family,
-            .evidence_digest = evidence_digest.bytes,
+            .prefix = lookup_prefix,
             .request_kind = 0,
             .request_fn_key = source_ctx.specializationTypeDigest(request_fn_ty).bytes,
         } else null;
         if (resolved_lookup_address) |address| {
-            if (source_ctx.draft.template_spec_lookup.get(address)) |candidates| {
+            if (source_ctx.draft.template_spec_lookup.requests.get(address)) |candidates| {
                 for (candidates.items) |raw_spec| {
                     const spec = &source_ctx.draft.template_specs.items[raw_spec];
                     if (!specEvidenceVectorEql(spec.evidence, evidence)) continue;
@@ -6008,12 +6008,11 @@ const Builder = struct {
                 var aliases = source_ctx.graph.classMemberIterator(interface_class);
                 while (aliases.next()) |member| {
                     const lookup_address = DraftTemplateLookupAddress{
-                        .family = family,
-                        .evidence_digest = evidence_digest.bytes,
+                        .prefix = lookup_prefix,
                         .request_kind = 1,
                         .request_fn_key = draftOpenRequestKey(member),
                     };
-                    if (source_ctx.draft.template_spec_lookup.get(lookup_address)) |candidates| {
+                    if (source_ctx.draft.template_spec_lookup.requests.get(lookup_address)) |candidates| {
                         for (candidates.items) |raw_spec| {
                             const seen = try seen_specs.getOrPut(raw_spec);
                             if (seen.found_existing) continue;
@@ -6203,8 +6202,7 @@ const Builder = struct {
             source_ctx.draft,
             self.allocator,
             source_ctx.graph,
-            family,
-            evidence_digest.bytes,
+            lookup_prefix,
             request_fn_node,
             @intCast(spec_index),
         );
@@ -6306,8 +6304,7 @@ const Builder = struct {
             source_ctx.draft,
             self.allocator,
             source_ctx.graph,
-            family,
-            evidence_digest.bytes,
+            lookup_prefix,
             completed_fn_node,
             @intCast(spec_index),
         );
@@ -7954,9 +7951,9 @@ const Builder = struct {
             try source_ctx.activeTypeFromNode(request_fn_node)
         else
             null;
+        const lookup_prefix = try source_ctx.draft.nested_spec_lookup.internPrefix(family, evidence_digest.bytes);
         const resolved_lookup_address: ?DraftNestedLookupAddress = if (resolved_request_ty) |request_fn_ty| .{
-            .family = family,
-            .evidence_digest = evidence_digest.bytes,
+            .prefix = lookup_prefix,
             .request_kind = 0,
             .request_fn_key = source_ctx.specializationTypeDigest(request_fn_ty).bytes,
         } else null;
@@ -7965,8 +7962,7 @@ const Builder = struct {
         else
             null;
         const open_shape_lookup_address: ?DraftNestedLookupAddress = if (open_request_shape) |shape| .{
-            .family = family,
-            .evidence_digest = evidence_digest.bytes,
+            .prefix = lookup_prefix,
             .request_kind = 2,
             .request_fn_key = shape.digest.bytes,
         } else null;
@@ -7977,7 +7973,7 @@ const Builder = struct {
         defer seen_specs.deinit();
         var selection = DraftOpenCandidateSelection{};
         if (resolved_lookup_address) |address| {
-            if (source_ctx.draft.nested_spec_lookup.get(address)) |candidates| {
+            if (source_ctx.draft.nested_spec_lookup.requests.get(address)) |candidates| {
                 for (candidates.items) |raw_spec| {
                     const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                     if (signature_relation == .exact_graph and
@@ -7999,7 +7995,7 @@ const Builder = struct {
         }
         if (selection.selected() == null) {
             if (open_shape_lookup_address) |address| {
-                if (source_ctx.draft.nested_spec_lookup.get(address)) |candidates| {
+                if (source_ctx.draft.nested_spec_lookup.requests.get(address)) |candidates| {
                     for (candidates.items) |raw_spec| {
                         const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                         if (spec.state != .lowered) continue;
@@ -8027,12 +8023,11 @@ const Builder = struct {
                 var aliases = source_ctx.graph.classMemberIterator(interface_class);
                 while (aliases.next()) |member| {
                     const lookup_address = DraftNestedLookupAddress{
-                        .family = family,
-                        .evidence_digest = evidence_digest.bytes,
+                        .prefix = lookup_prefix,
                         .request_kind = 1,
                         .request_fn_key = draftOpenRequestKey(member),
                     };
-                    if (source_ctx.draft.nested_spec_lookup.get(lookup_address)) |candidates| {
+                    if (source_ctx.draft.nested_spec_lookup.requests.get(lookup_address)) |candidates| {
                         for (candidates.items) |raw_spec| {
                             const seen = try seen_specs.getOrPut(raw_spec);
                             if (seen.found_existing) continue;
@@ -8186,12 +8181,11 @@ const Builder = struct {
             const indexed = try indexed_nodes.getOrPut(interface_node);
             if (indexed.found_existing) continue;
             const lookup_address = DraftNestedLookupAddress{
-                .family = family,
-                .evidence_digest = evidence_digest.bytes,
+                .prefix = lookup_prefix,
                 .request_kind = 1,
                 .request_fn_key = draftOpenRequestKey(interface_node),
             };
-            const lookup_entry = try source_ctx.draft.nested_spec_lookup.getOrPut(lookup_address);
+            const lookup_entry = try source_ctx.draft.nested_spec_lookup.requests.getOrPut(lookup_address);
             if (!lookup_entry.found_existing) lookup_entry.value_ptr.* = .empty;
             try lookup_entry.value_ptr.append(self.allocator, @intCast(spec_index));
         }
@@ -8270,8 +8264,7 @@ const Builder = struct {
             const completed_fn_ty = try source_ctx.activeTypeFromNode(completed_fn_node);
             source_ctx.draft.nested_specs.items[spec_index].request_fn_ty = completed_fn_ty;
             try registerNestedSpecLookup(source_ctx.draft, self.allocator, .{
-                .family = family,
-                .evidence_digest = evidence_digest.bytes,
+                .prefix = lookup_prefix,
                 .request_kind = 0,
                 .request_fn_key = source_ctx.specializationTypeDigest(completed_fn_ty).bytes,
             }, @intCast(spec_index));
@@ -8280,8 +8273,7 @@ const Builder = struct {
             source_ctx.draft,
             self.allocator,
             source_ctx.graph,
-            family,
-            evidence_digest.bytes,
+            lookup_prefix,
             completed_fn_node,
             @intCast(spec_index),
         );
@@ -12268,7 +12260,7 @@ fn registerTemplateSpecLookup(
     address: DraftTemplateLookupAddress,
     raw_spec: u32,
 ) Allocator.Error!void {
-    const entry = try draft.template_spec_lookup.getOrPut(address);
+    const entry = try draft.template_spec_lookup.requests.getOrPut(address);
     if (!entry.found_existing) entry.value_ptr.* = .empty;
     for (entry.value_ptr.items) |existing| if (existing == raw_spec) return;
     try entry.value_ptr.append(allocator, raw_spec);
@@ -12278,8 +12270,7 @@ fn updateTemplateSpecInterfaceLookups(
     draft: *BodyDraftStore,
     allocator: Allocator,
     graph: *InstGraph,
-    family: DraftTemplateFamilyAddress,
-    evidence_digest: [32]u8,
+    lookup_prefix: DraftTemplateSpecLookup.PrefixId,
     request_fn_node: NodeId,
     raw_spec: u32,
 ) Allocator.Error!void {
@@ -12290,8 +12281,7 @@ fn updateTemplateSpecInterfaceLookups(
         const indexed = try indexed_nodes.getOrPut(interface_node);
         if (indexed.found_existing) continue;
         const address = DraftTemplateLookupAddress{
-            .family = family,
-            .evidence_digest = evidence_digest,
+            .prefix = lookup_prefix,
             .request_kind = 1,
             .request_fn_key = draftOpenRequestKey(interface_node),
         };
@@ -12316,7 +12306,7 @@ fn registerNestedSpecLookup(
     address: DraftNestedLookupAddress,
     raw_spec: u32,
 ) Allocator.Error!void {
-    const entry = try draft.nested_spec_lookup.getOrPut(address);
+    const entry = try draft.nested_spec_lookup.requests.getOrPut(address);
     if (!entry.found_existing) entry.value_ptr.* = .empty;
     for (entry.value_ptr.items) |existing| if (existing == raw_spec) return;
     try entry.value_ptr.append(allocator, raw_spec);
@@ -12326,8 +12316,7 @@ fn registerNestedSpecInterfaceLookups(
     draft: *BodyDraftStore,
     allocator: Allocator,
     graph: *InstGraph,
-    family: DraftNestedFamilyAddress,
-    evidence_digest: [32]u8,
+    lookup_prefix: DraftNestedSpecLookup.PrefixId,
     request_fn_node: NodeId,
     raw_spec: u32,
 ) Allocator.Error!void {
@@ -12338,8 +12327,7 @@ fn registerNestedSpecInterfaceLookups(
         const indexed = try indexed_nodes.getOrPut(interface_node);
         if (indexed.found_existing) continue;
         try registerNestedSpecLookup(draft, allocator, .{
-            .family = family,
-            .evidence_digest = evidence_digest,
+            .prefix = lookup_prefix,
             .request_kind = 1,
             .request_fn_key = draftOpenRequestKey(interface_node),
         }, raw_spec);
@@ -12505,19 +12493,62 @@ const DraftNestedFamilyAddress = struct {
     }
 };
 
-const DraftTemplateLookupAddress = struct {
-    family: DraftTemplateFamilyAddress,
-    evidence_digest: [32]u8,
-    request_kind: u8,
-    request_fn_key: [32]u8,
-};
+const DraftTemplateSpecLookup = DraftSpecLookup(DraftTemplateFamilyAddress);
+const DraftNestedSpecLookup = DraftSpecLookup(DraftNestedFamilyAddress);
+const DraftTemplateLookupAddress = DraftTemplateSpecLookup.Address;
+const DraftNestedLookupAddress = DraftNestedSpecLookup.Address;
 
-const DraftNestedLookupAddress = struct {
-    family: DraftNestedFamilyAddress,
-    evidence_digest: [32]u8,
-    request_kind: u8,
-    request_fn_key: [32]u8,
-};
+/// Intern the exact family/evidence prefix once per request, rather than
+/// hashing and storing it again for every permanent interface node. Prefix IDs
+/// are append-only and local to this index; reentrant lowering may grow the
+/// tables without invalidating an outer request's ID. Exact candidate checks
+/// remain authoritative after this index selects a bucket.
+fn DraftSpecLookup(comptime Family: type) type {
+    return struct {
+        const Self = @This();
+        const Prefix = struct {
+            family: Family,
+            evidence_digest: [32]u8,
+        };
+        const PrefixId = enum(u32) { _ };
+        const Address = struct {
+            prefix: PrefixId,
+            request_kind: u8,
+            request_fn_key: [32]u8,
+        };
+
+        allocator: Allocator,
+        prefixes: std.array_hash_map.Auto(Prefix, void),
+        requests: std.AutoHashMap(Address, std.ArrayList(u32)),
+
+        fn init(allocator: Allocator) Self {
+            return .{
+                .allocator = allocator,
+                .prefixes = .empty,
+                .requests = std.AutoHashMap(Address, std.ArrayList(u32)).init(allocator),
+            };
+        }
+
+        fn deinit(self: *Self) void {
+            var lists = self.requests.valueIterator();
+            while (lists.next()) |list| list.deinit(self.allocator);
+            self.requests.deinit();
+            self.prefixes.deinit(self.allocator);
+        }
+
+        fn isEmpty(self: *const Self) bool {
+            return self.prefixes.count() == 0 and self.requests.count() == 0;
+        }
+
+        fn internPrefix(self: *Self, family: Family, evidence_digest: [32]u8) Allocator.Error!PrefixId {
+            const entry = try self.prefixes.getOrPut(self.allocator, .{
+                .family = family,
+                .evidence_digest = evidence_digest,
+            });
+            return @enumFromInt(entry.index);
+        }
+    };
+}
 
 fn draftOpenRequestKey(node: NodeId) [32]u8 {
     var bytes = [_]u8{0} ** 32;
@@ -13572,7 +13603,7 @@ const BodyDraftStore = struct {
     template_specs: std.ArrayList(DraftTemplateSpec),
     sealed_template_specs: std.ArrayList(SealedTemplateSpec),
     template_spec_by_fn: collections.DenseMap(DraftFnId, u32),
-    template_spec_lookup: std.AutoHashMap(DraftTemplateLookupAddress, std.ArrayList(u32)),
+    template_spec_lookup: DraftTemplateSpecLookup,
     /// Exact checked identities bypass the general graph/digest lookup after
     /// the first closed direct call in this draft.
     closed_direct_specializations: std.AutoHashMap(ClosedDirectCallIdentity, ClosedDirectDraftSpecialization),
@@ -13603,7 +13634,7 @@ const BodyDraftStore = struct {
     stmt_impossibility_proofs: std.ArrayList(?RuntimeImpossibilityProofId),
     nested_specs: std.ArrayList(DraftNestedSpec),
     sealed_nested_specs: std.ArrayList(SealedNestedSpec),
-    nested_spec_lookup: std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)),
+    nested_spec_lookup: DraftNestedSpecLookup,
     exprs: std.ArrayList(DraftExpr),
     pats: std.ArrayList(DraftPat),
     stmts: std.ArrayList(DraftStmt),
@@ -13684,7 +13715,7 @@ const BodyDraftStore = struct {
             .template_specs = .empty,
             .sealed_template_specs = .empty,
             .template_spec_by_fn = collections.DenseMap(DraftFnId, u32).init(allocator),
-            .template_spec_lookup = std.AutoHashMap(DraftTemplateLookupAddress, std.ArrayList(u32)).init(allocator),
+            .template_spec_lookup = DraftTemplateSpecLookup.init(allocator),
             .closed_direct_specializations = std.AutoHashMap(ClosedDirectCallIdentity, ClosedDirectDraftSpecialization).init(allocator),
             .active_callable_eval_bindings = .empty,
             .active_const_node_bindings = .empty,
@@ -13713,7 +13744,7 @@ const BodyDraftStore = struct {
             .stmt_impossibility_proofs = .empty,
             .nested_specs = .empty,
             .sealed_nested_specs = .empty,
-            .nested_spec_lookup = std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)).init(allocator),
+            .nested_spec_lookup = DraftNestedSpecLookup.init(allocator),
             .exprs = .empty,
             .pats = .empty,
             .stmts = .empty,
@@ -13903,13 +13934,9 @@ const BodyDraftStore = struct {
         }
         for (self.local_proc_contexts.items) |context| self.allocator.free(context.entries);
         self.local_proc_contexts.deinit(self.allocator);
-        var template_lookup_lists = self.template_spec_lookup.valueIterator();
-        while (template_lookup_lists.next()) |list| list.deinit(self.allocator);
         self.template_spec_lookup.deinit();
         self.closed_direct_specializations.deinit();
         self.template_spec_by_fn.deinit();
-        var nested_lookup_lists = self.nested_spec_lookup.valueIterator();
-        while (nested_lookup_lists.next()) |list| list.deinit(self.allocator);
         self.nested_spec_lookup.deinit();
         self.owner_runs.deinit(self.allocator);
         self.stmt_impossibility_proofs.deinit(self.allocator);
@@ -14659,14 +14686,10 @@ const BodyDraftStore = struct {
         self.stmt_impossibility_proofs.deinit(self.allocator);
         self.stmt_impossibility_proofs = .empty;
 
-        var template_lookup_lists = self.template_spec_lookup.valueIterator();
-        while (template_lookup_lists.next()) |list| list.deinit(self.allocator);
         self.template_spec_lookup.deinit();
-        self.template_spec_lookup = std.AutoHashMap(DraftTemplateLookupAddress, std.ArrayList(u32)).init(self.allocator);
-        var nested_lookup_lists = self.nested_spec_lookup.valueIterator();
-        while (nested_lookup_lists.next()) |list| list.deinit(self.allocator);
+        self.template_spec_lookup = DraftTemplateSpecLookup.init(self.allocator);
         self.nested_spec_lookup.deinit();
-        self.nested_spec_lookup = std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)).init(self.allocator);
+        self.nested_spec_lookup = DraftNestedSpecLookup.init(self.allocator);
         self.template_spec_by_fn.deinit();
         self.template_spec_by_fn = collections.DenseMap(DraftFnId, u32).init(self.allocator);
         self.closed_direct_specializations.deinit();
@@ -14694,8 +14717,8 @@ const BodyDraftStore = struct {
             self.structural_eq_method_calls.items.len != 0 or
             self.runtime_value_demands.items.len != 0 or
             self.impossibility_proofs.items.len != 0 or
-            self.template_spec_lookup.count() != 0 or
-            self.nested_spec_lookup.count() != 0 or
+            !self.template_spec_lookup.isEmpty() or
+            !self.nested_spec_lookup.isEmpty() or
             self.template_specs.items.len != 0 or
             self.nested_specs.items.len != 0 or
             self.spec_job_workspace != null or
@@ -32918,26 +32941,24 @@ const BodyContext = struct {
         self.draft.template_specs.items[spec_index].request_fn_node = completed_node;
         const completed_spec = self.draft.template_specs.items[spec_index];
         const completed_source = self.draft.fns.items[@intFromEnum(draft_fn)].source;
-        try updateTemplateSpecInterfaceLookups(
-            self.draft,
-            self.allocator,
-            self.graph,
+        const lookup_prefix = try self.draft.template_spec_lookup.internPrefix(
             DraftTemplateFamilyAddress.init(
                 completed_spec.template_ref,
                 completed_spec.method_scope,
                 completed_spec.source_fn_key,
             ),
             completed_source.evidence_digest.bytes,
+        );
+        try updateTemplateSpecInterfaceLookups(
+            self.draft,
+            self.allocator,
+            self.graph,
+            lookup_prefix,
             completed_node,
             @intCast(spec_index),
         );
         try registerTemplateSpecLookup(self.draft, self.allocator, .{
-            .family = DraftTemplateFamilyAddress.init(
-                completed_spec.template_ref,
-                completed_spec.method_scope,
-                completed_spec.source_fn_key,
-            ),
-            .evidence_digest = completed_source.evidence_digest.bytes,
+            .prefix = lookup_prefix,
             .request_kind = 0,
             .request_fn_key = self.specializationTypeDigest(completed_ty).bytes,
         }, raw_spec);
@@ -55014,6 +55035,81 @@ test "record destructure treats a scheme-interior field as required" {
         @as(?checked.CheckedFieldKind.Tag, null),
         BodyContext.recordDestructKindFromResolution(.absent),
     );
+}
+
+test "draft specialization lookup preserves family evidence and request identity" {
+    const allocator = std.testing.allocator;
+    inline for (.{ DraftTemplateFamilyAddress, DraftNestedFamilyAddress }) |Family| {
+        const Lookup = DraftSpecLookup(Family);
+        var lookup = Lookup.init(allocator);
+        defer lookup.deinit();
+        const family = std.mem.zeroes(Family);
+        const evidence = [_]u8{0} ** 32;
+        const prefix = try lookup.internPrefix(family, evidence);
+        try std.testing.expectEqual(prefix, try lookup.internPrefix(family, evidence));
+
+        // The same bytes can name a structural type, a permanent graph node,
+        // or an open shape. Those request domains must remain disjoint.
+        const addresses = [_]Lookup.Address{
+            .{ .prefix = prefix, .request_kind = 0, .request_fn_key = @splat(0) },
+            .{ .prefix = prefix, .request_kind = 1, .request_fn_key = @splat(0) },
+            .{ .prefix = prefix, .request_kind = 2, .request_fn_key = @splat(0) },
+            .{ .prefix = prefix, .request_kind = 1, .request_fn_key = draftOpenRequestKey(@enumFromInt(1)) },
+        };
+        for (addresses, 0..) |address, raw_spec| {
+            const entry = try lookup.requests.getOrPut(address);
+            try std.testing.expect(!entry.found_existing);
+            entry.value_ptr.* = .empty;
+            try entry.value_ptr.append(allocator, @intCast(raw_spec));
+        }
+
+        // Every family qualifier and evidence byte contributes to identity.
+        // Growing the prefix table must also preserve previously issued IDs.
+        inline for (std.meta.fields(Family)) |field| {
+            const changes = if (field.type == [32]u8) 32 else 1;
+            for (0..changes) |byte| {
+                var different_family = family;
+                if (field.type == [32]u8) {
+                    @field(different_family, field.name)[byte] = 1;
+                } else if (field.type == u32) {
+                    @field(different_family, field.name) = 1;
+                } else if (field.type == bool) {
+                    @field(different_family, field.name) = true;
+                } else {
+                    @compileError("unsupported specialization family qualifier");
+                }
+                const other = try lookup.internPrefix(different_family, evidence);
+                try std.testing.expect(other != prefix);
+                var address = addresses[0];
+                address.prefix = other;
+                try std.testing.expect(lookup.requests.get(address) == null);
+                try lookup.requests.put(address, .empty);
+            }
+        }
+        for (0..evidence.len) |byte| {
+            var different_evidence = evidence;
+            different_evidence[byte] = 1;
+            const other = try lookup.internPrefix(family, different_evidence);
+            try std.testing.expect(other != prefix);
+            var address = addresses[0];
+            address.prefix = other;
+            try std.testing.expect(lookup.requests.get(address) == null);
+            try lookup.requests.put(address, .empty);
+        }
+        try std.testing.expectEqual(prefix, try lookup.internPrefix(family, evidence));
+        for (addresses, 0..) |address, raw_spec| {
+            const candidates = lookup.requests.get(address).?;
+            try std.testing.expectEqualSlices(u32, &.{@intCast(raw_spec)}, candidates.items);
+        }
+
+        lookup.deinit();
+        lookup = Lookup.init(allocator);
+        try std.testing.expect(lookup.isEmpty());
+        const fresh_prefix = try lookup.internPrefix(family, evidence);
+        var address = addresses[0];
+        address.prefix = fresh_prefix;
+        try std.testing.expect(lookup.requests.get(address) == null);
+    }
 }
 
 test "open draft recursive provenance joins fresh interface cells only while lowering" {
