@@ -972,8 +972,8 @@ generate_single_tag_union = |type_table, duplicate_tag_names, preferred_names, t
 		var $variants = ""
 		var $idx = 0
 		for tag in tu.tags {
-			snake = to_lower_snake_case(tag.name)
-			$variants = Str.concat($variants, "    ${snake} = ${U64.to_str($idx)},\n")
+			variant_ident = name_to_zig_quoted_ident(to_lower_snake_case(tag.name))
+			$variants = Str.concat($variants, "    ${variant_ident} = ${U64.to_str($idx)},\n")
 			$idx = $idx + 1
 		}
 
@@ -997,7 +997,8 @@ generate_single_tag_union = |type_table, duplicate_tag_names, preferred_names, t
 		var $enum_variants = ""
 		var $idx = 0
 		for enum_tag in tu.tags {
-			$enum_variants = Str.concat($enum_variants, "    ${enum_tag.name} = ${U64.to_str($idx)},\n")
+			variant_ident = name_to_zig_quoted_ident(enum_tag.name)
+			$enum_variants = Str.concat($enum_variants, "    ${variant_ident} = ${U64.to_str($idx)},\n")
 			$idx = $idx + 1
 		}
 
@@ -1011,9 +1012,10 @@ generate_single_tag_union = |type_table, duplicate_tag_names, preferred_names, t
 		for union_tag in tu.tags {
 			tag_layout = abi_tag_at(abi_tags, $union_tag_idx)
 			snake = to_lower_snake_case(union_tag.name)
+			field_ident = name_to_zig_quoted_ident(snake)
 			if !(abi_tag_has_payload(tag_layout)) {
 				# No-payload variant: use [0]u8 (Zig extern unions can't have void)
-				$union_fields = Str.concat($union_fields, "        ${snake}: [0]u8,\n")
+				$union_fields = Str.concat($union_fields, "        ${field_ident}: [0]u8,\n")
 			} else if List.len(union_tag.payload) == 1 {
 				zig_type = match List.first(union_tag.payload) {
 					Ok(pid) => type_id_to_zig(type_table, duplicate_tag_names, preferred_names, pid)
@@ -1021,13 +1023,13 @@ generate_single_tag_union = |type_table, duplicate_tag_names, preferred_names, t
 						crash "glue invariant violated: single-payload tag had no payload"
 					}
 				}
-				$union_fields = Str.concat($union_fields, "        ${snake}: ${zig_type},\n")
-				$accessors64 = Str.concat($accessors64, "    pub fn payload_${snake}(self: *const @This()) ${zig_type} {\n        return self.payload.${snake};\n    }\n")
+				$union_fields = Str.concat($union_fields, "        ${field_ident}: ${zig_type},\n")
+				$accessors64 = Str.concat($accessors64, "    pub fn payload_${snake}(self: *const @This()) ${zig_type} {\n        return self.payload.${field_ident};\n    }\n")
 				$accessors32 = Str.concat($accessors32, "    pub fn payload_${snake}(self: *const @This()) ${zig_type} {\n        const ptr: *const ${zig_type} = @ptrCast(@alignCast(&self.payload));\n        return ptr.*;\n    }\n")
 			} else {
 				tuple_name = "${struct_name}${capitalize_first(union_tag.name)}Payload"
-				$union_fields = Str.concat($union_fields, "        ${snake}: ${tuple_name},\n")
-				$accessors64 = Str.concat($accessors64, "    pub fn payload_${snake}(self: *const @This()) ${tuple_name} {\n        return self.payload.${snake};\n    }\n")
+				$union_fields = Str.concat($union_fields, "        ${field_ident}: ${tuple_name},\n")
+				$accessors64 = Str.concat($accessors64, "    pub fn payload_${snake}(self: *const @This()) ${tuple_name} {\n        return self.payload.${field_ident};\n    }\n")
 				$accessors32 = Str.concat($accessors32, "    pub fn payload_${snake}(self: *const @This()) ${tuple_name} {\n        const ptr: *const ${tuple_name} = @ptrCast(@alignCast(&self.payload));\n        return ptr.*;\n    }\n")
 			}
 			$union_tag_idx = $union_tag_idx + 1
@@ -1167,7 +1169,7 @@ release_policy_for_type_id = |type_table, duplicate_tag_names, preferred_names, 
 					} else {
 						"${tag_union_struct_name(preferred_names, duplicate_tag_names, type_id, tu)}Release"
 					}
-			}
+				}
 		_ => ""
 	}
 }
@@ -1192,10 +1194,10 @@ type_ident_zig = |type_table, duplicate_tag_names, preferred_names, type_id|
 				name_to_struct_name(rec.name)
 			}
 		RocTagUnion(tu) =>
-			# Mirrors `resolve_tag_union_type`, except a single-variant union
-			# resolves through its payload's fragment: that function can return
-			# a rendered type such as `RocList(RocStr)`, which is not an
-			# identifier.
+		# Mirrors `resolve_tag_union_type`, except a single-variant union
+		# resolves through its payload's fragment: that function can return
+		# a rendered type such as `RocList(RocStr)`, which is not an
+		# identifier.
 			match TypeTable.single_variant_payload(tu) {
 				SinglePayload(payload_id) => type_ident_zig(type_table, duplicate_tag_names, preferred_names, payload_id)
 				SingleNoPayload => "Type${U64.to_str(type_id)}"
@@ -1344,9 +1346,10 @@ generate_record_refcount_methods = |type_table, duplicate_tag_names, preferred_n
 generate_tag_payload_refcount_branch : TypeTable, List(Str), TypeNamePlan.PreferredNames, TagVariant, AbiTagLayout, Str -> Str
 generate_tag_payload_refcount_branch = |type_table, duplicate_tag_names, preferred_names, tag, abi_tag, mode| {
 	snake = to_lower_snake_case(tag.name)
+	variant_ident = name_to_zig_quoted_ident(tag.name)
 
 	if !abi_tag_has_payload(abi_tag) {
-		return "        .${tag.name} => {},\n"
+		return "        .${variant_ident} => {},\n"
 	}
 
 	if List.len(tag.payload) == 1 {
@@ -1364,9 +1367,9 @@ generate_tag_payload_refcount_branch = |type_table, duplicate_tag_names, preferr
 			}
 
 		if body == "" {
-			"        .${tag.name} => {},\n"
+			"        .${variant_ident} => {},\n"
 		} else {
-			"        .${tag.name} => {\n${indent_lines(body, "    ")}        },\n"
+			"        .${variant_ident} => {\n${indent_lines(body, "    ")}        },\n"
 		}
 	} else {
 		var $statements = ""
@@ -1383,9 +1386,9 @@ generate_tag_payload_refcount_branch = |type_table, duplicate_tag_names, preferr
 		}
 
 		if $statements == "" {
-			"        .${tag.name} => {},\n"
+			"        .${variant_ident} => {},\n"
 		} else {
-			"        .${tag.name} => {\n        const payload = value.payload_${snake}();\n${$statements}        },\n"
+			"        .${variant_ident} => {\n        const payload = value.payload_${snake}();\n${$statements}        },\n"
 		}
 	}
 }
@@ -1772,7 +1775,8 @@ expect name_to_camel("Echo.line!") == "echoLine"
 ## Checks `name_to_camel` for this representative case.
 expect name_to_camel("PartDef.Idx.get!") == "partDefIdxGet"
 
-## Quote a Roc record field as a Zig identifier without changing its name.
+## Quote a Roc-derived name as a Zig identifier without changing its identity.
+## Keep raw names separate when composing prefixed identifiers such as accessors.
 name_to_zig_quoted_ident : Str -> Str
 name_to_zig_quoted_ident = |name| "@\"${name}\""
 

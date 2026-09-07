@@ -459,6 +459,7 @@ const CustomCase = enum {
     glue_rust_returned_list_elements,
     glue_rust_payload_free_tag_union_names,
     glue_zig_bang_record_fields,
+    glue_zig_keyword_tag_names,
     glue_package_nominal_api_alias,
     glue_nominal_canonical_field,
     glue_unlisted_hosted_declaration,
@@ -932,6 +933,7 @@ const glue_cases = [_]CliCase{
     .{ .id = 0, .suite = .glue, .name = "issue 10451: RustGlue releases list elements returned from a provided entrypoint", .body = .{ .custom = .glue_rust_returned_list_elements } },
     .{ .id = 0, .suite = .glue, .name = "issue 11197: generated Rust names only declared types for a payload-free tag union", .body = .{ .custom = .glue_rust_payload_free_tag_union_names } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: ZigGlue quotes bang record fields", .body = .{ .custom = .glue_zig_bang_record_fields } },
+    .{ .id = 0, .suite = .glue, .name = "issue 11196: ZigGlue emits parseable Zig for tags named after Zig keywords", .body = .{ .custom = .glue_zig_keyword_tag_names } },
     .{ .id = 0, .suite = .glue, .name = "issue 9865: RustGlue does not panic for package nominal record API alias", .body = .{ .custom = .glue_package_nominal_api_alias } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: nominal scalar field resolves canonical backing", .body = .{ .custom = .glue_nominal_canonical_field } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: platform hosted declaration missing from the hosted section stops without panic", .body = .{ .custom = .glue_unlisted_hosted_declaration } },
@@ -2967,6 +2969,7 @@ fn runCustomCase(
         .glue_rust_returned_list_elements => customGlueRustReturnedListElements(io, allocator, &env, &timer, timeout_ms),
         .glue_rust_payload_free_tag_union_names => customGlueRustPayloadFreeTagUnionNames(io, allocator, &env, &timer, timeout_ms),
         .glue_zig_bang_record_fields => customGlueZigBangRecordFieldNames(io, allocator, &env, &timer, timeout_ms),
+        .glue_zig_keyword_tag_names => customGlueZigKeywordTagNames(io, allocator, &env, &timer, timeout_ms),
         .glue_package_nominal_api_alias => customGluePackageNominalApiAlias(io, allocator, &env, &timer, timeout_ms),
         .glue_nominal_canonical_field => customGlueNominalCanonicalField(io, allocator, &env, &timer, timeout_ms),
         .glue_unlisted_hosted_declaration => customGlueUnlistedHostedDeclaration(io, allocator, &env, &timer, timeout_ms),
@@ -3485,8 +3488,8 @@ const hot_reload_host_c_source =
     \\
     \\extern uint64_t roc_main(uint64_t);
 ++ "\nextern void *" ++ shim_symbols.roc_shim_get_ops ++ "(void);" ++
-    "\nextern void " ++ BuiltinFn.erased_callable_incref.symbolName() ++ "(unsigned char *, intptr_t, void *);" ++
-    "\nextern void " ++ BuiltinFn.erased_callable_decref.symbolName() ++ "(unsigned char *, void *);\n" ++
+    "\nextern void hot_reload_host_incref(unsigned char *, intptr_t, void *);" ++
+    "\nextern void hot_reload_host_decref(unsigned char *, void *);\n" ++
     \\
     \\#ifndef ROC_TARGET_NAME
     \\#error "ROC_TARGET_NAME must be defined"
@@ -3558,10 +3561,10 @@ const hot_reload_host_c_source =
     \\void roc_host_store_boxed(unsigned char *boxed) {
 ++ "\n    void *ops = " ++ shim_symbols.roc_shim_get_ops ++ "();\n" ++
     \\    if (stored_boxed != NULL) {
-++ "\n        " ++ BuiltinFn.erased_callable_decref.symbolName() ++ "(stored_boxed, ops);\n" ++
+++ "\n        hot_reload_host_decref(stored_boxed, ops);\n" ++
     \\    }
     \\    if (boxed != NULL) {
-++ "\n        " ++ BuiltinFn.erased_callable_incref.symbolName() ++ "(boxed, 1, ops);\n" ++
+++ "\n        hot_reload_host_incref(boxed, 1, ops);\n" ++
     \\    }
     \\    stored_boxed = boxed;
     \\}
@@ -3574,9 +3577,9 @@ const hot_reload_host_c_source =
 ++ "\n    void *ops = " ++ shim_symbols.roc_shim_get_ops ++ "();\n" ++
     \\    if (stored_boxed == NULL) return 1;
     \\    if (retained_boxed != NULL) {
-++ "\n        " ++ BuiltinFn.erased_callable_decref.symbolName() ++ "(retained_boxed, ops);\n" ++
+++ "\n        hot_reload_host_decref(retained_boxed, ops);\n" ++
     \\    }
-++ "\n    " ++ BuiltinFn.erased_callable_incref.symbolName() ++ "(stored_boxed, 1, ops);\n" ++
+++ "\n    hot_reload_host_incref(stored_boxed, 1, ops);\n" ++
     \\    retained_boxed = stored_boxed;
     \\    return 0;
     \\}
@@ -3847,7 +3850,7 @@ const hot_reload_host_c_source =
     \\    printf("boxed-wide-old-after-shrink:%lld\n", (long long)old_wide_result);
     \\    fflush(stdout);
     \\    if (old_wide_result != 159) return 1;
-++ "\n    " ++ BuiltinFn.erased_callable_decref.symbolName() ++ "(retained_boxed, " ++ shim_symbols.roc_shim_get_ops ++ "());\n" ++
+++ "\n    hot_reload_host_decref(retained_boxed, " ++ shim_symbols.roc_shim_get_ops ++ "());\n" ++
     \\    retained_boxed = NULL;
     \\
     \\    if (write_app(app_path, app_const_thirteen)) return 1;
@@ -3856,7 +3859,7 @@ const hot_reload_host_c_source =
     \\    printf("boxed-old-after-reload:%lld\n", (long long)old_boxed_result);
     \\    fflush(stdout);
     \\    if (old_boxed_result != 12) return 1;
-++ "\n    " ++ BuiltinFn.erased_callable_decref.symbolName() ++ "(stored_boxed, " ++ shim_symbols.roc_shim_get_ops ++ "());\n" ++
+++ "\n    hot_reload_host_decref(stored_boxed, " ++ shim_symbols.roc_shim_get_ops ++ "());\n" ++
     \\    stored_boxed = NULL;
     \\    puts("boxed-released");
     \\    fflush(stdout);
@@ -3982,6 +3985,10 @@ fn customHotReloadDevShim(
         return customInfraFailure(allocator, timer, "failed to allocate host C path: {}", .{err});
     const host_o_path = std.fs.path.join(allocator, &.{ target_dir, "host.o" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate host object path: {}", .{err});
+    const host_rc_path = std.fs.path.join(allocator, &.{ target_dir, "host_rc.o" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate host RC object path: {}", .{err});
+    const host_rc_emit_arg = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{host_rc_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate host RC output argument: {}", .{err});
     const host_lib_path = std.fs.path.join(allocator, &.{ target_dir, "libhost.a" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate host archive path: {}", .{err});
     const target_arg = std.fmt.allocPrint(allocator, "--target={s}", .{target.roc_target}) catch |err|
@@ -4027,10 +4034,28 @@ fn customHotReloadDevShim(
 
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
         "zig",
+        "build-obj",
+        "-target",
+        target.zig_target,
+        "-OReleaseFast",
+        "-fno-compiler-rt",
+        "--dep",
+        "erased_callable",
+        "-Mroot=test/cli/hot_reload_host_rc.zig",
+        "--dep",
+        "tracy",
+        "-Merased_callable=src/builtins/erased_callable.zig",
+        "-Mtracy=src/build/tracy.zig",
+        host_rc_emit_arg,
+    }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+
+    if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
+        "zig",
         "ar",
         "rcs",
         host_lib_path,
         host_o_path,
+        host_rc_path,
     }, project_root_path, .{ .args = &.{} })) |failure| return failure;
 
     const child_timeout_ms = childCommandTimeoutMs(timer, timeout_ms) orelse
@@ -9446,7 +9471,7 @@ fn customGlueTryBoxModelUnknownPayload(io: std.Io, allocator: Allocator, env: *c
     // generated comptime checks. A zero-sized unknown payload would collapse the
     // tag offset to 0 at both widths, so these needles pin the fix in place.
     for ([_][]const u8{
-        "        ok: RocBox,",
+        "        @\"ok\": RocBox,",
         "if (@sizeOf(Init_for_hostResult) != 16) @compileError",
         "if (@offsetOf(Init_for_hostResult, \"tag\") != 8) @compileError",
         "if (@sizeOf(Init_for_hostResult) != 8) @compileError",
@@ -10309,6 +10334,30 @@ fn customGlueZigBangRecordFieldNames(io: std.Io, allocator: Allocator, env: *con
         return customInfraFailure(allocator, timer, "failed to allocate emit flag: {}", .{err});
 
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", generated_path, emit_flag }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    return null;
+}
+
+fn customGlueZigKeywordTagNames(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    const output_dir = createWorkSubdir(io, allocator, env, "glue-keyword-tags-out") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create glue output dir: {}", .{err});
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "glue", "src/glue/src/ZigGlue.roc", output_dir, "test/glue/zig-keyword-tags/main.roc" },
+        .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } },
+    })) |failure| return failure;
+
+    const generated_path = std.fs.path.join(allocator, &.{ output_dir, "roc_platform_abi.zig" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Zig path: {}", .{err});
+    const abi_module_arg = std.fmt.allocPrint(allocator, "-Mabi={s}", .{generated_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Zig ABI module arg: {}", .{err});
+
+    // Exports force analysis of accessor bodies, including the native union
+    // representation and the 32-bit byte-storage representation.
+    for ([_][]const u8{ "x86_64-linux-musl", "wasm32-freestanding" }) |target| {
+        if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
+            "zig",   "build-obj", "-fno-emit-bin",                                      "-target",      target,
+            "--dep", "abi",       "-Mroot=test/glue/zig_keyword_tags_compile_lock.zig", abi_module_arg,
+        }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    }
     return null;
 }
 

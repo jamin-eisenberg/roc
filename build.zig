@@ -5576,6 +5576,14 @@ pub fn build(b: *std.Build) void {
         });
     }
 
+    if (main_exe_result.machine_code_shim_archive_test) |archive_test| {
+        test_suites.register(.{
+            .step_suffix = "machine-code-shim-archive",
+            .description = "Run machine-code shim archive contract tests",
+            .compile = archive_test,
+        });
+    }
+
     if (main_exe_result.machine_code_shim_archive_check) |machine_code_shim_archive_check| {
         run_check_machine_code_shim_archive_step.dependOn(machine_code_shim_archive_check);
     }
@@ -6311,8 +6319,14 @@ pub fn build(b: *std.Build) void {
     // Only supported on Linux ARM64, matching CI's coverage runner. Other local
     // targets still keep the run-coverage-parser step, but it reports unsupported
     // instead of invoking a kcov binary that cannot trace reliably on that host.
+    //
+    // Declaring these steps is also what asks zig for the lazy kcov package, so
+    // on linux-aarch64 even a build that only wants the roc binary fails without
+    // it. -Dcoverage=false skips the declaration, which is how a packager builds
+    // roc without supplying kcov at all.
+    const enable_coverage = b.option(bool, "coverage", "Declare the kcov coverage steps, which is what pulls in the kcov dependency (default: true; only has an effect on linux-aarch64)") orelse true;
     const is_linux_arm64 = target.result.os.tag == .linux and target.result.cpu.arch == .aarch64;
-    const is_coverage_supported = is_linux_arm64;
+    const is_coverage_supported = is_linux_arm64 and enable_coverage;
     if (is_coverage_supported and isNativeishOrMusl(target)) {
         // Get the kcov dependency and build it from source
         // lazyDependency returns null on first pass; Zig re-runs build() after fetching
@@ -6506,7 +6520,7 @@ pub fn build(b: *std.Build) void {
                     std.debug.print("=" ** 60 ++ "\n", .{});
                     std.debug.print("COVERAGE NOT SUPPORTED\n", .{});
                     std.debug.print("=" ** 60 ++ "\n\n", .{});
-                    std.debug.print("kcov parser coverage is currently enabled only on Linux ARM64.\n", .{});
+                    std.debug.print("kcov parser coverage is currently enabled only on Linux ARM64, and only when -Dcoverage is left on.\n", .{});
                     std.debug.print("Current platform: {s}\n\n", .{@tagName(builtin.target.os.tag)});
                     std.debug.print("=" ** 60 ++ "\n", .{});
                 }
@@ -7278,10 +7292,75 @@ fn wasmObjectArtifact(b: *std.Build, obj: *Step.Compile) std.Build.LazyPath {
     return obj.getEmittedBinDirectory().path(b, zcu_name);
 }
 
+/// The run shim uses builtin function addresses directly. It must not link the
+/// exported builtins payload used by compiled object output: those exports would
+/// expose compiler internals to the platform linker.
+fn addMachineCodeShimLib(
+    b: *std.Build,
+    roc_modules: modules.RocModules,
+    target: ResolvedTarget,
+    optimize: OptimizeMode,
+    strip: bool,
+    omit_frame_pointer: ?bool,
+    shim_host_abi_module: *std.Build.Module,
+    compiled_builtins_module: *std.Build.Module,
+    write_compiled_builtins: *Step.WriteFile,
+) *Step.Compile {
+    const machine_code_shim_lib = b.addLibrary(.{
+        .name = "roc_machine_code_shim",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/machine_code_shim/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .strip = strip,
+            .omit_frame_pointer = omit_frame_pointer,
+            .pic = true,
+        }),
+        .linkage = .static,
+    });
+    configureBackend(machine_code_shim_lib, target);
+    // Only the modules the shim actually imports. The full compiler module set
+    // would put libc in the shim's dependency graph (the bundle module links
+    // zstd), and `link_libc` is resolved over the whole graph regardless of
+    // which modules are reachable from the root source file.
+    machine_code_shim_lib.root_module.addImport("base", roc_modules.base);
+    machine_code_shim_lib.root_module.addImport("backend", roc_modules.backend);
+    machine_code_shim_lib.root_module.addImport("builtins", roc_modules.builtins);
+    // The machine-code runtime needs Boxy support, not the interpreter's
+    // assembly trampoline. Keep the same Zig dependencies without attaching
+    // that unrelated globally-exported assembly object to the archive.
+    const shim_eval = b.createModule(.{ .root_source_file = b.path("src/eval/mod.zig") });
+    var eval_imports = roc_modules.eval.import_table.iterator();
+    while (eval_imports.next()) |entry| shim_eval.addImport(entry.key_ptr.*, entry.value_ptr.*);
+    machine_code_shim_lib.root_module.addImport("eval", shim_eval);
+    machine_code_shim_lib.root_module.addImport("ipc", roc_modules.ipc);
+    machine_code_shim_lib.root_module.addImport("lir", roc_modules.lir);
+    machine_code_shim_lib.root_module.addImport("vendor_parse_float", roc_modules.vendor_parse_float);
+    machine_code_shim_lib.root_module.addImport("vendor_ryu", roc_modules.vendor_ryu);
+    machine_code_shim_lib.root_module.addImport("shim_io", b.createModule(.{
+        .root_source_file = b.path("src/shim_io.zig"),
+    }));
+    machine_code_shim_lib.root_module.addImport("shim_host_abi", shim_host_abi_module);
+    machine_code_shim_lib.root_module.addImport("compiled_builtins", compiled_builtins_module);
+    machine_code_shim_lib.step.dependOn(&write_compiled_builtins.step);
+    // The shim defines its compiler-private stack probe internally. Do not
+    // bundle the complete compiler-rt object: its broad set of weak definitions
+    // can participate in platform symbol resolution, and COFF rejects duplicate
+    // definitions of memcpy and the integer/float libcalls outright.
+    machine_code_shim_lib.bundle_compiler_rt = false;
+    // Linux IO uses direct syscalls. Do not pull Zig's libc-dependent IO
+    // implementation into the archive. Codegen's C memory/math libcalls are
+    // declared separately by the archive's target ABI contract.
+    if (target.result.os.tag == .linux) machine_code_shim_lib.root_module.link_libc = false;
+
+    return machine_code_shim_lib;
+}
+
 const MainExeResult = struct {
     exe: *Step.Compile,
     machine_code_shim_test: ?*Step.Compile,
     machine_code_shim_archive_check: ?*Step,
+    machine_code_shim_archive_test: ?*Step.Compile,
 };
 fn addMainExe(
     b: *std.Build,
@@ -7481,52 +7560,11 @@ fn addMainExe(
     copy_interpreter_shim.addCopyFileToSource(interpreter_shim_lib.getEmittedBin(), b.pathJoin(&.{ "src/cli", interpreter_shim_filename }));
     exe.step.dependOn(&copy_interpreter_shim.step);
 
-    // Create machine-code shim static library for dev backend run images.
-    const machine_code_shim_lib = b.addLibrary(.{
-        .name = "roc_machine_code_shim",
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/machine_code_shim/main.zig"),
-            .target = target,
-            .optimize = optimize,
-            .strip = strip,
-            .omit_frame_pointer = omit_frame_pointer,
-            .pic = true,
-        }),
-        .linkage = .static,
-    });
-    configureBackend(machine_code_shim_lib, target);
-    // Only the modules the shim actually imports. The full compiler module set
-    // would put libc in the shim's dependency graph (the bundle module links
-    // zstd), and `link_libc` is resolved over the whole graph regardless of
-    // which modules are reachable from the root source file.
-    machine_code_shim_lib.root_module.addImport("base", roc_modules.base);
-    machine_code_shim_lib.root_module.addImport("backend", roc_modules.backend);
-    machine_code_shim_lib.root_module.addImport("builtins", roc_modules.builtins);
-    machine_code_shim_lib.root_module.addImport("eval", roc_modules.eval);
-    machine_code_shim_lib.root_module.addImport("ipc", roc_modules.ipc);
-    machine_code_shim_lib.root_module.addImport("lir", roc_modules.lir);
-    machine_code_shim_lib.root_module.addImport("vendor_parse_float", roc_modules.vendor_parse_float);
-    machine_code_shim_lib.root_module.addImport("vendor_ryu", roc_modules.vendor_ryu);
-    machine_code_shim_lib.root_module.addImport("shim_io", b.addModule("shim_io_machine_code", .{
-        .root_source_file = b.path("src/shim_io.zig"),
-    }));
-    machine_code_shim_lib.root_module.addImport("shim_host_abi", shim_host_abi_module);
-    machine_code_shim_lib.root_module.addImport("compiled_builtins", compiled_builtins_module);
-    machine_code_shim_lib.step.dependOn(&write_compiled_builtins.step);
-    machine_code_shim_lib.root_module.addObjectFile(builtins_obj.getEmittedBin());
-    // The shim defines its compiler-private stack probe internally. Do not
-    // bundle the complete compiler-rt object: its broad set of weak definitions
-    // can participate in platform symbol resolution, and COFF rejects duplicate
-    // definitions of memcpy and the integer/float libcalls outright.
-    machine_code_shim_lib.bundle_compiler_rt = false;
-    // On Linux the shim reaches the kernel directly, so the executables it is
-    // linked into need no libc. Declaring that here makes the Zig compiler
-    // enforce it: any new libc dependency in the shim's module graph becomes a
-    // compile error rather than an undefined symbol at the user's link step.
-    if (target.result.os.tag == .linux) machine_code_shim_lib.root_module.link_libc = false;
+    const machine_code_shim_lib = addMachineCodeShimLib(b, roc_modules, target, optimize, strip, omit_frame_pointer, shim_host_abi_module, compiled_builtins_module, write_compiled_builtins);
 
     var machine_code_shim_test_for_registry: ?*Step.Compile = null;
     var machine_code_shim_archive_check_for_registry: ?*Step = null;
+    var machine_code_shim_archive_test_for_registry: ?*Step.Compile = null;
     if (add_machine_code_shim_test) {
         const machine_code_shim_test = b.addTest(.{
             .name = "machine_code_shim",
@@ -7563,33 +7601,111 @@ fn addMainExe(
         machine_code_shim_test.bundle_compiler_rt = true;
         add_tracy(b, roc_modules.build_options, machine_code_shim_test, b.graph.host, false, flag_enable_tracy);
         machine_code_shim_test_for_registry = machine_code_shim_test;
-
-        // Run mode hands the linker the platform's own inputs plus this shim
-        // and nothing else. Check that compiler-private support does not escape
-        // the shim object as an undefined or global symbol. The checker reads
-        // ELF archive members directly.
-        if (target.result.ofmt == .elf) {
-            const machine_code_shim_archive_check = b.addExecutable(.{
-                .name = "machine_code_shim_archive_check",
-                .root_module = b.createModule(.{
-                    .root_source_file = b.path("src/machine_code_shim/archive_check.zig"),
-                    .target = b.graph.host,
-                    .optimize = .Debug,
-                }),
-            });
-            configureBackend(machine_code_shim_archive_check, b.graph.host);
-            const run_machine_code_shim_archive_check = b.addRunArtifact(machine_code_shim_archive_check);
-            run_machine_code_shim_archive_check.addFileArg(machine_code_shim_lib.getEmittedBin());
-            machine_code_shim_archive_check_for_registry = &run_machine_code_shim_archive_check.step;
-        }
     }
 
-    const install_machine_code_shim = b.addInstallArtifact(machine_code_shim_lib, .{});
+    // Build-time only: validate the exact archive that will be installed and
+    // embedded. This executable is never linked into Roc or a user's program.
+    const archive_checker = b.addExecutable(.{
+        .name = "machine_code_shim_archive_check",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/machine_code_shim/archive_check.zig"),
+            .target = b.graph.host,
+            .optimize = .ReleaseSafe,
+        }),
+    });
+    archive_checker.root_module.addAnonymousImport("shim_symbols", .{
+        .root_source_file = b.path("src/builtins/shim_symbols.zig"),
+    });
+    configureBackend(archive_checker, b.graph.host);
+    const check_archive = b.addRunArtifact(archive_checker);
+    check_archive.addArg(@tagName(target.result.os.tag));
+    check_archive.addFileArg(machine_code_shim_lib.getEmittedBin());
+    const machine_code_shim_filename = if (target.result.os.tag == .windows) "roc_machine_code_shim.lib" else "libroc_machine_code_shim.a";
+    const checked_machine_code_shim = check_archive.addOutputFileArg(machine_code_shim_filename);
+    machine_code_shim_archive_check_for_registry = &check_archive.step;
+
+    // Cross-check every shipped native ABI from any developer host. No target
+    // executable is run: the host checker reads each target's object format.
+    if (add_machine_code_shim_test) {
+        const checks = b.step("check-machine-code-shim-targets", "Check all shipped shim symbol contracts");
+        checks.dependOn(&check_archive.step);
+        const queries = [_]std.Target.Query{
+            .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl },
+            .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl },
+            .{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .gnu },
+            .{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu },
+            .{ .cpu_arch = .x86_64, .os_tag = .macos },
+            .{ .cpu_arch = .aarch64, .os_tag = .macos },
+            .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .gnu },
+            .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .gnu },
+            .{ .cpu_arch = .x86_64, .os_tag = .windows, .abi = .msvc },
+            .{ .cpu_arch = .aarch64, .os_tag = .windows, .abi = .msvc },
+        };
+        for (queries) |query| {
+            const cross_target = b.resolveTargetQuery(query);
+            if (target.result.cpu.arch == cross_target.result.cpu.arch and
+                target.result.os.tag == cross_target.result.os.tag and
+                target.result.abi == cross_target.result.abi) continue;
+            const cross_shim = addMachineCodeShimLib(b, roc_modules, cross_target, optimize, strip, omit_frame_pointer, shim_host_abi_module, compiled_builtins_module, write_compiled_builtins);
+            add_tracy(b, roc_modules.build_options, cross_shim, b.graph.host, false, flag_enable_tracy);
+            const check_cross = b.addRunArtifact(archive_checker);
+            check_cross.addArg(@tagName(cross_target.result.os.tag));
+            check_cross.addFileArg(cross_shim.getEmittedBin());
+            _ = check_cross.addOutputFileArg(if (cross_target.result.os.tag == .windows) "roc_machine_code_shim.lib" else "libroc_machine_code_shim.a");
+            checks.dependOn(&check_cross.step);
+        }
+        // Link real COFF consumers with deliberate platform/private collisions.
+        // Both target ABIs must accept the prepared archive and its rebuilt index.
+        for ([_]std.Target.Cpu.Arch{ .x86_64, .aarch64 }) |arch| {
+            const fixture_target = b.resolveTargetQuery(.{ .cpu_arch = arch, .os_tag = .windows, .abi = .msvc });
+            const fixture = b.addLibrary(.{
+                .name = "shim_contract_fixture",
+                .linkage = .static,
+                .root_module = b.createModule(.{ .target = fixture_target, .optimize = .Debug, .link_libc = false }),
+            });
+            fixture.root_module.addCSourceFile(.{ .file = b.path("src/machine_code_shim/test/private_symbols.c") });
+            fixture.bundle_compiler_rt = false;
+            const prepare_fixture = b.addRunArtifact(archive_checker);
+            prepare_fixture.addArg("windows");
+            prepare_fixture.addFileArg(fixture.getEmittedBin());
+            const prepared_fixture = prepare_fixture.addOutputFileArg("shim.lib");
+            const consumer = b.addExecutable(.{
+                .name = "shim_contract_consumer",
+                .root_module = b.createModule(.{ .target = fixture_target, .optimize = .Debug, .link_libc = false }),
+            });
+            consumer.root_module.addCSourceFile(.{ .file = b.path("src/machine_code_shim/test/private_symbols_host.c") });
+            consumer.root_module.addObjectFile(prepared_fixture);
+            consumer.bundle_compiler_rt = false;
+            consumer.entry = .{ .symbol_name = "mainCRTStartup" };
+            consumer.subsystem = .Console;
+            checks.dependOn(&consumer.step);
+            if (b.graph.host.result.os.tag == .windows and b.graph.host.result.cpu.arch == arch) {
+                const run_consumer = b.addRunArtifact(consumer);
+                checks.dependOn(&run_consumer.step);
+            }
+        }
+        const checker_tests = b.addTest(.{
+            .name = "machine_code_shim_archive",
+            .root_module = b.createModule(.{
+                .root_source_file = b.path("src/machine_code_shim/archive_check.zig"),
+                .target = b.graph.host,
+                .optimize = .ReleaseSafe,
+                .imports = &.{.{ .name = "shim_symbols", .module = roc_modules.shim_symbols }},
+            }),
+            .filters = test_filters,
+        });
+        machine_code_shim_archive_test_for_registry = checker_tests;
+        configureBackend(checker_tests, b.graph.host);
+        const run_checker_tests = b.addRunArtifact(checker_tests);
+        checks.dependOn(&run_checker_tests.step);
+        machine_code_shim_archive_check_for_registry = checks;
+    }
+
+    const install_machine_code_shim = b.addInstallLibFile(checked_machine_code_shim, machine_code_shim_filename);
     b.getInstallStep().dependOn(&install_machine_code_shim.step);
 
     const copy_machine_code_shim = b.addUpdateSourceFiles();
-    const machine_code_shim_filename = if (target.result.os.tag == .windows) "roc_machine_code_shim.lib" else "libroc_machine_code_shim.a";
-    copy_machine_code_shim.addCopyFileToSource(machine_code_shim_lib.getEmittedBin(), b.pathJoin(&.{ "src/cli", machine_code_shim_filename }));
+    copy_machine_code_shim.addCopyFileToSource(checked_machine_code_shim, b.pathJoin(&.{ "src/cli", machine_code_shim_filename }));
     exe.step.dependOn(&copy_machine_code_shim.step);
 
     // Copy builtins object for the host target for embedding into CLI
@@ -7907,6 +8023,7 @@ fn addMainExe(
         .exe = exe,
         .machine_code_shim_test = machine_code_shim_test_for_registry,
         .machine_code_shim_archive_check = machine_code_shim_archive_check_for_registry,
+        .machine_code_shim_archive_test = machine_code_shim_archive_test_for_registry,
     };
 }
 

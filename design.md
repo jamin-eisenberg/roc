@@ -1716,6 +1716,24 @@ alias arguments, but references to the annotated value consume the annotation
 root. This is how alias spelling from annotations is preserved without making
 alias roots union-find representatives for concrete structures.
 
+### Where Method Annotations
+
+A where method's type is the complete annotation written after its colon.
+Parsing retains that annotation node, and canonicalization produces one type
+annotation root for checking, ownership, documentation, and serialization.
+`a.method : _` leaves the whole method type to inference; `a.method : () -> _`
+requires a nullary pure function. Parentheses and transparent type aliases keep
+their ordinary annotation meaning. A nullary function signature always includes
+its arrow; a bare result type is not shorthand for a nullary function.
+
+The annotation root's type variable is also the static-dispatch constraint's
+callable variable. Checking declares that identity before completing owned
+constraints, then generates its type through ordinary annotation generation and
+unification. It allocates no second callable placeholder or bridging relation.
+Inference holes retain the existing body-checking and generalization rules, and
+the named method's static-dispatch constraint is preserved even when its type
+is incomplete.
+
 ## Nominal Constructor Backing Relation
 
 An explicit nominal constructor chooses the nominal wrapper itself. Its operand
@@ -3928,6 +3946,53 @@ not take a separate Lambda Mono or LIR-lowering route. Size and speed builds do
 not bypass Lambda Solved. All modes therefore consume the same Monotype type
 identities, the same Lambda Solved callable information, and the same direct
 Solved-to-LIR representation decisions.
+
+### Self-Tail Return Continuations
+
+LIR construction owns ordinary self-tail-call proofs. Each procedure builder
+records exact self-call sites and join definitions as statements are emitted,
+including producer-owned placeholder replacements. After producer fixups,
+finalization resolves only the recorded calls' return continuations. Shared
+suffixes are memoized by statement identity; forwarding cycles do not prove a
+return. The query has no candidate or path-length limit and never walks unrelated
+control flow. Both Solved and Boxy lowering use this same construction contract.
+
+A proven continuation returns the call's value unchanged through explicit
+returns, jumps, lexical joins, identity references, join-parameter forwarding
+writes, and Boxy moves whose explicit adapter operation is `relabel`. It contains
+no intervening effect, failure, constructor, or materializing representation
+adaptation. Calls with an additional runtime descriptor output need a proof for
+that output too; value-only forwarding does not authorize their elimination.
+Return-destination reuse metadata is not a tail-position proof.
+
+The producer records a linked list of proven sites in the call nodes and a
+fresh loop join identity in the procedure. Body shards relocate these statement
+references with the rest of the body. Ordinary TCE consumes the list directly:
+it replaces each call node with simultaneous argument transfer followed by a
+loop jump. It never splices a predecessor, overwrites a shared return terminal,
+duplicates a continuation, or consults TRMC's constructor candidate limits.
+All actual arguments, including hidden captures and dictionaries, participate
+in the transfer. The transfer scheduler indexes destinations once per procedure
+and reuses its arrays across sites and procedures; the destination map remains
+local to each procedure so unrelated local IDs do not widen its storage. It emits
+writes only after their destinations have no remaining readers, then breaks each
+remaining cycle with one temporary. Identity writes are omitted. The first write
+or jump occupies the original call row, preserving its source metadata without
+allocating an unused head statement. ARC runs afterward and owns every resulting
+RC operation.
+
+Frame inventories are already complete, unique, and sorted. TCE preserves the
+original span when it creates no locals. Otherwise, monotonically allocated
+fresh locals append after the original inventory without sorting or deduplication.
+The producer's stack-probe requirement is preserved; only added locals need to be
+checked for an additional requirement.
+
+Constructor rewriting retains its separate value-use and shared-path proof.
+Mixed procedures use one loop for both kinds of recursive site; ordinary tails
+preserve the current hole, and constructor sites advance it. Return epilogues
+remain present for every surviving return, including returns shared with paths
+that do not recurse. Later producers that expose new self-tail sites must
+record the same continuation proof rather than relying on downstream discovery.
 
 The explicit `InlineMode` controls the optional specialization work:
 
@@ -10603,6 +10668,17 @@ resource per rc node reachable in its committed layout or dynamic descriptor:
 - the captures resource of a `closure` / `erased_callable`
 - the top-level and payload resources described by a boxy `TypeDesc`
 
+ARC classifies each local from its committed layout once into a dense
+representation table. Descriptor presence does not imply refcounted storage:
+concrete field-presence slots can carry descriptors while containing only scalar
+payloads. Constructors and aliases preserve the RC shape already recorded in
+layouts; classification does not propagate resource bits through statements.
+The solver retains the representation table as its borrow-anchor domain, while
+emission shares it until the first capture-view exclusion requires a private
+copy. The certifier uses
+the same classification rule on the final LIR store and independently checks
+ownership; it does not reuse the pre-emission table or inferred balances.
+
 An `erased_capture_load` target whose aggregate contains an `erased_box` is
 explicitly a borrowed view into the executing callable's capture allocation.
 The committed aggregate layout identifies the dynamic fields it may project,
@@ -11403,6 +11479,15 @@ payload contains all refcounted data of the active variant, or an individual
 tag-payload field is that payload struct's sole refcounted field. The tag read's
 variant and discriminant metadata is the explicit proof of the active shape;
 no layout shape is treated as evidence that a variant is active.
+
+Certification tracks field claims over the full committed layout field-index
+domain. Scalar and padding fields require no RC claims, regardless
+of their indices. The required claim set is derived once per queried layout from
+its committed RC fields. Path states keep the first word inline and share sparse
+persistent words for higher indices; forks and outcome-restitution receipts retain
+exact prior sets. Join comparison and memo hashing use field-set contents rather
+than snapshot addresses. A container's unit is spent only when its claims equal
+the complete required set, with every field claim validated against that set.
 
 Ownership-complete aggregate reads and borrowed pure aliases form explicit
 ownership places. The place graph is solved to a fixpoint, so a nested read
@@ -13126,6 +13211,22 @@ then compares the resulting defined and undefined global symbol sets with the
 checked platform contract. An unexpected definition, an unresolved builtin or
 compiler-rt call, or an undeclared host requirement is a compiler error; it is
 never passed through to the platform linker as a best-effort import.
+
+The prebuilt machine-code run shim has the same explicit dependency boundary,
+verified when building Roc itself. Before an archive can be installed or
+embedded, the archive verifier checks every ELF, Mach-O, or COFF global symbol
+against the shim's declared exports, host runtime/table imports, and target
+C/OS ABI dependencies. Weak and hidden globals are checked too. COFF preparation
+localizes compiler-owned definitions, removes their COMDAT participation, and
+rebuilds the archive index from the public roots before verification; symbol
+indices and relocations remain intact. Unknown helpers, extra exports, missing entrypoints, and malformed
+or uninspectable archives fail the build. This check is unconditional across
+optimization modes and runs only in Roc's build graph: neither the released
+compiler nor user executables contain or execute the verifier. The focused
+archive test cross-builds all shipped native architectures and object formats.
+Compiler-private cache synchronization and stack probing are local to the
+shim; exported builtins payloads and the interpreter's assembly trampoline
+are not machine-code run-shim inputs.
 
 Every object-format address embedded in compiler-owned code or data remains a
 relocation through this boundary. In particular, Wasm function pointers are

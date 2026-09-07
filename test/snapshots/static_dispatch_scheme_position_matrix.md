@@ -144,9 +144,9 @@ EndOfFile,
 				(ty (name "I128")))
 			(where
 				(method (mod-of "a") (name "to_i128")
-					(args
-						(ty-var (raw "a")))
-					(ty (name "I128")))))
+					(ty-fn
+						(ty-var (raw "a"))
+						(ty (name "I128"))))))
 		(s-decl
 			(p-ident (raw "via_arg"))
 			(e-lambda
@@ -169,9 +169,9 @@ EndOfFile,
 				(ty (name "I128")))
 			(where
 				(method (mod-of "a") (name "to_i128")
-					(args
-						(ty-var (raw "a")))
-					(ty (name "I128")))))
+					(ty-fn
+						(ty-var (raw "a"))
+						(ty (name "I128"))))))
 		(s-decl
 			(p-ident (raw "via_data"))
 			(e-lambda
@@ -205,9 +205,9 @@ EndOfFile,
 				(ty-var (raw "a")))
 			(where
 				(method (mod-of "a") (name "gen")
-					(args
-						(ty-record))
-					(ty-var (raw "a")))))
+					(ty-fn
+						(ty-record)
+						(ty-var (raw "a"))))))
 		(s-decl
 			(p-ident (raw "gen"))
 			(e-lambda
@@ -233,13 +233,13 @@ EndOfFile,
 				(ty (name "Str")))
 			(where
 				(method (mod-of "a") (name "parse")
-					(args
-						(ty (name "Str")))
-					(ty-var (raw "a")))
+					(ty-fn
+						(ty (name "Str"))
+						(ty-var (raw "a"))))
 				(method (mod-of "a") (name "show")
-					(args
-						(ty-var (raw "a")))
-					(ty (name "Str")))))
+					(ty-fn
+						(ty-var (raw "a"))
+						(ty (name "Str"))))))
 		(s-decl
 			(p-ident (raw "parse_show"))
 			(e-lambda
@@ -312,7 +312,7 @@ roundtrip = parse_show("hi")
 		(e-lambda
 			(args
 				(p-assign (ident "x")))
-			(e-dispatch-call (method "to_i128") (constraint-fn-var 339)
+			(e-dispatch-call (method "to_i128") (constraint-fn-var 340)
 				(receiver
 					(e-lookup-local
 						(p-assign (ident "x"))))
@@ -323,12 +323,12 @@ roundtrip = parse_show("hi")
 				(ty-lookup (name "I128") (builtin)))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "to_i128")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
-					(ty-lookup (name "I128") (builtin))))))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
+						(ty-lookup (name "I128") (builtin)))))))
 	(d-let
 		(p-assign (ident "ok_arg"))
-		(e-call (constraint-fn-var 352)
+		(e-call (constraint-fn-var 353)
 			(e-lookup-local
 				(p-assign (ident "via_arg")))
 			(e-typed-int (value "5") (type "U8"))))
@@ -371,9 +371,9 @@ roundtrip = parse_show("hi")
 				(ty-lookup (name "I128") (builtin)))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "to_i128")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
-					(ty-lookup (name "I128") (builtin))))))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
+						(ty-lookup (name "I128") (builtin)))))))
 	(d-let
 		(p-assign (ident "ok_data"))
 		(e-call (constraint-fn-var 399)
@@ -397,12 +397,12 @@ roundtrip = parse_show("hi")
 				(ty-rigid-var (name "a")))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "gen")
-					(args
-						(ty-record))
-					(ty-rigid-var-lookup (ty-rigid-var (name "a")))))))
+					(ty-fn (effectful false)
+						(ty-record)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))))))
 	(d-let
 		(p-assign (ident "unpinned_ret"))
-		(e-call (constraint-fn-var 423)
+		(e-call (constraint-fn-var 422)
 			(e-lookup-local
 				(p-assign (ident "gen")))
 			(e-empty_record)))
@@ -417,7 +417,7 @@ roundtrip = parse_show("hi")
 				(s-let
 					(p-assign (ident "v"))
 					(e-runtime-error (tag "erroneous_value_expr")))
-				(e-dispatch-call (method "show") (constraint-fn-var 432)
+				(e-dispatch-call (method "show") (constraint-fn-var 431)
 					(receiver
 						(e-lookup-local
 							(p-assign (ident "v"))))
@@ -428,13 +428,13 @@ roundtrip = parse_show("hi")
 				(ty-lookup (name "Str") (builtin)))
 			(where
 				(method (ty-rigid-var (name "a")) (name "parse")
-					(args
-						(ty-lookup (name "Str") (builtin)))
-					(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
+					(ty-fn (effectful false)
+						(ty-lookup (name "Str") (builtin))
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))))
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "show")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
-					(ty-lookup (name "Str") (builtin))))))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))
+						(ty-lookup (name "Str") (builtin)))))))
 	(d-let
 		(p-assign (ident "roundtrip"))
 		(e-runtime-error (tag "erroneous_value_expr"))))
