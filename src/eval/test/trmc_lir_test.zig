@@ -564,13 +564,15 @@ fn runProcU64Args(
 ) TrmcLirTestError!u64 {
     var interp = try eval.Interpreter.init(allocator, store, layouts, runtime_env.get_ops(), .preserve);
     defer interp.deinit();
-    const arg_layouts = [_]layout.Idx{.u64} ** 4;
-    var packed_args: [4]u64 = undefined;
-    @memcpy(packed_args[0..args.len], args);
+    const arg_layouts = try allocator.alloc(layout.Idx, args.len);
+    defer allocator.free(arg_layouts);
+    @memset(arg_layouts, .u64);
+    const packed_args = try allocator.dupe(u64, args);
+    defer allocator.free(packed_args);
     const result = try interp.eval(.{
         .proc_id = proc,
-        .arg_layouts = arg_layouts[0..args.len],
-        .arg_ptr = @ptrCast(&packed_args),
+        .arg_layouts = arg_layouts,
+        .arg_ptr = @ptrCast(packed_args.ptr),
     });
     return result.value.read(u64);
 }
@@ -1345,7 +1347,13 @@ test "tce has no site or forwarding-depth cap and preserves a shared base return
     const sites = try builder.finish(&store);
     store.getProcSpecPtr(proc).tail_calls = sites;
     store.tail_call_builder = null;
+    const frame_before = store.getProcSpec(proc).frame_locals;
+    const stmts_before = store.cfStmtCount();
     try lir.Trmc.run(&store, &layouts);
+    try std.testing.expectEqualDeep(frame_before, store.getProcSpec(proc).frame_locals);
+    // Each call row becomes a parameter write and needs only a fresh jump.
+    // The loop entry adds one join and one jump, with no orphan heads.
+    try std.testing.expectEqual(branches.len + 2, store.cfStmtCount() - stmts_before);
     try std.testing.expectEqual(LIR.TailTransform.tce, store.getProcSpec(proc).tail_transform);
     try std.testing.expect(!(try hasSelfCall(allocator, &store, proc)));
     try std.testing.expect(store.getCFStmt(ret) == .ret);
@@ -1530,6 +1538,7 @@ test "tce parallel transfers preserve every small source graph" {
         const sites = try builder.finish(&store);
         store.getProcSpecPtr(proc).tail_calls = sites;
         store.tail_call_builder = null;
+        const frame_before = store.getProcSpec(proc).frame_locals;
         const locals_before = store.localCount();
         try lir.Trmc.run(&store, &layouts);
         const has_cycle = (sources[0] == 1 and sources[1] == 0) or
@@ -1538,6 +1547,15 @@ test "tce parallel transfers preserve every small source graph" {
             (sources[0] == 1 and sources[1] == 2 and sources[2] == 0) or
             (sources[0] == 2 and sources[2] == 1 and sources[1] == 0);
         try std.testing.expectEqual(@as(usize, @intFromBool(has_cycle)), store.localCount() - locals_before);
+        const frame_after = store.getProcSpec(proc).frame_locals;
+        if (has_cycle) {
+            const frame = store.getLocalSpan(frame_after);
+            try std.testing.expectEqual(b.locals.items.len + 1, frame.len);
+            for (b.locals.items, 0..) |local, index| try std.testing.expectEqual(local, GuardedList.at(frame, index));
+            try std.testing.expectEqual(@as(LocalId, @enumFromInt(locals_before)), GuardedList.at(frame, frame.len - 1));
+        } else {
+            try std.testing.expectEqualDeep(frame_before, frame_after);
+        }
         try lir.Arc.insert(&store, &layouts, .{});
         for ([_]u64{ 1, 2, 7 }) |iterations| {
             var expected = [_]u64{ 11, 17, 23, 31 };
@@ -1550,4 +1568,132 @@ test "tce parallel transfers preserve every small source graph" {
         }
         try runtime_env.checkForLeaks();
     }
+}
+
+test "tce reuses scratch across shrinking and growing procedure frames" {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, base.target.TargetUsize.native);
+    defer layouts.deinit();
+    var runtime_env = RuntimeHostEnv.init(allocator);
+    defer runtime_env.deinit();
+
+    const widths = [_]usize{ 8, 0, 3, 12, 1 };
+    var procs: [widths.len]LIR.LirProcSpecId = undefined;
+    var frames: [widths.len]LIR.LocalSpan = undefined;
+    for (widths, &procs, &frames) |width, *proc, *frame| {
+        var b = ProcBuilder.init(&store);
+        defer b.deinit(allocator);
+        var arg_buffer: [13]LocalId = undefined;
+        const args = arg_buffer[0 .. width + 1];
+        for (args) |*arg| arg.* = try b.addLocal(allocator, .u64);
+        proc.* = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .args = try store.addLocalSpan(args),
+            .ret_layout = .u64,
+            // An explicit requirement must survive even when the pass adds
+            // no locals. It is never downgraded based on the new locals alone.
+            .stack_probe = .required,
+        });
+        var builder = lir.TailCallBuilder.init(allocator, proc.*);
+        defer builder.deinit();
+        store.tail_call_builder = &builder;
+        defer store.tail_call_builder = null;
+        const result = try b.addLocal(allocator, .u64);
+        const one = try b.addLocal(allocator, .u64);
+        const remaining = try b.addLocal(allocator, .u64);
+        const base_case = try store.addCFStmt(.{ .ret = .{ .value = args[0] } });
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+        var call_buffer: [13]LocalId = undefined;
+        const call_args = call_buffer[0 .. width + 1];
+        for (call_args[0..width], 0..) |*arg, index| arg.* = args[(index + 1) % width];
+        call_args[width] = remaining;
+        const call = try store.addCFStmt(.{ .assign_call = .{
+            .target = result,
+            .proc = proc.*,
+            .args = try store.addLocalSpan(call_args),
+            .next = ret,
+        } });
+        var recur = try lowLevelStmt(&store, remaining, .num_int_sub_wrap, &.{ args[width], one }, call);
+        recur = try store.addCFStmt(.{ .assign_literal = .{
+            .target = one,
+            .value = .{ .i64_literal = .{ .value = 1, .layout_idx = .u64 } },
+            .next = recur,
+        } });
+        store.getProcSpecPtr(proc.*).body = try store.addCFStmt(.{ .switch_stmt = .{
+            .cond = args[width],
+            .branches = try store.addCFSwitchBranches(&.{.{ .value = 0, .body = base_case }}),
+            .default_branch = recur,
+        } });
+        frame.* = try store.addLocalSpan(b.locals.items);
+        store.getProcSpecPtr(proc.*).frame_locals = frame.*;
+        const sites = try builder.finish(&store);
+        store.getProcSpecPtr(proc.*).tail_calls = sites;
+    }
+    try lir.Trmc.run(&store, &layouts);
+    for (widths, procs, frames) |width, proc, old_frame| {
+        const spec = store.getProcSpec(proc);
+        try std.testing.expectEqual(LIR.TailTransform.tce, spec.tail_transform);
+        try std.testing.expectEqual(LIR.StackProbe.required, spec.stack_probe);
+        const frame = store.getLocalSpan(spec.frame_locals);
+        const old = store.getLocalSpan(old_frame);
+        try std.testing.expectEqual(old.len + @intFromBool(width > 1), frame.len);
+        for (0..old.len) |index| try std.testing.expectEqual(GuardedList.at(old, index), GuardedList.at(frame, index));
+        for (1..frame.len) |index| try std.testing.expect(@intFromEnum(GuardedList.at(frame, index - 1)) < @intFromEnum(GuardedList.at(frame, index)));
+    }
+    try lir.Arc.insert(&store, &layouts, .{});
+    for (widths, procs) |width, proc| {
+        var inputs: [13]u64 = undefined;
+        for (inputs[0..width], 0..) |*value, index| value.* = 11 + index;
+        for ([_]usize{ 0, 1, 2, width + 1 }) |iterations| {
+            inputs[width] = iterations;
+            const expected: u64 = if (width == 0) 0 else 11 + iterations % width;
+            try std.testing.expectEqual(expected, try runProcU64Args(allocator, &store, &layouts, proc, &runtime_env, inputs[0 .. width + 1]));
+        }
+    }
+    try runtime_env.checkForLeaks();
+}
+
+test "tce emits an identity loop directly into the original call" {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, base.target.TargetUsize.native);
+    defer layouts.deinit();
+    var b = ProcBuilder.init(&store);
+    defer b.deinit(allocator);
+    const arg = try b.addLocal(allocator, .u64);
+    const result = try b.addLocal(allocator, .u64);
+    const proc = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(&.{arg}),
+        .frame_locals = try store.addLocalSpan(b.locals.items),
+        .ret_layout = .u64,
+    });
+    var builder = lir.TailCallBuilder.init(allocator, proc);
+    defer builder.deinit();
+    store.tail_call_builder = &builder;
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+    const loc: base.SourceLoc = .{ .file = 0, .line = 7, .column = 3 };
+    store.current_loc = loc;
+    const call = try store.addCFStmt(.{ .assign_call = .{
+        .target = result,
+        .proc = proc,
+        .args = try store.addLocalSpan(&.{arg}),
+        .next = ret,
+    } });
+    store.current_loc = .none;
+    store.getProcSpecPtr(proc).body = call;
+    const sites = try builder.finish(&store);
+    store.getProcSpecPtr(proc).tail_calls = sites;
+    store.tail_call_builder = null;
+    const stmts_before = store.cfStmtCount();
+    try lir.Trmc.run(&store, &layouts);
+    try std.testing.expectEqual(stmts_before + 2, store.cfStmtCount());
+    try std.testing.expectEqualDeep(loc, store.stmtLoc(call));
+    const join = store.getCFStmt(store.getProcSpec(proc).body.?).join;
+    try std.testing.expectEqual(call, join.body);
+    try std.testing.expectEqual(join.id, store.getCFStmt(call).jump.target);
+    try std.testing.expect(store.getCFStmt(ret) == .ret);
 }

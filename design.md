@@ -3847,10 +3847,19 @@ loop jump. It never splices a predecessor, overwrites a shared return terminal,
 duplicates a continuation, or consults TRMC's constructor candidate limits.
 All actual arguments, including hidden captures and dictionaries, participate
 in the transfer. The transfer scheduler indexes destinations once per procedure
-and reuses its storage at each site. It emits writes only after their destinations
-have no remaining readers, then breaks each remaining cycle with one temporary.
-Identity writes are omitted. ARC runs afterward and owns every resulting RC
-operation.
+and reuses its arrays across sites and procedures; the destination map remains
+local to each procedure so unrelated local IDs do not widen its storage. It emits
+writes only after their destinations have no remaining readers, then breaks each
+remaining cycle with one temporary. Identity writes are omitted. The first write
+or jump occupies the original call row, preserving its source metadata without
+allocating an unused head statement. ARC runs afterward and owns every resulting
+RC operation.
+
+Frame inventories are already complete, unique, and sorted. TCE preserves the
+original span when it creates no locals. Otherwise, monotonically allocated
+fresh locals append after the original inventory without sorting or deduplication.
+The producer's stack-probe requirement is preserved; only added locals need to be
+checked for an additional requirement.
 
 Constructor rewriting retains its separate value-use and shared-path proof.
 Mixed procedures use one loop for both kinds of recursive site; ordinary tails

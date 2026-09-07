@@ -1139,6 +1139,8 @@ pub const LirProcSpec = struct {
     erased_reuse_arg: ?LocalId = null,
     /// Packed explicit-argument layout required by the erased-callable ABI.
     erased_call_args: ?ErasedCallArgsPlanId = null,
+    /// Complete producer-authored inventory, unique and sorted by LocalId.
+    /// Passes adding fresh locals must preserve this ordering.
     frame_locals: LocalSpan = LocalSpan.empty(),
     join_points: JoinPointSpan = JoinPointSpan.empty(),
     body: ?CFStmtId = null,
