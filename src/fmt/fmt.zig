@@ -1608,7 +1608,7 @@ const Formatter = struct {
             .field_access => |fa| {
                 const receiver_expr = fmt.ast.store.getExpr(fa.receiver);
                 const flatten_pipe_receiver = receiver_expr == .arrow_call and multiline;
-                const parenthesize_receiver = (receiver_expr == .arrow_call and !flatten_pipe_receiver) or fmt.exprIsNumericAccessReceiver(fa.receiver);
+                const parenthesize_receiver = (receiver_expr == .arrow_call and !flatten_pipe_receiver) or fmt.postfixReceiverNeedsParens(fa.receiver);
                 const expand_parenthesized_receiver = receiver_expr == .arrow_call and
                     fmt.nodeWillBeMultiline(AST.Expr.Idx, fa.receiver);
                 const receiver = if (parenthesize_receiver)
@@ -1652,7 +1652,7 @@ const Formatter = struct {
             .method_call => |mc| {
                 const left_expr = fmt.ast.store.getExpr(mc.receiver);
                 const flatten_pipe_receiver = left_expr == .arrow_call and multiline;
-                const parenthesize_receiver = (left_expr == .arrow_call and !flatten_pipe_receiver) or fmt.exprIsNumericAccessReceiver(mc.receiver);
+                const parenthesize_receiver = (left_expr == .arrow_call and !flatten_pipe_receiver) or fmt.postfixReceiverNeedsParens(mc.receiver);
                 const expand_parenthesized_receiver = left_expr == .arrow_call and
                     fmt.nodeWillBeMultiline(AST.Expr.Idx, mc.receiver);
                 const receiver = if (parenthesize_receiver)
@@ -1821,7 +1821,7 @@ const Formatter = struct {
                 const items = fmt.ast.store.exprSlice(t.items);
                 const layout = fmt.ast.store.getCollectionLayout(ei);
                 if (items.len == 1 and layout == .compact) {
-                    const group_multiline = fmt.regionHasInteriorComment(t.region) or fmt.groupedExprWillBeMultiline(items[0]);
+                    const group_multiline = fmt.tupleWillBeMultiline(ei, t);
                     _ = try fmt.formatParenthesizedExpr(t.region, items[0], group_multiline);
                 } else {
                     try fmt.formatCollection(region, layout, .round, AST.Expr.Idx, items, Formatter.formatExpr);
@@ -1830,7 +1830,7 @@ const Formatter = struct {
             .tuple_access => |ta| {
                 const receiver_expr = fmt.ast.store.getExpr(ta.expr);
                 const flatten_pipe_receiver = receiver_expr == .arrow_call and multiline;
-                const parenthesize_receiver = (receiver_expr == .arrow_call and !flatten_pipe_receiver) or fmt.exprIsNumericAccessReceiver(ta.expr);
+                const parenthesize_receiver = (receiver_expr == .arrow_call and !flatten_pipe_receiver) or fmt.postfixReceiverNeedsParens(ta.expr);
                 if (parenthesize_receiver) try fmt.push('(');
                 const target = try fmt.formatExprWithInfo(ta.expr);
                 _ = try fmt.continueAfterMultilineStringLine(target);
@@ -3912,12 +3912,55 @@ const Formatter = struct {
         try fmt.pushVerbatim(text);
     }
 
-    fn exprIsNumericAccessReceiver(fmt: *Formatter, expr_idx: AST.Expr.Idx) bool {
-        const expr = fmt.ast.store.getExpr(expr_idx);
-        const tag = std.meta.activeTag(expr);
-        if (tag == .int or tag == .frac or tag == .typed_int or tag == .typed_frac) return true;
-        if (tag == .unary_op) return fmt.exprIsNumericAccessReceiver(expr.unary_op.expr);
-        return false;
+    // Pipe-target grouping is not stored as a tuple node. Restore parentheses
+    // when attaching a postfix to an expression whose grammar would otherwise
+    // absorb that postfix into its operand or body. Numeric receivers also need
+    // parentheses to keep the dot from becoming part of the numeric token.
+    // Pipe receivers have their own continuation/grouping rule at the call sites.
+    fn postfixReceiverNeedsParens(fmt: *Formatter, expr_idx: AST.Expr.Idx) bool {
+        return switch (fmt.ast.store.getExpr(expr_idx)) {
+            .int,
+            .frac,
+            .typed_int,
+            .typed_frac,
+            .bin_op,
+            .unary_op,
+            .lambda,
+            .if_then_else,
+            .if_without_else,
+            .dbg,
+            .crash,
+            .@"return",
+            .for_expr,
+            => true,
+            .ident,
+            .tag,
+            .single_quote,
+            .string_part,
+            .string,
+            .typed_string,
+            .multiline_string,
+            .typed_multiline_string,
+            .list,
+            .tuple,
+            .record,
+            .record_builder,
+            .nominal_record,
+            .apply,
+            .nominal_apply,
+            .record_updater,
+            .field_access,
+            .method_call,
+            .tuple_access,
+            .suffix_single_question,
+            .arrow_call,
+            .match,
+            .block,
+            .ellipsis,
+            .@"break",
+            .malformed,
+            => false,
+        };
     }
 
     fn exprCanStartPipeTargetUnparenthesized(fmt: *Formatter, expr_idx: AST.Expr.Idx) bool {
@@ -3964,6 +4007,18 @@ const Formatter = struct {
         };
     }
 
+    // Compact singleton tuples are grouping parentheses. Predict their emitted
+    // layout, which discards source-only line breaks inside the grouped expression.
+    fn tupleWillBeMultiline(fmt: *Formatter, idx: AST.Expr.Idx, tuple: @FieldType(AST.Expr, "tuple")) bool {
+        const items = fmt.ast.store.exprSlice(tuple.items);
+        const layout = fmt.ast.store.getCollectionLayout(idx);
+        if (items.len == 1 and layout == .compact) {
+            return fmt.regionHasInteriorComment(tuple.region) or fmt.groupedExprWillBeMultiline(items[0]);
+        }
+        return layout == .expanded or fmt.regionHasInteriorComment(tuple.region) or
+            fmt.nodesWillBeMultiline(AST.Expr.Idx, items);
+    }
+
     fn groupedExprWillBeMultiline(fmt: *Formatter, expr_idx: AST.Expr.Idx) bool {
         const expr = fmt.ast.store.getExpr(expr_idx);
         if (expr == .method_call) {
@@ -3984,8 +4039,7 @@ const Formatter = struct {
             .block, .multiline_string, .typed_multiline_string => true,
             .list => |l| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
                 fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(l.items)),
-            .tuple => |t| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
-                fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(t.items)),
+            .tuple => |t| fmt.tupleWillBeMultiline(expr_idx, t),
             .apply => |a| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
                 fmt.groupedExprWillBeMultiline(a.@"fn") or
                 fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(a.args)),
@@ -4070,8 +4124,7 @@ const Formatter = struct {
                         fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(l.items));
                 },
                 .tuple => |t| {
-                    return fmt.ast.store.getCollectionLayout(item) == .expanded or
-                        fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(t.items));
+                    return fmt.tupleWillBeMultiline(item, t);
                 },
                 .apply => |a| {
                     if (fmt.ast.store.getCollectionLayout(item) == .expanded) return true;
@@ -5047,6 +5100,26 @@ test "literal method pipe targets and grouped result calls format stably" {
     );
 }
 
+test "issue 11160: pipe method receivers preserve expression grouping" {
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "t=0|>(0%0).y()", .expected = "t = 0 |> (0 % 0).y()\n" },
+        .{ .input = "t=x|>(a+b).y()", .expected = "t = x |> (a + b).y()\n" },
+        .{ .input = "t=x|>(-a).y()", .expected = "t = x |> (-a).y()\n" },
+        .{ .input = "t=x|>(|v|v).y()", .expected = "t = x |> (|v| v).y()\n" },
+        .{ .input = "t=x|>(if a b else c).y()", .expected = "t = x |> (if a b else c).y()\n" },
+        .{ .input = "t=x|>(dbg a).y()", .expected = "t = x |> (dbg a).y()\n" },
+        .{ .input = "t=x|>(crash \"failed\").y()", .expected = "t = x |> (crash \"failed\").y()\n" },
+        .{ .input = "t=x|>((a+b).y())", .expected = "t = x |> ((a + b).y())\n" },
+        .{ .input = "t=x|>(a+b).field.y()", .expected = "t = x |> (a + b).field.y()\n" },
+        .{ .input = "t=x|>(a+b).0.y()", .expected = "t = x |> (a + b).0.y()\n" },
+    };
+    for (cases) |case| {
+        const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
+        defer std.testing.allocator.free(result);
+        try std.testing.expectEqualStrings(case.expected, result);
+    }
+}
+
 test "formatter preserves an old arrow's postfix grouping during migration" {
     const result = try moduleFmtsStable(std.testing.allocator, "a=foo->bar(baz).blah()", false);
     defer std.testing.allocator.free(result);
@@ -5508,6 +5581,22 @@ test "trailing commas explicitly control collection layout" {
         },
     };
 
+    for (cases) |case| {
+        const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
+        defer std.testing.allocator.free(result);
+        try std.testing.expectEqualStrings(case.expected, result);
+    }
+}
+
+test "issue 11176: grouped expression layout follows formatted children" {
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "a=(||||||(0\n.0))", .expected = "a = (|| || || ((0).0))\n" },
+        .{ .input = "a=((0\n.0))", .expected = "a = (((0).0))\n" },
+        .{ .input = "a=[(0\n.0)]", .expected = "a = [((0).0)]\n" },
+        .{ .input = "a=f((0\n.0))", .expected = "a = f(((0).0))\n" },
+        .{ .input = "a=((# comment\n0))", .expected = "a = (\n\t( # comment\n\t\t0\n\t)\n)\n" },
+        .{ .input = "a=((0,))", .expected = "a = (\n\t(\n\t\t0,\n\t)\n)\n" },
+    };
     for (cases) |case| {
         const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
         defer std.testing.allocator.free(result);

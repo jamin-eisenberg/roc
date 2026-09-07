@@ -582,6 +582,10 @@ pub const SpecializationCounters = specialize.Counters;
 
 /// Deterministic counts for body-context, type-instantiation, and call work.
 pub const BodyDiagnostics = struct {
+    /// Nested specialization candidate-index probes and candidates examined.
+    nested_lookup_probes: u64 = 0,
+    /// Entries examined while mapping draft functions to committed identities.
+    draft_commit_lookup_steps: u64 = 0,
     graphs_created: u64 = 0,
     body_contexts_created: u64 = 0,
     instantiation_scopes_created: u64 = 0,
@@ -7945,6 +7949,8 @@ const Builder = struct {
         else
             source_ctx.activeCodecContractContext();
         const family = DraftNestedFamilyAddress.init(nested, source_ctx.method_scope.key, source_fn_key);
+        self.countBodyDiagnostic("nested_lookup_probes");
+        const family_exists = source_ctx.draft.nested_spec_families.contains(family);
         const stored_evidence = try self.constFnEvidence(requested_evidence);
         const evidence_digest = Ast.fnEvidenceDigest(stored_evidence.nodes, stored_evidence.frames, stored_evidence.head);
         const resolved_request_ty: ?Type.TypeId = if (try source_ctx.graph.typeIsResolved(request_fn_node))
@@ -7975,6 +7981,7 @@ const Builder = struct {
         if (resolved_lookup_address) |address| {
             if (source_ctx.draft.nested_spec_lookup.requests.get(address)) |candidates| {
                 for (candidates.items) |raw_spec| {
+                    self.countBodyDiagnostic("nested_lookup_probes");
                     const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                     if (signature_relation == .exact_graph and
                         source_ctx.draft.fns.items[@intFromEnum(spec.fn_id)].signature_relation != .exact_graph)
@@ -7993,10 +8000,11 @@ const Builder = struct {
                 }
             }
         }
-        if (selection.selected() == null) {
+        if (family_exists and selection.selected() == null) {
             if (open_shape_lookup_address) |address| {
                 if (source_ctx.draft.nested_spec_lookup.requests.get(address)) |candidates| {
                     for (candidates.items) |raw_spec| {
+                        self.countBodyDiagnostic("nested_lookup_probes");
                         const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                         if (spec.state != .lowered) continue;
                         if (spec.request_fn_ty != null) continue;
@@ -8016,12 +8024,13 @@ const Builder = struct {
                 }
             }
         }
-        if (selection.selected() == null) {
+        if (family_exists and selection.selected() == null) {
             var interface = try source_ctx.graph.functionInterfaceClassIterator(request_fn_node);
             defer interface.deinit();
             while (try interface.next()) |interface_class| {
                 var aliases = source_ctx.graph.classMemberIterator(interface_class);
                 while (aliases.next()) |member| {
+                    self.countBodyDiagnostic("nested_lookup_probes");
                     const lookup_address = DraftNestedLookupAddress{
                         .prefix = lookup_prefix,
                         .request_kind = 1,
@@ -8029,6 +8038,7 @@ const Builder = struct {
                     };
                     if (source_ctx.draft.nested_spec_lookup.requests.get(lookup_address)) |candidates| {
                         for (candidates.items) |raw_spec| {
+                            self.countBodyDiagnostic("nested_lookup_probes");
                             const seen = try seen_specs.getOrPut(raw_spec);
                             if (seen.found_existing) continue;
                             const spec = &source_ctx.draft.nested_specs.items[raw_spec];
@@ -8069,7 +8079,7 @@ const Builder = struct {
         // A checked recursive reference whose fresh cells have not yet joined
         // any interface class above names the in-progress specialization of
         // the same site on its own ownership chain.
-        if (selection.selected() == null and recursive_reference) {
+        if (family_exists and selection.selected() == null and recursive_reference) {
             for (source_ctx.draft.nested_specs.items, 0..) |*spec, raw_spec_usize| {
                 if (spec.state != .lowering) continue;
                 if (spec.request_fn_ty != null) continue;
@@ -8138,6 +8148,7 @@ const Builder = struct {
             return .{ .draft = spec.fn_id };
         }
         self.count("nested_misses");
+        try source_ctx.draft.nested_spec_families.put(family, {});
 
         const fn_id = try source_ctx.draft.addFn(.{ .source = .{
             .fn_def = .{ .nested = nested },
@@ -9375,13 +9386,6 @@ const Builder = struct {
         const identities = try self.allocator.alloc(?Ast.SpecIdentity, body_draft.fns.items.len);
         defer self.allocator.free(identities);
         @memset(identities, null);
-        const allow_imported = try self.allocator.alloc(bool, body_draft.fns.items.len);
-        defer self.allocator.free(allow_imported);
-        @memset(allow_imported, false);
-        const allow_identity_merge = try self.allocator.alloc(bool, body_draft.fns.items.len);
-        defer self.allocator.free(allow_identity_merge);
-        @memset(allow_identity_merge, true);
-
         for (body_draft.sealed_nested_specs.items) |*spec| {
             spec.sealed_codec_contract = if (spec.codec_contract) |contract|
                 self.codecContractIdentity(.{
@@ -9394,12 +9398,30 @@ const Builder = struct {
                 null;
         }
 
+        // These sealed tables no longer change during commit. Index their
+        // producer-authored function ids once rather than searching per body.
+        var template_by_fn = collections.DenseMap(DraftFnId, *const SealedTemplateSpec).init(self.allocator);
+        defer template_by_fn.deinit();
+        for (body_draft.sealed_template_specs.items) |*spec| {
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            try template_by_fn.put(spec.fn_id, spec);
+        }
+        var nested_by_fn = collections.DenseMap(DraftFnId, *const SealedNestedSpec).init(self.allocator);
+        defer nested_by_fn.deinit();
+        for (body_draft.sealed_nested_specs.items) |*spec| {
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            try nested_by_fn.put(spec.fn_id, spec);
+        }
+        var prior_identities = std.AutoHashMap(specialize.SpecLookupAddress, u32).init(self.allocator);
+        defer prior_identities.deinit();
+        const previous_same_identity = try self.allocator.alloc(?u32, body_draft.fns.items.len);
+        defer self.allocator.free(previous_same_identity);
+
         var next_fn: u32 = @intCast(self.program.fnCount());
         for (body_draft.fns.items, 0..) |fn_, raw_index| {
             const draft_id: DraftFnId = @enumFromInt(@as(u32, @intCast(raw_index)));
-            const template_spec: ?*const SealedTemplateSpec = for (body_draft.sealed_template_specs.items) |*spec| {
-                if (spec.fn_id == draft_id) break spec;
-            } else null;
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            const template_spec = template_by_fn.get(draft_id);
             if (template_spec) |spec| {
                 if (spec.state == .resolved) {
                     fn_slots[raw_index] = spec.resolved_slot orelse
@@ -9419,6 +9441,8 @@ const Builder = struct {
                 .head = fn_.source.const_evidence_frame_head,
             };
             var identity: ?Ast.SpecIdentity = null;
+            var allow_imported = false;
+            var allow_identity_merge = true;
             var lexical_owner: ?DraftOwner = null;
             if (template_spec) |spec| {
                 if (!spec.local_context_dependent) {
@@ -9442,28 +9466,25 @@ const Builder = struct {
                     );
                 }
                 lexical_owner = spec.lexical_owner;
-                allow_imported[raw_index] = !spec.requires_local;
-                allow_identity_merge[raw_index] = !spec.requires_local;
+                allow_imported = !spec.requires_local;
+                allow_identity_merge = !spec.requires_local;
             }
             if (identity == null) {
-                for (body_draft.sealed_nested_specs.items) |spec| {
-                    if (spec.fn_id == draft_id) {
-                        if (!spec.local_context_dependent) {
-                            identity = nestedSpecIdentity(
-                                spec.nested,
-                                spec.method_scope,
-                                spec.source_fn_key,
-                                sealed_template.evidence_digest,
-                                spec.capture_abi_digest,
-                                spec.sealed_codec_contract,
-                                fn_ty,
-                                digest,
-                            );
-                        }
-                        lexical_owner = spec.lexical_owner;
-                        allow_identity_merge[raw_index] = !spec.requires_local;
-                        break;
+                if (nested_by_fn.get(draft_id)) |spec| {
+                    if (!spec.local_context_dependent) {
+                        identity = nestedSpecIdentity(
+                            spec.nested,
+                            spec.method_scope,
+                            spec.source_fn_key,
+                            sealed_template.evidence_digest,
+                            spec.capture_abi_digest,
+                            spec.sealed_codec_contract,
+                            fn_ty,
+                            digest,
+                        );
                     }
+                    lexical_owner = spec.lexical_owner;
+                    allow_identity_merge = !spec.requires_local;
                 }
             }
             identities[raw_index] = identity;
@@ -9488,10 +9509,10 @@ const Builder = struct {
             };
 
             if (identity) |wanted| {
-                var prior: usize = 0;
-                while (prior < raw_index) : (prior += 1) {
-                    if (fn_slots[prior] == null) continue;
-                    if (!allow_identity_merge[raw_index] or !allow_identity_merge[prior]) continue;
+                const address = specialize.SpecLookupAddress.fromIdentity(wanted);
+                var candidate = if (allow_identity_merge) prior_identities.get(address) else null;
+                while (candidate) |prior| : (candidate = previous_same_identity[prior]) {
+                    self.countBodyDiagnostic("draft_commit_lookup_steps");
                     if (identities[prior]) |existing| {
                         if (try self.draftSpecIdentityEql(existing, wanted)) {
                             const prior_template = body_draft.fns.items[prior].source;
@@ -9512,9 +9533,9 @@ const Builder = struct {
                         }
                     }
                 } else {
-                    const committed: ?specialize.LookupResult = if (!allow_identity_merge[raw_index])
+                    const committed: ?specialize.LookupResult = if (!allow_identity_merge)
                         null
-                    else if (allow_imported[raw_index])
+                    else if (allow_imported)
                         try self.spec_store.find(wanted, specializationEvidenceView(requested_evidence))
                     else if (try self.spec_store.findLocal(wanted, specializationEvidenceView(requested_evidence))) |hit|
                         .{ .local = hit }
@@ -9539,6 +9560,11 @@ const Builder = struct {
                         fn_slots[raw_index] = .{ .local = @enumFromInt(next_fn) };
                         next_fn += 1;
                         emit_fns[raw_index] = true;
+                    }
+                    if (allow_identity_merge) {
+                        const entry = try prior_identities.getOrPut(address);
+                        previous_same_identity[raw_index] = if (entry.found_existing) entry.value_ptr.* else null;
+                        entry.value_ptr.* = @intCast(raw_index);
                     }
                 }
             } else {
@@ -13635,6 +13661,9 @@ const BodyDraftStore = struct {
     nested_specs: std.ArrayList(DraftNestedSpec),
     sealed_nested_specs: std.ArrayList(SealedNestedSpec),
     nested_spec_lookup: DraftNestedSpecLookup,
+    /// Exact family membership proves a new site's miss without visiting any
+    /// graph aliases. It is independent of mutable interface root identity.
+    nested_spec_families: std.AutoHashMap(DraftNestedFamilyAddress, void),
     exprs: std.ArrayList(DraftExpr),
     pats: std.ArrayList(DraftPat),
     stmts: std.ArrayList(DraftStmt),
@@ -13745,6 +13774,7 @@ const BodyDraftStore = struct {
             .nested_specs = .empty,
             .sealed_nested_specs = .empty,
             .nested_spec_lookup = DraftNestedSpecLookup.init(allocator),
+            .nested_spec_families = std.AutoHashMap(DraftNestedFamilyAddress, void).init(allocator),
             .exprs = .empty,
             .pats = .empty,
             .stmts = .empty,
@@ -13938,6 +13968,7 @@ const BodyDraftStore = struct {
         self.closed_direct_specializations.deinit();
         self.template_spec_by_fn.deinit();
         self.nested_spec_lookup.deinit();
+        self.nested_spec_families.deinit();
         self.owner_runs.deinit(self.allocator);
         self.stmt_impossibility_proofs.deinit(self.allocator);
         self.pat_impossibility_proofs.deinit(self.allocator);
@@ -14689,7 +14720,9 @@ const BodyDraftStore = struct {
         self.template_spec_lookup.deinit();
         self.template_spec_lookup = DraftTemplateSpecLookup.init(self.allocator);
         self.nested_spec_lookup.deinit();
+        self.nested_spec_families.deinit();
         self.nested_spec_lookup = DraftNestedSpecLookup.init(self.allocator);
+        self.nested_spec_families = std.AutoHashMap(DraftNestedFamilyAddress, void).init(self.allocator);
         self.template_spec_by_fn.deinit();
         self.template_spec_by_fn = collections.DenseMap(DraftFnId, u32).init(self.allocator);
         self.closed_direct_specializations.deinit();
@@ -14719,6 +14752,7 @@ const BodyDraftStore = struct {
             self.impossibility_proofs.items.len != 0 or
             !self.template_spec_lookup.isEmpty() or
             !self.nested_spec_lookup.isEmpty() or
+            self.nested_spec_families.count() != 0 or
             self.template_specs.items.len != 0 or
             self.nested_specs.items.len != 0 or
             self.spec_job_workspace != null or

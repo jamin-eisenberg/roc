@@ -882,6 +882,20 @@ LLVM object emission must request function and data sections, and the final
 target linker must use section garbage collection where the target format
 supports it.
 
+Fixed-size LLVM stack slots form an entry-block prefix. The builder records
+these allocations separately in creation order and materializes the reversed
+prefix once at function finalization. This preserves prepend ordering and
+fixed activation lifetime without repeatedly moving the accumulated entry
+instruction list. Slot values are available to body construction immediately;
+final instruction numbering follows the completed block order.
+
+LLVM string-literal lowering emits a complete target-layout constant when the
+literal fits the runtime's inline `RocStr` representation. It uses the runtime's
+word count and flag-byte encoding, the target pointer width and byte order, and
+zeroed unused bytes. Longer literals use the allocating runtime constructor.
+This is representation lowering of explicit LIR literal bytes; it introduces no
+ownership decisions and leaves all explicit LIR ARC statements intact.
+
 Static ownership reasoning lives in exactly one place: LIR ARC insertion.
 ARC insertion computes a whole-program borrows-with-lifetimes solution and
 emits explicit RC statements from it (see ARC Borrow Inference). No other
@@ -3502,11 +3516,14 @@ parse_nested = Nested.parser_for(encoding)
 ```
 
 `encoding.rename_field(name)` is ordinary method-call syntax for a pure format
-method whose first argument is the encoding value. Every encoding provides it;
-identity is the normal implementation. Taking the encoding value as an argument
-lets one encoding type store parser-construction configuration such as JSON
-field naming style. `Encoding.FieldName.FieldNames.rename_fields` applies that
-function to every requested record field, discards the original names from the
+method whose first argument is the encoding value. Deriving a record codec
+requires this method only when the record has fields; identity is the normal
+implementation. Empty records use the same record-protocol validation as other
+records, requiring no rename method and emitting no rename calls. Taking the
+encoding value as an argument lets one encoding type store parser-construction
+configuration such as JSON field naming style.
+`Encoding.FieldName.FieldNames.rename_fields` applies that function to every
+requested record field, discards the original names from the
 returned `Encoding.FieldName.FieldNames`, and rebuilds the length buckets used by
 `Encoding.FieldName.FieldNames.for_size`, `Encoding.FieldName.FieldNames.shortest_name`,
 and `Encoding.FieldName.FieldNames.longest_name`. If parser construction is
@@ -4138,10 +4155,14 @@ representation decision.
 
 Recursive specialization contributes an explicit second proof of the dynamic
 tier. Each in-progress specialization snapshots every permanent member of each
-ordered argument's union class. When a recursive edge reaches that
-specialization, a request argument introduced after the snapshot is recorded as
-a representation-growing recursive slot before the two function interfaces are
-related. If that slot subsequently joins distinct minted iterator identities,
+ordered argument's union class. The snapshot retains the first and last
+permanent node of the class-member list at entry. Unions only concatenate
+lists, so links inside the saved segment never change: stopping at its saved
+last node preserves exact historical membership without copying the class or
+adding history maintenance to union operations. When a recursive edge reaches
+that specialization, a request argument introduced after the snapshot is
+recorded as a representation-growing recursive slot before the two function
+interfaces are related. If that slot subsequently joins distinct minted iterator identities,
 the graph records that the resulting iterator class must use the forced-dynamic
 fixed point. Recursion through any alias already present in the initial class is
 not representation growth and remains eligible for the minted tier. This makes
@@ -7906,6 +7927,24 @@ immutable, every monomorphic specialization records its own closed
 instantiation, and interface solving never depends on lowering a body into its
 caller.
 
+Draft nested lookup first checks exact callable-family membership. An absent
+family proves a miss without enumerating interface aliases, regardless of the
+size of the enclosing graph. Existing families retain exact interface, evidence,
+capture, and recursive-reference checks; no mutable union-root key is treated
+as an immutable specialization identity.
+
+Draft commit indexes sealed specialization records by their explicit draft
+function ids, and indexes prior retained identities by the same digest bucket
+as the durable specialization store. Exact type, codec-contract, and evidence
+equality remain collision authorities. Suppressed lexical children never enter
+that index, and equal retained identities keep the first assigned function
+slot. Commit work does not scan earlier functions or specialization tables for
+each new lambda.
+
+Structural backing walks reuse graph-owned sparse scratch. Each walk visits
+only its backing chain and returns the first repeated node on a cycle; graph
+size does not determine scratch initialization work.
+
 The specialization store must make this lookup direct. It must not scan all
 specializations for a callable family and recompute recursive type digests while
 lowering a body. A specialization request is identified by:
@@ -9709,6 +9748,20 @@ The exact descriptor, dictionary, and adapter payload structs are owned by LIR,
 not by a backend. Their contents are serialized into LirImage when any reachable
 LIR statement references them. A backend may cache lowered helper code for a
 descriptor, dictionary, or adapter, but it must not change that data's meaning.
+
+Boxy tag and field names belong to `LirStore.boxy_names`, separate from literal
+backings. Lowering interns each spelling through the shared serial string
+interner and assigns its dense `BoxyNameId` once. Variant metadata, tag
+construction and matching, payload reads, and reads of tag payload descriptors
+all carry that same identity. Backends pass it unchanged through the Boxy ABI;
+runtime identity comparisons never depend on literal byte offsets. Field and
+tag inspection resolve text through the same name store.
+
+Full LIR images and standalone Boxy sidecars serialize only the name store's
+byte and range columns, preserving ids and excluding the transient interning
+index. Full LIR images also retain the literal store for LIR procedure bodies;
+standalone sidecars carry no literal store. Serialization does not rediscover
+names, scan literal payloads, or remap identities after code generation.
 
 After reachable-procedure compaction, `LirProgram.Result.boxy_worker_procs` is
 the dense, deduplicated list named by every live, present, non-structural Boxy
