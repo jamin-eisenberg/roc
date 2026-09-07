@@ -727,6 +727,10 @@ fn buildCountdownProc(allocator: Allocator, b: *ProcBuilder, store: *LirStore) T
         .args = try store.addLocalSpan(&.{ a_n, a_acc }),
         .ret_layout = .u64,
     });
+    var tail_builder = lir.TailCallBuilder.init(allocator, proc);
+    defer tail_builder.deinit();
+    store.tail_call_builder = &tail_builder;
+    defer store.tail_call_builder = null;
 
     const zero = try b.addLocal(allocator, .u64);
     const cond = try b.addLocal(allocator, .bool);
@@ -766,6 +770,9 @@ fn buildCountdownProc(allocator: Allocator, b: *ProcBuilder, store: *LirStore) T
     const proc_ptr = store.getProcSpecPtr(proc);
     proc_ptr.body = mk_zero;
     proc_ptr.frame_locals = try store.addLocalSpan(b.locals.items);
+    const tail_sites = try tail_builder.finish(store);
+    store.getProcSpecPtr(proc).tail_calls = tail_sites;
+    store.tail_call_builder = null;
     return proc;
 }
 
@@ -815,6 +822,10 @@ test "tce loop-back copies swapped params through temps" {
         .args = try store.addLocalSpan(&.{ a_a, a_b, a_n }),
         .ret_layout = .u64,
     });
+    var tail_builder = lir.TailCallBuilder.init(allocator, proc);
+    defer tail_builder.deinit();
+    store.tail_call_builder = &tail_builder;
+    defer store.tail_call_builder = null;
 
     const zero = try b.addLocal(allocator, .u64);
     const cond = try b.addLocal(allocator, .bool);
@@ -852,6 +863,9 @@ test "tce loop-back copies swapped params through temps" {
     proc_ptr.body = mk_zero;
     proc_ptr.frame_locals = try store.addLocalSpan(b.locals.items);
 
+    const tail_sites = try tail_builder.finish(&store);
+    store.getProcSpecPtr(proc).tail_calls = tail_sites;
+    store.tail_call_builder = null;
     try lir.Trmc.run(&store, &layouts);
     try std.testing.expectEqual(LIR.TailTransform.tce, store.getProcSpec(proc).tail_transform);
     try lir.Arc.insert(&store, &layouts, .{});
@@ -883,6 +897,10 @@ test "mixed construct and plain-tail branches both become jumps" {
         .args = try store.addLocalSpan(&.{a_n}),
         .ret_layout = peano.u,
     });
+    var tail_builder = lir.TailCallBuilder.init(allocator, proc);
+    defer tail_builder.deinit();
+    store.tail_call_builder = &tail_builder;
+    defer store.tail_call_builder = null;
 
     const res = try b.addLocal(allocator, peano.u);
     const zero = try b.addLocal(allocator, .u64);
@@ -919,7 +937,13 @@ test "mixed construct and plain-tail branches both become jumps" {
         .args = try store.addLocalSpan(&.{m_tail}),
         .next = tail_jump,
     } });
-    const mk_m_tail = try lowLevelStmt(&store, m_tail, .num_int_sub_wrap, &.{ a_n, one }, tail_call);
+    // Two edges enter the exact same plain-tail call inside a TRMC procedure.
+    const shared_tail = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = is_zero,
+        .branches = try store.addCFSwitchBranches(&.{.{ .value = 1, .body = tail_call }}),
+        .default_branch = tail_call,
+    } });
+    const mk_m_tail = try lowLevelStmt(&store, m_tail, .num_int_sub_wrap, &.{ a_n, one }, shared_tail);
 
     // even: res = S(weird(n - 1))—the construct branch
     const cons_jump = try store.addCFStmt(.{ .jump = .{ .target = join_id } });
@@ -991,6 +1015,9 @@ test "mixed construct and plain-tail branches both become jumps" {
     proc_ptr.body = join;
     proc_ptr.frame_locals = try store.addLocalSpan(b.locals.items);
 
+    const tail_sites = try tail_builder.finish(&store);
+    store.getProcSpecPtr(proc).tail_calls = tail_sites;
+    store.tail_call_builder = null;
     try lir.Trmc.run(&store, &layouts);
     try std.testing.expectEqual(LIR.TailTransform.trmc, store.getProcSpec(proc).tail_transform);
     try std.testing.expect(!(try hasSelfCall(allocator, &store, proc)));
@@ -1095,7 +1122,7 @@ test "golden: repeat IR before and after the trmc transform" {
     , after);
 }
 
-test "must not transform: result used twice, constructor not returned, non-union return, mutual recursion, shared tail" {
+test "tail eligibility distinguishes result uses and mutual recursion from shared tails" {
     const allocator = std.testing.allocator;
     var store = LirStore.init(allocator);
     defer store.deinit();
@@ -1199,8 +1226,7 @@ test "must not transform: result used twice, constructor not returned, non-union
     }
 
     // (5) Two control-flow edges share the same recursive tail. TRMC/TCE
-    // rewrites statements in place, so this shape is not eligible unless the
-    // pass first splits the shared tail.
+    // replaces the call node uniformly, so both edges must become back-edges.
     const shared_tail = blk: {
         const a_n = try b.addLocal(allocator, .u64);
         const proc = try store.addProcSpec(.{
@@ -1208,6 +1234,10 @@ test "must not transform: result used twice, constructor not returned, non-union
             .args = try store.addLocalSpan(&.{a_n}),
             .ret_layout = .u64,
         });
+        var tail_builder = lir.TailCallBuilder.init(allocator, proc);
+        defer tail_builder.deinit();
+        store.tail_call_builder = &tail_builder;
+        defer store.tail_call_builder = null;
         const cond = try b.addLocal(allocator, .bool);
         const r = try b.addLocal(allocator, .u64);
         const ret_r = try store.addCFStmt(.{ .ret = .{ .value = r } });
@@ -1226,6 +1256,8 @@ test "must not transform: result used twice, constructor not returned, non-union
         const proc_ptr = store.getProcSpecPtr(proc);
         proc_ptr.body = switch_stmt;
         proc_ptr.frame_locals = try store.addLocalSpan(b.locals.items);
+        const sites = try tail_builder.finish(&store);
+        store.getProcSpecPtr(proc).tail_calls = sites;
         break :blk proc;
     };
 
@@ -1237,6 +1269,185 @@ test "must not transform: result used twice, constructor not returned, non-union
     try std.testing.expectEqual(LIR.TailTransform.none, store.getProcSpec(fib_like).tail_transform);
     try std.testing.expectEqual(LIR.TailTransform.none, store.getProcSpec(mutual_a).tail_transform);
     try std.testing.expectEqual(LIR.TailTransform.none, store.getProcSpec(mutual_b).tail_transform);
-    try std.testing.expectEqual(LIR.TailTransform.none, store.getProcSpec(shared_tail).tail_transform);
-    try std.testing.expect(try hasSelfCall(allocator, &store, shared_tail));
+    try std.testing.expectEqual(LIR.TailTransform.tce, store.getProcSpec(shared_tail).tail_transform);
+    try std.testing.expect(!(try hasSelfCall(allocator, &store, shared_tail)));
+}
+
+test "tce has no site or forwarding-depth cap and preserves a shared base return" {
+    const allocator = std.testing.allocator;
+    var store = LirStore.init(allocator);
+    defer store.deinit();
+    var layouts = try layout.Store.init(allocator, base.target.TargetUsize.native);
+    defer layouts.deinit();
+    var runtime_env = RuntimeHostEnv.init(allocator);
+    defer runtime_env.deinit();
+    var b = ProcBuilder.init(&store);
+    defer b.deinit(allocator);
+    const n = try b.addLocal(allocator, .u64);
+    const proc = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(&.{n}),
+        .ret_layout = .u64,
+    });
+    var builder = lir.TailCallBuilder.init(allocator, proc);
+    defer builder.deinit();
+    store.tail_call_builder = &builder;
+    defer store.tail_call_builder = null;
+
+    const result = try b.addLocal(allocator, .u64);
+    const one = try b.addLocal(allocator, .u64);
+    const m = try b.addLocal(allocator, .u64);
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+    // A long forwarding join chain is shared by every call and the base case.
+    var entry_jumps: [128]CFStmtId = undefined;
+    for (&entry_jumps, 0..) |*entry, index| {
+        entry.* = try store.addCFStmt(.{ .jump = .{ .target = @enumFromInt(index) } });
+    }
+    const shared = entry_jumps[entry_jumps.len - 1];
+    const base_case = try store.addCFStmt(.{ .assign_literal = .{
+        .target = result,
+        .value = .{ .i64_literal = .{ .value = 0, .layout_idx = .u64 } },
+        .next = shared,
+    } });
+    var branches: [96]LIR.CFSwitchBranch = undefined;
+    for (&branches, 0..) |*branch, index| {
+        branch.* = .{ .value = index + 1, .body = try store.addCFStmt(.{ .assign_call = .{
+            .target = result,
+            .proc = proc,
+            .args = try store.addLocalSpan(&.{m}),
+            .next = shared,
+        } }) };
+    }
+    const dispatch = try store.addCFStmt(.{ .switch_stmt = .{
+        .cond = n,
+        .branches = try store.addCFSwitchBranches(&branches),
+        .default_branch = base_case,
+    } });
+    // Put the dispatch under all forwarding joins' lexical scopes.
+    var body = dispatch;
+    for (0..entry_jumps.len) |offset| {
+        const index = entry_jumps.len - 1 - offset;
+        body = try store.addCFStmt(.{ .join = .{
+            .id = @enumFromInt(index),
+            .params = try store.addLocalSpan(&.{result}),
+            .body = if (index == 0) ret else entry_jumps[index - 1],
+            .remainder = body,
+        } });
+    }
+    body = try lowLevelStmt(&store, m, .num_int_sub_wrap, &.{ n, one }, body);
+    body = try store.addCFStmt(.{ .assign_literal = .{
+        .target = one,
+        .value = .{ .i64_literal = .{ .value = 1, .layout_idx = .u64 } },
+        .next = body,
+    } });
+    store.getProcSpecPtr(proc).body = body;
+    store.getProcSpecPtr(proc).frame_locals = try store.addLocalSpan(b.locals.items);
+    const sites = try builder.finish(&store);
+    store.getProcSpecPtr(proc).tail_calls = sites;
+    store.tail_call_builder = null;
+    try lir.Trmc.run(&store, &layouts);
+    try std.testing.expectEqual(LIR.TailTransform.tce, store.getProcSpec(proc).tail_transform);
+    try std.testing.expect(!(try hasSelfCall(allocator, &store, proc)));
+    try std.testing.expect(store.getCFStmt(ret) == .ret);
+    try lir.Arc.insert(&store, &layouts, .{});
+    try std.testing.expectEqual(@as(u64, 0), try runProcU64Args(allocator, &store, &layouts, proc, &runtime_env, &.{96}));
+    try runtime_env.checkForLeaks();
+}
+
+test "tail-call proof rejects an intervening effect and a forwarding cycle" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ false, true }) |cycle| {
+        var store = LirStore.init(allocator);
+        defer store.deinit();
+        var layouts = try layout.Store.init(allocator, base.target.TargetUsize.native);
+        defer layouts.deinit();
+        var b = ProcBuilder.init(&store);
+        defer b.deinit(allocator);
+        const cond = try b.addLocal(allocator, .bool);
+        const result = try b.addLocal(allocator, .u64);
+        const proc = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .args = try store.addLocalSpan(&.{cond}),
+            .ret_layout = .u64,
+        });
+        var builder = lir.TailCallBuilder.init(allocator, proc);
+        defer builder.deinit();
+        store.tail_call_builder = &builder;
+        defer store.tail_call_builder = null;
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+        const suffix = if (cycle)
+            try store.addCFStmt(.{ .jump = .{ .target = @enumFromInt(0) } })
+        else
+            try store.addCFStmt(.{ .expect = .{ .condition = cond, .next = ret } });
+        const call = try store.addCFStmt(.{ .assign_call = .{
+            .target = result,
+            .proc = proc,
+            .args = try store.addLocalSpan(&.{cond}),
+            .next = suffix,
+        } });
+        const body = if (cycle) try store.addCFStmt(.{ .join = .{
+            .id = @enumFromInt(0),
+            .params = LIR.LocalSpan.empty(),
+            .body = suffix,
+            .remainder = call,
+        } }) else call;
+        store.getProcSpecPtr(proc).body = body;
+        store.getProcSpecPtr(proc).frame_locals = try store.addLocalSpan(b.locals.items);
+        const sites = try builder.finish(&store);
+        try std.testing.expect(sites == null);
+        store.tail_call_builder = null;
+        try lir.Trmc.run(&store, &layouts);
+        try std.testing.expectEqual(LIR.TailTransform.none, store.getProcSpec(proc).tail_transform);
+        try std.testing.expect(try hasSelfCall(allocator, &store, proc));
+    }
+}
+
+test "tail-call proof consumes the explicit boxy adapter operation" {
+    const allocator = std.testing.allocator;
+    for ([_]lir.Program.BoxyAdapterOperation{ .relabel, .materialize }) |operation| {
+        var store = LirStore.init(allocator);
+        defer store.deinit();
+        var b = ProcBuilder.init(&store);
+        defer b.deinit(allocator);
+        const arg = try b.addLocal(allocator, .u64);
+        const result = try b.addLocal(allocator, .u64);
+        const forwarded = try b.addLocal(allocator, .u64);
+        const proc = try store.addProcSpec(.{
+            .name = store.freshSyntheticSymbol(),
+            .args = try store.addLocalSpan(&.{arg}),
+            .ret_layout = .u64,
+        });
+        var builder = lir.TailCallBuilder.init(allocator, proc);
+        defer builder.deinit();
+        store.tail_call_builder = &builder;
+        defer store.tail_call_builder = null;
+        const adapters = [_]lir.Program.BoxyAdapter{.{
+            .kind = .boxy_to_boxy,
+            .operation = operation,
+            .source_layout = .u64,
+            .target_layout = .u64,
+            .consumes_source = true,
+            .produces_owned_result = true,
+        }};
+        builder.adapters = &adapters;
+        const ret = try store.addCFStmt(.{ .ret = .{ .value = forwarded } });
+        const adapt = try store.addCFStmt(.{ .assign_boxy_adapt = .{
+            .source = result,
+            .target = forwarded,
+            .source_desc = null,
+            .target_desc = null,
+            .source_mode = .move,
+            .adapter = @enumFromInt(0),
+            .next = ret,
+        } });
+        const call = try store.addCFStmt(.{ .assign_call = .{
+            .target = result,
+            .proc = proc,
+            .args = try store.addLocalSpan(&.{arg}),
+            .next = adapt,
+        } });
+        store.getProcSpecPtr(proc).body = call;
+        const sites = try builder.finish(&store);
+        try std.testing.expectEqual(operation == .relabel, sites != null);
+    }
 }

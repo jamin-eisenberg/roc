@@ -47,7 +47,8 @@ pub const MAGIC: u32 = 0x52494c52; // "RLIR" in little-endian bytes.
 /// v25: integer arithmetic uses explicit behavior-family operations.
 /// v26: LIR images carry the exact dense Boxy runtime worker proc set.
 /// v27: `expect` statements optionally carry a test observation site.
-pub const FORMAT_VERSION: u32 = 27;
+/// v28: procedures and calls carry producer-authored self-tail proofs.
+pub const FORMAT_VERSION: u32 = 28;
 
 /// Public `ImageError` declaration.
 pub const ImageError = error{
@@ -159,6 +160,7 @@ pub const LirStoreImage = extern struct {
     local_names: ArrayRef,
 
     fn fromStore(base_ptr: [*]align(1) const u8, image_size: usize, store: *const LirStore) ImageError!LirStoreImage {
+        std.debug.assert(store.tail_call_builder == null);
         return .{
             .cf_stmts = try arrayRef(base_ptr, image_size, store.cf_stmts.unsafeRawItemsForView()),
             .cf_switch_branches = try arrayRef(base_ptr, image_size, store.cf_switch_branches.unsafeRawItemsForView()),
@@ -193,6 +195,7 @@ pub const LirStoreImage = extern struct {
         image_capacity: usize,
         store: *const LirStore,
     ) CopyError!LirStoreImage {
+        std.debug.assert(store.tail_call_builder == null);
         return .{
             .cf_stmts = try copyArrayRef(allocator, base_ptr, image_capacity, store.cf_stmts.unsafeRawItemsForView()),
             .cf_switch_branches = try copyArrayRef(allocator, base_ptr, image_capacity, store.cf_switch_branches.unsafeRawItemsForView()),
@@ -847,8 +850,9 @@ comptime {
     // the "LIR image round-trips every populated store field" test at the
     // bottom of this file, then update the expected field count below. A
     // same-build omission is otherwise silent, since `FORMAT_VERSION` only
-    // guards cross-version mismatches.
-    std.debug.assert(@typeInfo(LirStore).@"struct".fields.len == 34);
+    // guards cross-version mismatches. `tail_call_builder` is a transient
+    // producer scope and deliberately defaults to null in an image view.
+    std.debug.assert(@typeInfo(LirStore).@"struct".fields.len == 35);
     std.debug.assert(@typeInfo(layout_mod.Store).@"struct".fields.len == 12);
     std.debug.assert(@typeInfo(base.StringLiteral.Store).@"struct".fields.len == 1);
 }

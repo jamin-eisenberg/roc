@@ -14,6 +14,8 @@ pub const Hosted = @import("hosted.zig");
 pub const Program = @import("program.zig");
 /// Checked integer arithmetic metadata shared by LIR producers and consumers.
 pub const CheckedArithmetic = @import("checked_arithmetic.zig");
+/// Producer-owned proofs of self-tail return continuations.
+pub const TailCallBuilder = @import("tail_call_builder.zig");
 
 test "lir core declarations are referenced" {
     std.testing.refAllDecls(@This());

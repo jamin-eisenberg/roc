@@ -12,6 +12,27 @@ const TestCase = @import("parallel_runner.zig").TestCase;
 /// Public value `tests`.
 pub const tests = [_]TestCase{
     .{
+        .name = "tce: shared loop continuation is stack bounded",
+        .source_kind = .module,
+        .source =
+        \\walk : List(U64), U64, U64 -> U64
+        \\walk = |xs, n, acc| {
+        \\    if n == 0 { acc } else {
+        \\        var $total = 0
+        \\        for y in xs { $total = $total + y }
+        \\        if $total % 2 == 0 {
+        \\            walk(xs, n - 1, acc + $total)
+        \\        } else {
+        \\            walk(xs, n - 1, acc + $total + 1)
+        \\        }
+        \\    }
+        \\}
+        \\main : U64
+        \\main = walk([1, 2, 3], 2000, 0)
+        ,
+        .expected = .{ .inspect_str = "12000" },
+    },
+    .{
         .name = "trmc: linked list repeat and naive length",
         .source_kind = .module,
         .source =
