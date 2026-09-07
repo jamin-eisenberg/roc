@@ -17591,7 +17591,17 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `U8x16(1, 2, 3, ...)`.
 			to_inspect : U8x16 -> Str
-			to_inspect = |vector| Str.concat("U8x16(", Str.concat(Str.join_with(List.map(U8x16.to_list(vector), U8.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				var $out = "U8x16(".reserve(79)
+				$out = Str.concat($out, U8.to_str(U8x16.get_lane(vector, 0)))
+				var $i = 1.U64
+				while $i < 16 {
+					$out = Str.concat($out, ", ")
+					$out = Str.concat($out, U8.to_str(U8x16.get_lane(vector, $i)))
+					$i = $i + 1
+				}
+				Str.concat($out, ")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 8, (i + 1) * 8)`. Free at runtime—no instructions.
@@ -18137,7 +18147,17 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `I8x16(1, 2, 3, ...)`.
 			to_inspect : I8x16 -> Str
-			to_inspect = |vector| Str.concat("I8x16(", Str.concat(Str.join_with(List.map(I8x16.to_list(vector), I8.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				var $out = "I8x16(".reserve(95)
+				$out = Str.concat($out, I8.to_str(I8x16.get_lane(vector, 0)))
+				var $i = 1.U64
+				while $i < 16 {
+					$out = Str.concat($out, ", ")
+					$out = Str.concat($out, I8.to_str(I8x16.get_lane(vector, $i)))
+					$i = $i + 1
+				}
+				Str.concat($out, ")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 8, (i + 1) * 8)`. Free at runtime—no instructions.
@@ -18618,7 +18638,17 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `U16x8(1, 2, 3, ...)`.
 			to_inspect : U16x8 -> Str
-			to_inspect = |vector| Str.concat("U16x8(", Str.concat(Str.join_with(List.map(U16x8.to_list(vector), U16.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				var $out = "U16x8(".reserve(55)
+				$out = Str.concat($out, U16.to_str(U16x8.get_lane(vector, 0)))
+				var $i = 1.U64
+				while $i < 8 {
+					$out = Str.concat($out, ", ")
+					$out = Str.concat($out, U16.to_str(U16x8.get_lane(vector, $i)))
+					$i = $i + 1
+				}
+				Str.concat($out, ")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 16, (i + 1) * 16)`. Free at runtime—no instructions.
@@ -19111,7 +19141,17 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `I16x8(1, 2, 3, ...)`.
 			to_inspect : I16x8 -> Str
-			to_inspect = |vector| Str.concat("I16x8(", Str.concat(Str.join_with(List.map(I16x8.to_list(vector), I16.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				var $out = "I16x8(".reserve(63)
+				$out = Str.concat($out, I16.to_str(I16x8.get_lane(vector, 0)))
+				var $i = 1.U64
+				while $i < 8 {
+					$out = Str.concat($out, ", ")
+					$out = Str.concat($out, I16.to_str(I16x8.get_lane(vector, $i)))
+					$i = $i + 1
+				}
+				Str.concat($out, ")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 16, (i + 1) * 16)`. Free at runtime—no instructions.
@@ -19648,7 +19688,22 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `U32x4(1, 2, 3, 4)`.
 			to_inspect : U32x4 -> Str
-			to_inspect = |vector| Str.concat("U32x4(", Str.concat(Str.join_with(List.map(U32x4.to_list(vector), U32.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				lane0 = U32.to_str(U32x4.get_lane(vector, 0))
+				lane1 = U32.to_str(U32x4.get_lane(vector, 1))
+				lane2 = U32.to_str(U32x4.get_lane(vector, 2))
+				lane3 = U32.to_str(U32x4.get_lane(vector, 3))
+				spare = lane0.count_utf8_bytes() + lane1.count_utf8_bytes() + lane2.count_utf8_bytes() + lane3.count_utf8_bytes() + 7
+				"U32x4(".reserve(spare)
+					.concat(lane0)
+					.concat(", ")
+					.concat(lane1)
+					.concat(", ")
+					.concat(lane2)
+					.concat(", ")
+					.concat(lane3)
+					.concat(")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 32, (i + 1) * 32)`. Free at runtime—no instructions.
@@ -20086,7 +20141,22 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `I32x4(-1, 2, -3, 4)`.
 			to_inspect : I32x4 -> Str
-			to_inspect = |vector| Str.concat("I32x4(", Str.concat(Str.join_with(List.map(I32x4.to_list(vector), I32.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				lane0 = I32.to_str(I32x4.get_lane(vector, 0))
+				lane1 = I32.to_str(I32x4.get_lane(vector, 1))
+				lane2 = I32.to_str(I32x4.get_lane(vector, 2))
+				lane3 = I32.to_str(I32x4.get_lane(vector, 3))
+				spare = lane0.count_utf8_bytes() + lane1.count_utf8_bytes() + lane2.count_utf8_bytes() + lane3.count_utf8_bytes() + 7
+				"I32x4(".reserve(spare)
+					.concat(lane0)
+					.concat(", ")
+					.concat(lane1)
+					.concat(", ")
+					.concat(lane2)
+					.concat(", ")
+					.concat(lane3)
+					.concat(")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 32, (i + 1) * 32)`. Free at runtime—no instructions.
@@ -20551,7 +20621,16 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `U64x2(1, 2)`.
 			to_inspect : U64x2 -> Str
-			to_inspect = |vector| Str.concat("U64x2(", Str.concat(Str.join_with(List.map(U64x2.to_list(vector), U64.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				lane0 = U64.to_str(U64x2.get_lane(vector, 0))
+				lane1 = U64.to_str(U64x2.get_lane(vector, 1))
+				spare = lane0.count_utf8_bytes() + lane1.count_utf8_bytes() + 3
+				"U64x2(".reserve(spare)
+					.concat(lane0)
+					.concat(", ")
+					.concat(lane1)
+					.concat(")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 64, (i + 1) * 64)`. Free at runtime—no instructions.
@@ -20917,7 +20996,16 @@ Builtin :: [].{
 
 			## Render the lanes for debugging, e.g. `I64x2(-1, 2)`.
 			to_inspect : I64x2 -> Str
-			to_inspect = |vector| Str.concat("I64x2(", Str.concat(Str.join_with(List.map(I64x2.to_list(vector), I64.to_str), ", "), ")"))
+			to_inspect = |vector| {
+				lane0 = I64.to_str(I64x2.get_lane(vector, 0))
+				lane1 = I64.to_str(I64x2.get_lane(vector, 1))
+				spare = lane0.count_utf8_bytes() + lane1.count_utf8_bytes() + 3
+				"I64x2(".reserve(spare)
+					.concat(lane0)
+					.concat(", ")
+					.concat(lane1)
+					.concat(")")
+			}
 
 			## The vector's 128 bits as a [U128]. Lane `i` occupies bits
 			## `[i * 64, (i + 1) * 64)`. Free at runtime—no instructions.

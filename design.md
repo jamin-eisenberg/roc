@@ -14032,6 +14032,12 @@ wrappers are explicitly destructured before calling a backing vector's method.
 Statically known SIMD inspection is an ordinary direct procedure call, with
 normal specialization reuse and inlining decisions.
 
+SIMD inspection appends lane text directly into the result string without
+materializing lane or string lists. Eight- and sixteen-lane results always
+exceed inline string capacity and reserve their maximum decimal size once.
+Two- and four-lane formatters retain the scalar strings, reserve their exact
+combined size, and preserve inline storage whenever the complete result fits.
+
 The exhaustive bit-level SIMD evaluator in `src/builtins/simd.zig` is the
 correctness oracle for the interpreter, Lambda Mono evaluator, and differential
 tests. Both native dev backends instead dispatch exhaustively on the static LIR
