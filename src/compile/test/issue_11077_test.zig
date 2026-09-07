@@ -2,7 +2,15 @@
 
 const std = @import("std");
 const roc_target = @import("roc_target");
-const BuildEnv = @import("../compile_build.zig").BuildEnv;
+const compile_build = @import("../compile_build.zig");
+const BuildEnv = compile_build.BuildEnv;
+
+const DiagnosticTestError = compile_build.InitError ||
+    compile_build.BuildRootError ||
+    std.Io.Dir.WriteFileError ||
+    std.Io.Dir.RealPathFileAllocError ||
+    std.Io.Writer.Error ||
+    error{ TestUnexpectedResult, TestExpectedEqual };
 
 test "issue 11077: platform return mismatch describes the return value" {
     // https://github.com/roc-lang/roc/issues/11077
@@ -126,7 +134,7 @@ test "issue 11077: matching platform return type checks without diagnostics" {
     );
 }
 
-fn expectPlatformDiagnostic(app_body: []const u8, required_type: []const u8, expected_fragments: []const []const u8) !void {
+fn expectPlatformDiagnostic(app_body: []const u8, required_type: []const u8, expected_fragments: []const []const u8) DiagnosticTestError!void {
     const gpa = std.testing.allocator;
     const io = std.testing.io;
     var tmp_dir = std.testing.tmpDir(.{});
