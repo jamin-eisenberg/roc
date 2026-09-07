@@ -105,13 +105,13 @@ EndOfFile,
 					(ty (name "I64"))))
 			(where
 				(method (mod-of "a") (name "decode")
-					(args
-						(ty (name "I64")))
-					(ty-var (raw "a")))
+					(ty-fn
+						(ty (name "I64"))
+						(ty-var (raw "a"))))
 				(method (mod-of "b") (name "encode")
-					(args
-						(ty-var (raw "b")))
-					(ty (name "I64")))))
+					(ty-fn
+						(ty-var (raw "b"))
+						(ty (name "I64"))))))
 		(s-decl
 			(p-ident (raw "make_map"))
 			(e-lambda
@@ -217,18 +217,18 @@ use_it = {
 									(ty-rigid-var (name "a")))
 								(s-let
 									(p-assign (ident "value"))
-									(e-type-dispatch-call (method "decode") (type-dispatch-stmt 28) (constraint-fn-var 304)
+									(e-type-dispatch-call (method "decode") (type-dispatch-stmt 30) (constraint-fn-var 302)
 										(args
 											(e-lookup-local
 												(p-assign (ident "input"))))))
 								(s-let
 									(p-assign (ident "output"))
-									(e-call (constraint-fn-var 310)
+									(e-call (constraint-fn-var 308)
 										(e-lookup-local
 											(p-assign (ident "f")))
 										(e-lookup-local
 											(p-assign (ident "value")))))
-								(e-dispatch-call (method "encode") (constraint-fn-var 311)
+								(e-dispatch-call (method "encode") (constraint-fn-var 309)
 									(receiver
 										(e-lookup-local
 											(p-assign (ident "output"))))
@@ -247,30 +247,30 @@ use_it = {
 						(ty-lookup (name "I64") (builtin)))))
 			(where
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "a"))) (name "decode")
-					(args
-						(ty-lookup (name "I64") (builtin)))
-					(ty-rigid-var-lookup (ty-rigid-var (name "a"))))
+					(ty-fn (effectful false)
+						(ty-lookup (name "I64") (builtin))
+						(ty-rigid-var-lookup (ty-rigid-var (name "a")))))
 				(method (ty-rigid-var-lookup (ty-rigid-var (name "b"))) (name "encode")
-					(args
-						(ty-rigid-var-lookup (ty-rigid-var (name "b"))))
-					(ty-lookup (name "I64") (builtin))))))
+					(ty-fn (effectful false)
+						(ty-rigid-var-lookup (ty-rigid-var (name "b")))
+						(ty-lookup (name "I64") (builtin)))))))
 	(d-let
 		(p-assign (ident "use_it"))
 		(e-block
 			(s-let
 				(p-assign (ident "transform"))
-				(e-call (constraint-fn-var 333)
+				(e-call (constraint-fn-var 331)
 					(e-runtime-error (tag "erroneous_value_expr"))
 					(e-lambda
 						(args
 							(p-assign (ident "n")))
-						(e-dispatch-call (method "plus") (constraint-fn-var 331)
+						(e-dispatch-call (method "plus") (constraint-fn-var 329)
 							(receiver
 								(e-lookup-local
 									(p-assign (ident "n"))))
 							(args
 								(e-num (value "1")))))))
-			(e-call (constraint-fn-var 341)
+			(e-call (constraint-fn-var 339)
 				(e-lookup-local
 					(p-assign (ident "transform")))
 				(e-num (value "41"))))))
