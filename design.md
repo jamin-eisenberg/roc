@@ -1825,6 +1825,15 @@ inputs, and compiler invariant violations are operational aborts, not user-error
 module outcomes. They must propagate as operation errors rather than being
 converted into a user diagnostic or a module `Failure` value.
 
+Workers carry source-read and type-check operational errors through the existing
+result channel as explicit stage/error data. The coordinator preserves the
+failing module's observed file state and records the failure for reporting, then
+returns the error before finalizing compilation. Reports do not substitute for
+the operation error. Aborting stops workers and releases unconsumed task and
+result payloads before their borrowed module environments are destroyed. AST
+ownership passes when canonicalization is queued; the coordinator must not
+retain an owning AST pointer while a worker consumes it.
+
 ## Cache Boundary
 
 The checked module cache is the only checked cache boundary in this design.
