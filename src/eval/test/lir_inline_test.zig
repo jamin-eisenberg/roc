@@ -2693,6 +2693,95 @@ test "issue 10978 repeated recursive nominal constructions scan bounded backing 
     try std.testing.expect(find_growth_linear);
 }
 
+/// The event-handler view from issue 11144, with one nested lambda per item.
+fn issue11144EventHandlerViewSource(allocator: Allocator, item_count: usize) Allocator.Error![]u8 {
+    var source = std.ArrayList(u8).empty;
+    errdefer source.deinit(allocator);
+    try source.appendSlice(allocator,
+        \\Attribute(msg) := [Attr(Str, Str), On(Str, ({} -> msg))]
+        \\Html(msg) := [Text(Str), Element(Str, List(Attribute(msg)), List(Html(msg)))]
+        \\div : List(Attribute(msg)), List(Html(msg)) -> Html(msg)
+        \\div = |attrs, children| Element("div", attrs, children)
+        \\class : Str -> Attribute(msg)
+        \\class = |name| Attr("class", name)
+        \\text : Str -> Html(msg)
+        \\text = |s| Text(s)
+        \\render : Html(msg) -> Str
+        \\render = |html|
+        \\    match html {
+        \\        Text(s) => s
+        \\        Element(tag, _attrs, children) => "<${tag}>${Str.join_with(children.map(render), "")}</${tag}>"
+        \\    }
+        \\view : Str -> Html([Clicked(U64)])
+        \\view = |s| div([class("page")], [
+        \\
+    );
+    for (0..item_count) |index| {
+        const item = try std.fmt.allocPrint(
+            allocator,
+            "    div([class(\"item\"), On(\"click\", |{{}}| Clicked({d}))], [text(s), text(\"{d}\")]),\n",
+            .{ index + 1, index + 1 },
+        );
+        defer allocator.free(item);
+        try source.appendSlice(allocator, item);
+    }
+    try source.appendSlice(allocator,
+        \\])
+        \\main : Str
+        \\main = render(view("hi"))
+        \\
+    );
+    return try source.toOwnedSlice(allocator);
+}
+
+test "issue 11144 nested lambdas in one large body specialize in linear work" {
+    const allocator = std.testing.allocator;
+    {
+        const source = try issue11144EventHandlerViewSource(allocator, 2);
+        defer allocator.free(source);
+        var resources = try helpers.parseAndCheckProgramForProblemsWithBuiltin(
+            allocator,
+            .module,
+            source,
+            &.{},
+            try sharedPrePublishedBuiltin(),
+        );
+        defer resources.deinit(allocator);
+        const diagnostics = try resources.main.module_env.getDiagnostics();
+        defer allocator.free(diagnostics);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.parse_ast.tokenize_diagnostics.items.len);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.parse_ast.parse_diagnostics.items.len);
+        try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.checker.problems.problems.items.len);
+    }
+    const Counts = struct { snapshots: u64, backing_slots: u64, lookup_probes: u64, commit_steps: u64 };
+    var counts: [3]Counts = undefined;
+    for ([_]usize{ 16, 32, 64 }, &counts) |n, *out| {
+        const source = try issue11144EventHandlerViewSource(allocator, n);
+        defer allocator.free(source);
+        var diagnostics = MonoLower.Diagnostics{};
+        var lowered = try lowerMonotypeModuleWithOptions(allocator, source, .{ .diagnostics = &diagnostics });
+        defer lowered.deinit(allocator);
+        out.* = .{
+            .snapshots = diagnostics.graph.argument_class_members_snapshotted,
+            .backing_slots = diagnostics.graph.structural_backing_scan_slots,
+            .lookup_probes = diagnostics.body.nested_lookup_probes,
+            .commit_steps = diagnostics.body.draft_commit_lookup_steps,
+        };
+    }
+    // Compare deltas to remove fixed module work. A linear delta doubles;
+    // quadratic work approaches four times the preceding delta.
+    inline for (std.meta.fields(Counts)) |field| {
+        const small = @field(counts[0], field.name);
+        const medium = @field(counts[1], field.name);
+        const large = @field(counts[2], field.name);
+        const linear = small <= medium and medium <= large and
+            large - medium <= ((medium - small) *| 5) / 2;
+        if (!linear) std.debug.print("issue 11144 {s} grew nonlinearly: {d}->{d}->{d}\n", .{ field.name, small, medium, large });
+        try std.testing.expect(linear);
+    }
+}
+
 test "closed direct method calls reuse specialization before durable key construction" {
     const allocator = std.testing.allocator;
     const one_call =
@@ -3515,6 +3604,42 @@ test "boxy lowering preserves a runtime-built crash message" {
         return;
     };
     return error.TestUnexpectedResult;
+}
+
+test "issue 11024 boxy materializes imported defaults for repeated empty constructions" {
+    const allocator = std.testing.allocator;
+    const cfg_module =
+        \\Cfg := { f : U8 -> U8 ?? |n| n + 5, amount : U8 ?? 7, extra ?: U8 }
+    ;
+    const source =
+        \\import Cfg
+        \\make : {} -> Cfg.Cfg
+        \\make = |_| {}
+        \\main = {
+        \\    first = make({})
+        \\    second = make({})
+        \\    f = first.f
+        \\    g = second.f
+        \\    f(1) + g(2) + first.amount + second.amount + (first.?extra ?? 9)
+        \\}
+    ;
+    var compiled = try helpers.compileInspectedProgramForTargetWithBuiltin(
+        allocator,
+        std.testing.io,
+        .module,
+        source,
+        &.{.{ .name = "Cfg", .source = cfg_module }},
+        .native,
+        try sharedPrePublishedBuiltin(),
+        null,
+        .boxy,
+    );
+    defer compiled.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), compiled.resources.checker.problems.problems.items.len);
+    const output = try helpers.lirInterpreterInspectedStr(allocator, &compiled.lowered);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("36", output);
 }
 
 test "issue 11099 boxy dispatches an imported procedure stored in a record" {
@@ -8075,19 +8200,19 @@ test "dispatch evidence boundary validator rejects malformed specialization inte
     try std.testing.expect(templates.specialization_interface_relations.len > 0);
 
     var template_index: ?usize = null;
-    for (templates.templates, 0..) |template, i| {
+    for (templates.templates.items, 0..) |template, i| {
         if (template.specialization_interface_relations.len > 0) {
             template_index = i;
             break;
         }
     }
     const raw_template = template_index orelse return error.TestUnexpectedResult;
-    const saved_template_span = templates.templates[raw_template].specialization_interface_relations;
-    templates.templates[raw_template].specialization_interface_relations.start = @intCast(templates.specialization_interface_relations.len);
-    templates.templates[raw_template].specialization_interface_relations.len = 1;
+    const saved_template_span = templates.templates.items[raw_template].specialization_interface_relations;
+    templates.templates.items[raw_template].specialization_interface_relations.start = @intCast(templates.specialization_interface_relations.len);
+    templates.templates.items[raw_template].specialization_interface_relations.len = 1;
     var failure = artifact.validateDispatchEvidence() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(check.CheckedArtifact.DispatchEvidenceFailure.Kind.template_specialization_relations_out_of_bounds, failure.kind);
-    templates.templates[raw_template].specialization_interface_relations = saved_template_span;
+    templates.templates.items[raw_template].specialization_interface_relations = saved_template_span;
 
     const saved_parent = templates.dispatch_scopes[0].parent;
     templates.dispatch_scopes[0].parent = @enumFromInt(templates.dispatch_scopes.len);
@@ -8184,8 +8309,8 @@ test "dispatch evidence boundary validator rejects malformed specialization inte
     try std.testing.expectEqual(check.CheckedArtifact.DispatchEvidenceFailure.Kind.specialization_relation_local_proc_use_invalid, failure.kind);
     templates.dispatch_scopes[raw_local_scope].checked_expr = saved_scope_expr;
 
-    var path_param_span: ?@TypeOf(templates.templates[0].evidence_params) = null;
-    for (templates.templates) |template| {
+    var path_param_span: ?@TypeOf(templates.templates.items[0].evidence_params) = null;
+    for (templates.templates.items) |template| {
         const params = templates.evidenceParams(&template);
         for (params) |param| {
             if (param.path.len > 0) {

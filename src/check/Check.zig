@@ -171,7 +171,7 @@ unify_scratch: unifier.Scratch,
 /// reusable scratch arrays used in occurs check
 occurs_scratch: occurs.Scratch,
 /// Type annotation nodes already seen while generating one annotation type.
-seen_annos: std.DynamicBitSetUnmanaged,
+seen_annos: collections.ScopedBitSet,
 /// A pool of solver envs
 env_pool: EnvPool,
 /// wrapper around generalization, contains some internal state used to do it's work
@@ -183,7 +183,7 @@ return_constraints: std.ArrayListUnmanaged(ReturnConstraint),
 /// Stack of active lambda-owned return constraint ranges.
 return_constraint_frames: std.ArrayListUnmanaged(ReturnConstraintFrame),
 /// A map from one var to another. Used in instantiation and var copying
-var_map: std.AutoHashMap(Var, Var),
+var_map: collections.DenseMap(Var, Var),
 /// A map from one var to another. Used in instantiation and var copying
 var_set: std.AutoHashMap(Var, void),
 /// Reusable visited set for validating the concrete content of values passed
@@ -896,7 +896,7 @@ effectful_lambda_bodies: std.AutoHashMap(CIR.Expr.Idx, void),
 pending_function_effect_dependencies: std.ArrayListUnmanaged(Var),
 function_effect_dependency_frame_starts: std.ArrayListUnmanaged(usize),
 /// Reusable sparse memo for one directed function-effect graph query.
-function_effect_resolution: std.AutoHashMap(Var, FunctionEffectResolution),
+function_effect_resolution: collections.DenseMap(Var, FunctionEffectResolution),
 /// Scratch for `beginCommitProbe`: the caller env's var-pool length per rank
 /// at probe start, restored on a failed probe's rollback. One buffer suffices
 /// because commit-probes never nest. The type store's trail-based savepoints
@@ -1021,8 +1021,8 @@ fn typeAnnoSeen(self: *const Self, anno_idx: CIR.TypeAnno.Idx) bool {
     return self.seen_annos.isSet(nodeSlot(anno_idx));
 }
 
-fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) void {
-    self.seen_annos.set(nodeSlot(anno_idx));
+fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) std.mem.Allocator.Error!void {
+    try self.seen_annos.set(self.gpa, nodeSlot(anno_idx));
 }
 
 /// A static-dispatch receiver relation copied by instantiating a constrained
@@ -2022,7 +2022,6 @@ const HoistSelectionTransaction = struct {
                 try self.stageExprDependenciesInternal(binop.rhs, context);
             },
             .e_unary_minus => |unary| try self.stageExprDependenciesInternal(unary.expr, context),
-            .e_unary_not => |unary| try self.stageExprDependenciesInternal(unary.expr, context),
             .e_field_access => |field| try self.stageExprDependenciesInternal(field.receiver, context),
             .e_interpolation => |interpolation| {
                 try self.stageExprDependenciesInternal(interpolation.first, context);
@@ -2560,10 +2559,10 @@ fn initAssumePrepared(
         .import_mapping = import_mapping,
         .unify_scratch = try unifier.Scratch.init(gpa),
         .occurs_scratch = try occurs.Scratch.init(gpa),
-        .seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(gpa, node_count),
+        .seen_annos = try collections.ScopedBitSet.initEmpty(gpa, node_count),
         .env_pool = try EnvPool.init(gpa),
         .generalizer = try Generalizer.init(gpa, types),
-        .var_map = std.AutoHashMap(Var, Var).init(gpa),
+        .var_map = collections.DenseMap(Var, Var).init(gpa),
         .constraints = try Constraint.SafeList.initCapacity(gpa, 32),
         .return_constraints = .empty,
         .return_constraint_frames = .empty,
@@ -2683,7 +2682,7 @@ fn initAssumePrepared(
         .effectful_lambda_bodies = std.AutoHashMap(CIR.Expr.Idx, void).init(gpa),
         .pending_function_effect_dependencies = .empty,
         .function_effect_dependency_frame_starts = .empty,
-        .function_effect_resolution = std.AutoHashMap(Var, FunctionEffectResolution).init(gpa),
+        .function_effect_resolution = collections.DenseMap(Var, FunctionEffectResolution).init(gpa),
         .probe_var_pool_lens = .empty,
     };
 
@@ -3877,7 +3876,6 @@ fn markHoistInvalidatedExprChildren(
             try self.markHoistInvalidatedExpr(binop.rhs, work);
         },
         .e_unary_minus => |unary| try self.markHoistInvalidatedExpr(unary.expr, work),
-        .e_unary_not => |unary| try self.markHoistInvalidatedExpr(unary.expr, work),
         .e_field_access => |field| try self.markHoistInvalidatedExpr(field.receiver, work),
         .e_method_call => |call| {
             try self.markHoistInvalidatedExpr(call.receiver, work);
@@ -4102,7 +4100,6 @@ fn firstHoistSelectionTestExpr(checker: *Self) error{ExpectedHoistSelectionTestE
             .e_nominal_external,
             .e_binop,
             .e_unary_minus,
-            .e_unary_not,
             .e_field_access,
             .e_interpolation,
             .e_structural_eq,
@@ -4447,7 +4444,6 @@ fn exprCanBeHoistedRoot(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -4526,7 +4522,6 @@ fn exprCanCoverHoistedChildren(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -4593,7 +4588,6 @@ fn exprCanBeHoistedBindingRoot(self: *Self, expr: CIR.Expr.Idx) bool {
         .e_nominal_external,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_interpolation,
         .e_structural_eq,
@@ -6581,7 +6575,7 @@ fn instantiateVarWithSubs(
 fn substitutedStructuralOrigin(
     self: *Self,
     origin: StructuralSchemeRequirementOrigin,
-    var_map: *const std.AutoHashMap(Var, Var),
+    var_map: *const collections.DenseMap(Var, Var),
 ) StructuralSchemeRequirementOrigin {
     const receiver_root = self.types.resolveVar(origin.receiver_var).var_;
     const fn_root = self.types.resolveVar(origin.constraint_fn_var).var_;
@@ -8853,7 +8847,7 @@ fn hoistedRootIsIntrinsicallyKept(
                 }
                 return !has_error;
             }
-            return try self.varIsConcreteCallableRootType(type_var);
+            return try self.varHasConcreteType(type_var);
         }
     }
 
@@ -8891,8 +8885,9 @@ fn varIsConcreteHoistedConstType(self: *Self, var_: Var) Allocator.Error!bool {
     return try self.varIsConcreteHoistedConstTypeInternal(.value_graph, .data_constant, var_, &self.var_set);
 }
 
-fn varIsConcreteCallableRootType(self: *Self, var_: Var) Allocator.Error!bool {
-    if (builtin.mode == .Debug) std.debug.assert(self.varIsFunctionType(var_));
+/// Whether the complete value type is fixed, permitting callable components.
+/// Used both for callable hoisting and to close concrete recursive dispatch.
+fn varHasConcreteType(self: *Self, var_: Var) Allocator.Error!bool {
     self.var_set.clearRetainingCapacity();
     return try self.varIsConcreteHoistedConstTypeInternal(.value_graph, .callable_binding, var_, &self.var_set);
 }
@@ -9288,7 +9283,6 @@ fn hoistedRootDependenciesAreKeptInternal(
         .e_binop => |binop| (try self.hoistedRootDependenciesAreKeptInternal(binop.lhs, context, keep_oracle)) and
             try self.hoistedRootDependenciesAreKeptInternal(binop.rhs, context, keep_oracle),
         .e_unary_minus => |unary| self.hoistedRootDependenciesAreKeptInternal(unary.expr, context, keep_oracle),
-        .e_unary_not => |unary| self.hoistedRootDependenciesAreKeptInternal(unary.expr, context, keep_oracle),
         .e_field_access => |field| self.hoistedRootDependenciesAreKeptInternal(field.receiver, context, keep_oracle),
         .e_interpolation => |interpolation| blk: {
             const fn_var = interpolation.constraint_fn_var orelse break :blk false;
@@ -9417,7 +9411,6 @@ fn hoistedExprAllowsStoredConst(
         .e_binop => |binop| (try self.hoistedExprAllowsStoredConst(module, binop.lhs, context)) and
             try self.hoistedExprAllowsStoredConst(module, binop.rhs, context),
         .e_unary_minus => |unary| self.hoistedExprAllowsStoredConst(module, unary.expr, context),
-        .e_unary_not => |unary| self.hoistedExprAllowsStoredConst(module, unary.expr, context),
         .e_field_access => |field| self.hoistedExprAllowsStoredConst(module, field.receiver, context),
         .e_interpolation => |interpolation| (try self.hoistedExprAllowsStoredConst(module, interpolation.first, context)) and
             try self.hoistedExprSpanAllowsStoredConst(module, interpolation.parts, context),
@@ -9499,7 +9492,6 @@ fn hoistedCallableDefForExpr(
         .e_lambda,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_method_call,
         .e_dispatch_call,
@@ -14452,13 +14444,11 @@ fn ensureTypeDeclGenerated(
     self.setTypeDeclGenerationState(decl_idx, .generating);
     errdefer self.setTypeDeclGenerationState(decl_idx, .not_generated);
 
-    const outer_seen_annos = self.seen_annos;
+    const anno_scope = self.seen_annos.enterScope();
+    defer self.seen_annos.leaveScope(anno_scope);
     const outer_type_decl_rigid_vars = self.type_decl_rigid_vars;
-    self.seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, @intCast(self.cir.store.nodes.len()));
     self.type_decl_rigid_vars = .{};
     defer {
-        self.seen_annos.deinit(self.gpa);
-        self.seen_annos = outer_seen_annos;
         self.type_decl_rigid_vars.deinit(self.gpa);
         self.type_decl_rigid_vars = outer_type_decl_rigid_vars;
     }
@@ -15364,7 +15354,7 @@ fn generateAnnoTypeInPlace(self: *Self, anno_idx: CIR.TypeAnno.Idx, env: *Env, c
     defer self.recordTypeDeclAnnoResult(ctx, anno_var);
 
     // Put this anno in the "seen" map immediately, to support recursive references
-    self.markTypeAnnoSeen(anno_idx);
+    try self.markTypeAnnoSeen(anno_idx);
 
     switch (anno) {
         .rigid_var => |rigid| {
@@ -19331,7 +19321,7 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
         // function calling //
         .e_call => |call| {
             switch (call.called_via) {
-                .apply, .record_builder => blk: {
+                .apply, .record_builder, .unary_op => blk: {
                     // First, check the function being called
                     // It could be effectful, e.g. `(mk_fn!())(arg)`
                     self.checking_call_arg = true;
@@ -19578,9 +19568,9 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                         );
                     }
                 },
-                .binop, .unary_op, .string_interpolation => {
-                    // The canonicalizer currently only produces apply, record_builder, or range for e_call expressions.
-                    // Other call types (binop, unary_op, string_interpolation) are
+                .binop, .string_interpolation => {
+                    // The canonicalizer produces apply, record_builder, or unary_op for e_call expressions.
+                    // Other call types (binop, string_interpolation) are
                     // represented as different expression types. If we hit this, there's a compiler bug.
                     std.debug.assert(false);
                     try self.markErroneous(expr_var);
@@ -19613,9 +19603,6 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
         },
         .e_unary_minus => |unary| {
             does_fx = try self.checkUnaryMinusExpr(expr_idx, expr_var, expr_region, env, unary, nested_expected) or does_fx;
-        },
-        .e_unary_not => |unary| {
-            does_fx = try self.checkUnaryNotExpr(expr_idx, expr_var, expr_region, env, unary, nested_expected) or does_fx;
         },
         .e_field_access => |field_access| {
             std.debug.assert(field_access.segments.len > 0);
@@ -19823,6 +19810,17 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                     method_call.method_name_region,
                     expr_idx,
                 );
+                // Publish before discharge: derived methods may replace this
+                // plan with a structural operation, which must remain selected.
+                try self.cir.store.replaceExprWithDispatchCall(
+                    expr_idx,
+                    method_call.receiver,
+                    method_call.method_name,
+                    method_call.method_name_region,
+                    method_call.args,
+                    constraint_fn_var,
+                    .method_call,
+                );
                 try self.checkStaticDispatchConstraints(env, false);
                 for (arg_expr_idxs, 0..) |arg_expr_idx, i| {
                     self.checking_call_arg = true;
@@ -19871,15 +19869,17 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                     method_call.method_name_region,
                     expr_idx,
                 );
-                try self.cir.store.replaceExprWithDispatchCall(
-                    expr_idx,
-                    method_call.receiver,
-                    method_call.method_name,
-                    method_call.method_name_region,
-                    method_call.args,
-                    constraint_fn_var,
-                    .method_call,
-                );
+                if (eager_constraint_fn_var == null) {
+                    try self.cir.store.replaceExprWithDispatchCall(
+                        expr_idx,
+                        method_call.receiver,
+                        method_call.method_name,
+                        method_call.method_name_region,
+                        method_call.args,
+                        constraint_fn_var,
+                        .method_call,
+                    );
+                }
                 if (try self.varIsEffectfulFunction(constraint_fn_var)) {
                     self.markCurrentHoistObservableEffect();
                     does_fx = true;
@@ -22864,36 +22864,6 @@ fn checkUnaryMinusExpr(self: *Self, expr_idx: CIR.Expr.Idx, expr_var: Var, expr_
     return does_fx;
 }
 
-// unary not //
-
-/// Check the unary expr.
-/// Desugars `!a` to `a.not() : a -> a`,
-fn checkUnaryNotExpr(self: *Self, expr_idx: CIR.Expr.Idx, expr_var: Var, expr_region: Region, env: *Env, unary: CIR.Expr.UnaryNot, expected: Expected) Allocator.Error!bool {
-    const trace = tracy.trace(@src());
-    defer trace.end();
-
-    const child_expected = expected.forStatement();
-
-    // Check the operand expression
-    const does_fx = try self.checkExpr(unary.expr, env, child_expected);
-    if (try self.retireCallLikeExprWithErroneousOperands(expr_idx, expr_var, &.{unary.expr})) return does_fx;
-
-    // Get the not method + ret var
-    // Here, we assert that the arg and ret of `not` are same type
-    const not_method_name = self.cir.idents.not;
-    const not_arg_var = @as(Var, ModuleEnv.varFrom(unary.expr));
-    const not_ret_var = not_arg_var;
-
-    // Create the not static dispatch function on the not_arg + not_ret
-    // This function attaches the dispatch fn to the not_arg
-    try self.mkUnaryOp(not_arg_var, not_ret_var, not_method_name, env, expr_region, expr_idx);
-
-    // The result type is the operand type (the desugaring is `a -> a`).
-    _ = try self.unify(expr_var, not_ret_var, env);
-
-    return does_fx;
-}
-
 // binop //
 
 /// Check the types for a binary operation expression
@@ -23551,8 +23521,6 @@ fn publishUnaryDispatchExpr(
     const expr = self.cir.store.getExpr(expr_idx);
     const receiver: CIR.Expr.Idx, const surface_origin: CIR.Expr.SurfaceOrigin = if (expr == .e_unary_minus)
         .{ expr.e_unary_minus.expr, .unary_minus }
-    else if (expr == .e_unary_not)
-        .{ expr.e_unary_not.expr, .unary_not }
     else
         return;
     try self.cir.store.replaceExprWithDispatchCall(
@@ -25580,8 +25548,16 @@ fn checkDefaultRestrictions(self: *Self) std.mem.Allocator.Error!void {
     var recursive_defaults: std.ArrayList(PendingDefaultCheck) = .empty;
     defer recursive_defaults.deinit(self.gpa);
 
-    var evidence = DefaultWalkEvidence{};
+    var evidence = DefaultWalkEvidence{
+        .omitted_defaults_by_expr = .init(self.gpa),
+        .next_omitted_default = try self.gpa.alloc(?u32, self.cir.record_omitted_defaults.items.items.len),
+    };
     defer evidence.deinit(self.gpa);
+    for (self.cir.record_omitted_defaults.items.items, 0..) |omitted, index| {
+        const entry = try evidence.omitted_defaults_by_expr.getOrPut(omitted.expr);
+        evidence.next_omitted_default[index] = if (entry.found_existing) entry.value_ptr.* else null;
+        entry.value_ptr.* = @intCast(index);
+    }
 
     // Top-level binder pattern -> def body, for following reference edges
     // through def bodies during the residue walk. A destructuring def
@@ -25637,7 +25613,7 @@ fn checkDefaultRestrictions(self: *Self) std.mem.Allocator.Error!void {
             // A shared use copies no vars (it shares the in-flight
             // definition's), so it has no fresh pairs to seed; the walk
             // reaches the shared body through the ordinary reference edge.
-            .shared_value_use, .recursive_reference => {},
+            .shared_value_use, .recursive_dispatch_target, .recursive_reference => {},
         }
     }
     for (self.dispatch_target_instantiations.items, 0..) |instantiation, index| {
@@ -25892,6 +25868,10 @@ fn rejectDefaultParameterAliasing(
 /// Prebuilt evidence indexes for one `checkDefaultRestrictions` run (built
 /// once, shared by every default's residue walk).
 const DefaultWalkEvidence = struct {
+    /// Construction -> first recorded omission, with links into the CIR table.
+    /// Built once so cycle walks consume exact omission evidence in O(fields).
+    omitted_defaults_by_expr: collections.DenseMap(CIR.Expr.Idx, u32),
+    next_omitted_default: []?u32,
     pattern_to_def_expr: std.AutoHashMapUnmanaged(CIR.Pattern.Idx, CIR.Expr.Idx) = .empty,
     /// Local instantiating node -> scheme-use record indices
     /// (`value_use`/`nested_function_use` slots only).
@@ -25903,6 +25883,8 @@ const DefaultWalkEvidence = struct {
     instantiations_by_var: std.AutoHashMapUnmanaged(Var, std.ArrayListUnmanaged(u32)) = .empty,
 
     fn deinit(evidence: *DefaultWalkEvidence, gpa: std.mem.Allocator) void {
+        evidence.omitted_defaults_by_expr.deinit();
+        gpa.free(evidence.next_omitted_default);
         evidence.pattern_to_def_expr.deinit(gpa);
         var node_lists = evidence.node_to_scheme_uses.valueIterator();
         while (node_lists.next()) |list| list.deinit(gpa);
@@ -25926,7 +25908,7 @@ const DefaultWalkEvidence = struct {
 /// were already dropped by canonicalization's cycle pass), dispatch-resolved
 /// call targets (`dispatch_target_instantiations`, joined through scheme-use
 /// evidence, see `followDispatchSeed`), type-dispatch method bindings, and
-/// every omitted defaulted field on a construction's SOLVED row. Foreign
+/// the recorded omitted defaults owned by each construction. Foreign
 /// defaults were validated in their declaring module, which cannot reference
 /// this one.
 fn defaultMaterializationIsRecursive(
@@ -26098,7 +26080,6 @@ fn defaultMaterializationIsRecursive(
                 .e_zero_argument_tag,
                 .e_binop,
                 .e_unary_minus,
-                .e_unary_not,
                 .e_field_access,
                 .e_method_call,
                 .e_dispatch_call,
@@ -26190,7 +26171,7 @@ fn defaultMaterializationIsRecursive(
             .e_empty_record => {
                 if (try self.appendOmittedDefaultDependencies(
                     expr_idx,
-                    &.{},
+                    evidence,
                     self_module,
                     target_expr_node,
                     &visited_defaults,
@@ -26202,7 +26183,7 @@ fn defaultMaterializationIsRecursive(
                 if (record.ext == null) {
                     if (try self.appendOmittedDefaultDependencies(
                         expr_idx,
-                        fields,
+                        evidence,
                         self_module,
                         target_expr_node,
                         &visited_defaults,
@@ -26218,7 +26199,6 @@ fn defaultMaterializationIsRecursive(
                 }
             },
             .e_unary_minus => |unary| try expr_work.append(self.gpa, unary.expr),
-            .e_unary_not => |unary| try expr_work.append(self.gpa, unary.expr),
             .e_str => |str| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(str.span)),
             .e_list => |list| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(list.elems)),
             .e_tuple => |tuple| try expr_work.appendSlice(self.gpa, self.cir.store.sliceExpr(tuple.elems)),
@@ -26449,95 +26429,28 @@ fn appendDefaultWalkStmtExprs(
     }
 }
 
-fn recordLiteralSuppliesField(
-    self: *const Self,
-    fields: []const CIR.RecordField.Idx,
-    field_name: Ident.Idx,
-) bool {
-    for (fields) |field_idx| {
-        if (self.cir.store.getRecordField(field_idx).name == field_name) return true;
-    }
-    return false;
-}
-
-/// Append the local default expressions that `record_expr` materializes by
-/// omission. Returns true immediately when one is the target default.
+/// Append the local defaults recorded for this construction by unification.
+/// Solved types alone cannot identify omissions: an implicitly lifted record's
+/// root is nominal, and the nominal declaration does not say what this site
+/// supplied. Returns true immediately when one omission is the target default.
 fn appendOmittedDefaultDependencies(
     self: *Self,
     record_expr: CIR.Expr.Idx,
-    supplied_fields: []const CIR.RecordField.Idx,
+    evidence: *const DefaultWalkEvidence,
     self_module: base.ModuleIdentity.Idx,
     target_expr_node: u32,
     visited_defaults: *std.AutoHashMapUnmanaged(u32, void),
     expr_work: *std.ArrayList(CIR.Expr.Idx),
 ) std.mem.Allocator.Error!bool {
-    var current = ModuleEnv.varFrom(record_expr);
-    var visited_rows: std.AutoHashMapUnmanaged(Var, void) = .empty;
-    defer visited_rows.deinit(self.gpa);
-
-    while (true) {
-        const resolved = self.types.resolveVar(current);
-        const seen = try visited_rows.getOrPut(self.gpa, resolved.var_);
-        if (seen.found_existing) return false;
-
-        switch (resolved.desc.content) {
-            .alias => |alias| current = self.types.getAliasBackingVar(alias),
-            .structure => |flat| switch (flat) {
-                .record => |record| {
-                    if (try self.appendDefaultsFromRecordFields(
-                        record.fields,
-                        supplied_fields,
-                        self_module,
-                        target_expr_node,
-                        visited_defaults,
-                        expr_work,
-                    )) return true;
-                    current = record.ext;
-                },
-                .record_unbound => |fields| return try self.appendDefaultsFromRecordFields(
-                    fields,
-                    supplied_fields,
-                    self_module,
-                    target_expr_node,
-                    visited_defaults,
-                    expr_work,
-                ),
-                .empty_record => return false,
-                .tuple,
-                .nominal_type,
-                .fn_pure,
-                .fn_effectful,
-                .fn_unbound,
-                .tag_union,
-                .empty_tag_union,
-                => return false,
-            },
-            .flex, .rigid, .field_presence, .err => return false,
-        }
-    }
-}
-
-fn appendDefaultsFromRecordFields(
-    self: *Self,
-    fields_range: types_mod.RecordField.SafeMultiList.Range,
-    supplied_fields: []const CIR.RecordField.Idx,
-    self_module: base.ModuleIdentity.Idx,
-    target_expr_node: u32,
-    visited_defaults: *std.AutoHashMapUnmanaged(u32, void),
-    expr_work: *std.ArrayList(CIR.Expr.Idx),
-) std.mem.Allocator.Error!bool {
-    const fields = self.types.getRecordFieldsSlice(fields_range);
-    for (fields.items(.name), fields.items(.presence)) |field_name, presence| {
-        if (self.recordLiteralSuppliesField(supplied_fields, field_name)) continue;
-        const presence_var = presence.presenceVar() orelse continue;
-        const presence_content = self.types.resolveVar(presence_var).desc.content;
-        if (presence_content != .field_presence or presence_content.field_presence != .defaulted) continue;
-        const default_id = presence_content.field_presence.defaulted;
-        if (default_id.origin_module != self_module) continue;
-        if (default_id.expr_node == target_expr_node) return true;
-        const seen = try visited_defaults.getOrPut(self.gpa, default_id.expr_node);
+    var next = evidence.omitted_defaults_by_expr.get(record_expr);
+    while (next) |index| {
+        const omitted = self.cir.record_omitted_defaults.items.items[index];
+        next = evidence.next_omitted_default[index];
+        if (omitted.origin_module != self_module) continue;
+        if (omitted.default_expr_node == target_expr_node) return true;
+        const seen = try visited_defaults.getOrPut(self.gpa, omitted.default_expr_node);
         if (!seen.found_existing) {
-            try expr_work.append(self.gpa, @enumFromInt(default_id.expr_node));
+            try expr_work.append(self.gpa, @enumFromInt(omitted.default_expr_node));
         }
     }
     return false;
@@ -29512,7 +29425,6 @@ fn tailTrySuffixExpr(self: *const Self, expr_idx: CIR.Expr.Idx) ?CIR.Expr.Idx {
         .e_lambda,
         .e_binop,
         .e_unary_minus,
-        .e_unary_not,
         .e_field_access,
         .e_method_call,
         .e_dispatch_call,
@@ -29875,17 +29787,17 @@ fn dispatchStateTypeKey(
 /// match an ancestor. Every ancestor's key was computed at its own record
 /// time, so the comparison never depends on which descendant or fixpoint
 /// pass walks the lineage first.
-fn dispatchStateKeyRepeatsAncestor(
+fn repeatedDispatchStateAncestor(
     self: *Self,
     constraint: StaticDispatchConstraint,
     parent_constraint_fn_var: ?Var,
     method_lookup: StaticDispatchMethodBinding,
     state_type_key: [32]u8,
-) bool {
+) ?u32 {
     var steps: usize = 0;
     var ancestor_fn = parent_constraint_fn_var;
     while (ancestor_fn) |fn_var| {
-        const ancestor_idx = self.dispatch_target_instantiation_by_fn_var.get(fn_var) orelse return false;
+        const ancestor_idx = self.dispatch_target_instantiation_by_fn_var.get(fn_var) orelse return null;
         steps += 1;
         std.debug.assert(steps <= self.dispatch_target_instantiations.items.len);
         const ancestor = self.dispatch_target_instantiations.items[ancestor_idx];
@@ -29893,11 +29805,11 @@ fn dispatchStateKeyRepeatsAncestor(
             std.meta.eql(ancestor.target_binding, method_lookup.binding) and
             ancestor.method_name.eql(constraint.fn_name))
         {
-            if (std.meta.eql(state_type_key, ancestor.state_type_key)) return true;
+            if (std.meta.eql(state_type_key, ancestor.state_type_key)) return ancestor_idx;
         }
         ancestor_fn = ancestor.parent_constraint_fn_var;
     }
-    return false;
+    return null;
 }
 
 /// Whether selecting `method_lookup` re-enters an ancestor edge's exact
@@ -30731,12 +30643,21 @@ fn resolveDispatchTargetMethodVar(
     }
 
     const state_type_key = try self.dispatchStateTypeKey(dispatcher_var, constraint.fn_var);
-    if (self.dispatchStateKeyRepeatsAncestor(
+    if (self.repeatedDispatchStateAncestor(
         constraint,
         parent_constraint_fn_var,
         method_lookup,
         state_type_key,
-    )) {
+    )) |ancestor_idx| {
+        if (try self.closeConcreteRecursiveDispatch(
+            dispatcher_var,
+            parent_constraint_fn_var,
+            constraint,
+            method_lookup,
+            predeclared_scheme_for_method,
+            ancestor_idx,
+            state_type_key,
+        )) |method_var| return method_var;
         try self.rejectRecursiveStaticDispatch(dispatcher_var, constraint, env, failure_expr, null);
         return null;
     }
@@ -30765,6 +30686,63 @@ fn resolveDispatchTargetMethodVar(
         env,
         region,
     );
+}
+
+/// POLICY: concrete recursive dispatch (design.md). An exact repeated state
+/// whose types and callable evidence are fixed is an implementation backedge,
+/// not another scheme instantiation. Other requirements of the ancestor stay
+/// on the ordinary validation worklist.
+fn closeConcreteRecursiveDispatch(
+    self: *Self,
+    dispatcher_var: Var,
+    parent_constraint_fn_var: ?Var,
+    constraint: StaticDispatchConstraint,
+    method_lookup: StaticDispatchMethodBinding,
+    predeclared_scheme_for_method: ?Var,
+    ancestor_idx: u32,
+    state_type_key: [32]u8,
+) Allocator.Error!?Var {
+    if (!try self.varHasConcreteType(dispatcher_var) or
+        !try self.varHasConcreteType(constraint.fn_var)) return null;
+
+    const scheme_root = if (method_lookup.is_this_module)
+        predeclared_scheme_for_method orelse ModuleEnv.varFrom(method_lookup.binding.type_node_idx)
+    else
+        try self.importedMethodScheme(method_lookup);
+    var scratch: dispatch_evidence.Scratch = .{};
+    defer scratch.deinit(self.gpa);
+    var params = std.ArrayListUnmanaged(dispatch_evidence.EvidenceParam).empty;
+    defer params.deinit(self.gpa);
+    try dispatch_evidence.enumerateEvidenceParams(self.gpa, self.types, scheme_root, &scratch, &params);
+    for (params.items) |param| {
+        if (param.source != .scheme_callable or param.path.len == 0) return null;
+    }
+
+    const ancestor = self.dispatch_target_instantiations.items[ancestor_idx];
+    try self.dispatch_target_instantiations.ensureUnusedCapacity(self.gpa, 1);
+    try self.dispatch_target_instantiation_by_fn_var.ensureUnusedCapacity(self.gpa, 1);
+    try self.cir.recordSchemeUse(
+        if (constraintIntroExpr(constraint)) |expr| @intFromEnum(expr) else 0,
+        .recursive_dispatch_target,
+        @intFromEnum(constraint.fn_var),
+        ancestor.method_var,
+        &.{},
+    );
+    const raw_index: u32 = @intCast(self.dispatch_target_instantiations.items.len);
+    self.dispatch_target_instantiations.appendAssumeCapacity(.{
+        .constraint_fn_var = constraint.fn_var,
+        .is_literal_conversion = constraint.origin.literalKind() != null,
+        .receiver_var = dispatcher_var,
+        .parent_constraint_fn_var = parent_constraint_fn_var,
+        .state_type_key = state_type_key,
+        .grew_from_ancestor = false,
+        .target_env = method_lookup.env,
+        .target_binding = method_lookup.binding,
+        .method_name = constraint.fn_name,
+        .method_var = ancestor.method_var,
+    });
+    self.dispatch_target_instantiation_by_fn_var.putAssumeCapacityNoClobber(constraint.fn_var, raw_index);
+    return ancestor.method_var;
 }
 
 fn localProcedureMethodBinding(self: *const Self, method_lookup: StaticDispatchMethodBinding) bool {
@@ -37641,12 +37619,7 @@ fn validateDerivedParseVar(
     return switch (resolved.desc.content) {
         .structure => |structure| switch (structure) {
             .nominal_type => |nominal| try self.validateDerivedParseNominal(var_, nominal, encoding_var, state_var, err_var, constraint, env, region, walk, context, failure_expr),
-            .record => blk: {
-                if (walk.visited.contains(resolved.var_)) break :blk .ok;
-                try walk.visited.put(resolved.var_, {});
-                break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .record_unbound => blk: {
+            .record, .record_unbound, .empty_record => blk: {
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
@@ -37660,29 +37633,6 @@ fn validateDerivedParseVar(
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseTuple(resolved.var_, tuple, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .empty_record => blk: {
-                switch (try self.validateRenameFieldMethod(encoding_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_start, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_after_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateSkipRecordFieldMethod(encoding_var, state_var, err_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                break :blk .ok;
             },
             .empty_tag_union => .unsupported,
             .fn_pure, .fn_effectful, .fn_unbound => .unsupported,
