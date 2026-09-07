@@ -3607,6 +3607,13 @@ pub fn build(b: *std.Build) void {
         // track as inputs, so always regenerate.
         run_glue_abi.has_side_effects = true;
 
+        const run_zig_union_layouts = b.addRunArtifact(roc_exe);
+        run_zig_union_layouts.addArgs(&.{ "glue", "--no-cache" });
+        run_zig_union_layouts.addFileArg(b.path("src/glue/src/ZigGlue.roc"));
+        const zig_union_layouts_dir = run_zig_union_layouts.addOutputDirectoryArg("glue-zig-union-layouts");
+        run_zig_union_layouts.addFileArg(b.path("test/glue/tag-union-layouts/main.roc"));
+        run_zig_union_layouts.has_side_effects = true;
+
         const lock_targets = [_]struct { name: []const u8, target: std.Build.ResolvedTarget }{
             .{ .name = "x64_linux", .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .linux, .abi = .musl }) },
             .{ .name = "arm64_linux", .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .musl }) },
@@ -3630,6 +3637,19 @@ pub fn build(b: *std.Build) void {
                 .root_source_file = glue_abi_dir.path(b, "roc_platform_abi.zig"),
             });
             run_check_glue_abi_step.dependOn(&lock_obj.step);
+
+            const union_lock_obj = b.addObject(.{
+                .name = b.fmt("glue_zig_union_layouts_{s}", .{lock_target.name}),
+                .root_module = b.createModule(.{
+                    .root_source_file = b.path("test/glue/tag-union-layouts/compile_lock.zig"),
+                    .target = lock_target.target,
+                    .optimize = optimize,
+                }),
+            });
+            union_lock_obj.root_module.addAnonymousImport("glue_abi", .{
+                .root_source_file = zig_union_layouts_dir.path(b, "roc_platform_abi.zig"),
+            });
+            run_check_glue_abi_step.dependOn(&union_lock_obj.step);
         }
 
         const run_c_glue_abi = b.addRunArtifact(roc_exe);
@@ -3676,6 +3696,17 @@ pub fn build(b: *std.Build) void {
         run_rust_glue_abi.addFileArg(b.path("test/glue/layout-probe/main.roc"));
         run_rust_glue_abi.has_side_effects = true;
 
+        const run_rust_union_layouts = b.addRunArtifact(roc_exe);
+        run_rust_union_layouts.addArgs(&.{ "glue", "--no-cache" });
+        run_rust_union_layouts.addFileArg(b.path("src/glue/src/RustGlue.roc"));
+        const rust_union_layouts_dir = run_rust_union_layouts.addOutputDirectoryArg("glue-rust-union-layouts");
+        run_rust_union_layouts.addFileArg(b.path("test/glue/tag-union-layouts/main.roc"));
+        run_rust_union_layouts.has_side_effects = true;
+
+        const rust_union_lock_files = b.addWriteFiles();
+        _ = rust_union_lock_files.addCopyFile(rust_union_layouts_dir.path(b, "roc_platform_abi.rs"), "roc_platform_abi.rs");
+        const rust_union_lock_source = rust_union_lock_files.addCopyFile(b.path("test/glue/tag-union-layouts/compile_lock.rs"), "compile_lock.rs");
+
         const native_arch = target.result.cpu.arch;
         const native_rust_target: ?[]const u8 = switch (roc_target.classifyOs(target.result.os.tag)) {
             .linux => if (native_arch == .x86_64) "x86_64-unknown-linux-musl" else if (native_arch == .aarch64) "aarch64-unknown-linux-musl" else null,
@@ -3706,6 +3737,23 @@ pub fn build(b: *std.Build) void {
             compile_rust_lock.addArg("-o");
             _ = compile_rust_lock.addOutputFileArg(b.fmt("rust-abi-lock-{s}.rmeta", .{lock_target.name}));
             run_check_glue_abi_step.dependOn(&compile_rust_lock.step);
+
+            const compile_rust_union_lock = b.addSystemCommand(&.{
+                "rustc",
+                "--edition=2021",
+                "-D",
+                "warnings",
+                "--crate-type=lib",
+                "--emit=metadata",
+                "--cfg",
+                "no_roc_std_helpers",
+                "--target",
+                lock_target.triple,
+            });
+            compile_rust_union_lock.addFileArg(rust_union_lock_source);
+            compile_rust_union_lock.addArg("-o");
+            _ = compile_rust_union_lock.addOutputFileArg(b.fmt("rust-union-layouts-{s}.rmeta", .{lock_target.name}));
+            run_check_glue_abi_step.dependOn(&compile_rust_union_lock.step);
         }
     }
 

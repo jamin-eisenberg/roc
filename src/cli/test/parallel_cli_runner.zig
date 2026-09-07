@@ -452,10 +452,12 @@ const CustomCase = enum {
     glue_zig_opaque_box,
     glue_zig_box_payload_alignment,
     glue_zig_returned_list_elements,
+    glue_zig_payload_free_tag_union_aliases,
     glue_rust,
     glue_rust_provided_context_callable_outcome,
     glue_rust_box_payload_alignment,
     glue_rust_returned_list_elements,
+    glue_rust_payload_free_tag_union_names,
     glue_zig_bang_record_fields,
     glue_package_nominal_api_alias,
     glue_nominal_canonical_field,
@@ -923,10 +925,12 @@ const glue_cases = [_]CliCase{
     .{ .id = 0, .suite = .glue, .name = "glue regression: ZigGlue uses RocBox for opaque boxed app types", .body = .{ .custom = .glue_zig_opaque_box } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: ZigGlue decrefs non-refcounted boxed payloads with payload alignment", .body = .{ .custom = .glue_zig_box_payload_alignment } },
     .{ .id = 0, .suite = .glue, .name = "issue 10451: ZigGlue releases list elements returned from a provided entrypoint", .body = .{ .custom = .glue_zig_returned_list_elements } },
+    .{ .id = 0, .suite = .glue, .name = "issue 11197: generated Zig compiles when two hosted functions share a payload-free tag union", .body = .{ .custom = .glue_zig_payload_free_tag_union_aliases } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: RustGlue succeeds on fx platform", .body = .{ .custom = .glue_rust } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: provided context can return a callable inside an outcome", .body = .{ .custom = .glue_rust_provided_context_callable_outcome } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: RustGlue decrefs non-refcounted boxed payloads with payload alignment", .body = .{ .custom = .glue_rust_box_payload_alignment } },
     .{ .id = 0, .suite = .glue, .name = "issue 10451: RustGlue releases list elements returned from a provided entrypoint", .body = .{ .custom = .glue_rust_returned_list_elements } },
+    .{ .id = 0, .suite = .glue, .name = "issue 11197: generated Rust names only declared types for a payload-free tag union", .body = .{ .custom = .glue_rust_payload_free_tag_union_names } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: ZigGlue quotes bang record fields", .body = .{ .custom = .glue_zig_bang_record_fields } },
     .{ .id = 0, .suite = .glue, .name = "issue 9865: RustGlue does not panic for package nominal record API alias", .body = .{ .custom = .glue_package_nominal_api_alias } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: nominal scalar field resolves canonical backing", .body = .{ .custom = .glue_nominal_canonical_field } },
@@ -2956,10 +2960,12 @@ fn runCustomCase(
         .glue_zig_opaque_box => customGlueZigOpaqueBox(io, allocator, &env, &timer, timeout_ms),
         .glue_zig_box_payload_alignment => customGlueZigBoxPayloadAlignment(io, allocator, &env, &timer, timeout_ms),
         .glue_zig_returned_list_elements => customGlueZigReturnedListElements(io, allocator, &env, &timer, timeout_ms),
+        .glue_zig_payload_free_tag_union_aliases => customGlueZigPayloadFreeTagUnionAliases(io, allocator, &env, &timer, timeout_ms),
         .glue_rust => customGlueRust(io, allocator, &env, &timer, timeout_ms),
         .glue_rust_provided_context_callable_outcome => customGlueRustProvidedContextCallableOutcome(io, allocator, &env, &timer, timeout_ms),
         .glue_rust_box_payload_alignment => customGlueRustBoxPayloadAlignment(io, allocator, &env, &timer, timeout_ms),
         .glue_rust_returned_list_elements => customGlueRustReturnedListElements(io, allocator, &env, &timer, timeout_ms),
+        .glue_rust_payload_free_tag_union_names => customGlueRustPayloadFreeTagUnionNames(io, allocator, &env, &timer, timeout_ms),
         .glue_zig_bang_record_fields => customGlueZigBangRecordFieldNames(io, allocator, &env, &timer, timeout_ms),
         .glue_package_nominal_api_alias => customGluePackageNominalApiAlias(io, allocator, &env, &timer, timeout_ms),
         .glue_nominal_canonical_field => customGlueNominalCanonicalField(io, allocator, &env, &timer, timeout_ms),
@@ -9942,6 +9948,61 @@ fn customGlueZigReturnedListElements(io: std.Io, allocator: Allocator, env: *con
     const emit_arg = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{object_path}) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate Zig release emit arg: {}", .{err});
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", test_path, emit_arg }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    return null;
+}
+
+fn customGlueZigPayloadFreeTagUnionAliases(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    // Both variants have zero ABI payload size despite nonempty Roc payload lists.
+    const output_dir = createWorkSubdir(io, allocator, env, "zig-payload-free-tag-union-out") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create glue output dir: {}", .{err});
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "glue", "src/glue/src/ZigGlue.roc", output_dir, "test/glue/payload-free-tag-union/main.roc" },
+        .not_contains = &.{ .{ .stream = .stderr, .text = "PANIC" }, .{ .stream = .stderr, .text = "unreachable" } },
+    })) |failure| return failure;
+
+    const generated_path = std.fs.path.join(allocator, &.{ output_dir, "roc_platform_abi.zig" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Zig path: {}", .{err});
+    const object_path = std.fs.path.join(allocator, &.{ output_dir, "roc_platform_abi.o" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated object path: {}", .{err});
+    const emit_arg = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{object_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate Zig emit arg: {}", .{err});
+    if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", generated_path, emit_arg }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    return null;
+}
+
+fn customGlueRustPayloadFreeTagUnionNames(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    const output_dir = createWorkSubdir(io, allocator, env, "rust-payload-free-tag-union-out") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create glue output dir: {}", .{err});
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "glue", "src/glue/src/RustGlue.roc", output_dir, "test/glue/payload-free-tag-union/main.roc" },
+        .not_contains = &.{ .{ .stream = .stderr, .text = "PANIC" }, .{ .stream = .stderr, .text = "unreachable" } },
+    })) |failure| return failure;
+
+    const generated_path = std.fs.path.join(allocator, &.{ output_dir, "roc_platform_abi.rs" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Rust path: {}", .{err});
+    const generated = std.Io.Dir.cwd().readFileAlloc(io, generated_path, allocator, .limited(1024 * 1024)) catch |err|
+        return customFailure(allocator, timer, "failed to read generated Rust file: {}", .{err});
+    defer allocator.free(generated);
+
+    const union_type = "EffectsFirstScopeResult";
+    for ([_][]const u8{ union_type ++ "Payload", union_type ++ "Tag" }) |name| {
+        if (std.mem.find(u8, generated, name) == null) continue;
+        var declared = false;
+        for ([_][]const u8{ "pub enum ", "pub struct ", "pub union ", "pub type " }) |keyword| {
+            const decl = std.fmt.allocPrint(allocator, "{s}{s}", .{ keyword, name }) catch |err|
+                return customInfraFailure(allocator, timer, "failed to allocate Rust declaration needle: {}", .{err});
+            defer allocator.free(decl);
+            if (std.mem.find(u8, generated, decl) != null) declared = true;
+        }
+        if (!declared) {
+            return customFailure(allocator, timer, "generated Rust file names {s}, which it never declares", .{name});
+        }
+    }
+    if (std.mem.find(u8, generated, "pub enum " ++ union_type ++ " {") != null and
+        std.mem.find(u8, generated, "value.tag") != null)
+    {
+        return customFailure(allocator, timer, "generated Rust file reads a `tag` field on fieldless enum {s}", .{union_type});
+    }
     return null;
 }
 
