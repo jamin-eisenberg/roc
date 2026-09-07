@@ -13068,7 +13068,7 @@ never passed through to the platform linker as a best-effort import.
 
 The prebuilt machine-code run shim has the same explicit dependency boundary,
 verified when building Roc itself. Before an archive can be installed or
-embedded, a host executable checks every ELF, Mach-O, or COFF global symbol
+embedded, the archive verifier checks every ELF, Mach-O, or COFF global symbol
 against the shim's declared exports, host runtime/table imports, and target
 C/OS ABI dependencies. Weak and hidden globals are checked too. COFF preparation
 localizes compiler-owned definitions, removes their COMDAT participation, and

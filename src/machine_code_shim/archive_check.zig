@@ -6,6 +6,33 @@ const std = @import("std");
 const symbols = @import("shim_symbols");
 const Os = enum { linux, macos, windows };
 
+const ArchiveError = std.fmt.ParseIntError || error{
+    DuplicateExport,
+    UnexpectedExport,
+    UnexpectedImport,
+    NoObjectMembers,
+    MissingExport,
+    MalformedObject,
+    NotAnArchive,
+    MalformedArchive,
+    NotElf,
+    UnsupportedElf,
+    NotRelocatable,
+    MissingSymbolTable,
+    NotMachO,
+    MalformedSymbol,
+    IndirectSymbol,
+    UnsupportedCoff,
+    CoffCompositionRequiresOneObject,
+    UnsupportedCoffDefinition,
+};
+const PrepareError = ArchiveError || std.mem.Allocator.Error || error{NoSpaceLeft};
+const MainError = PrepareError || std.process.Args.ToSliceError ||
+    std.Io.Dir.ReadFileAllocError || std.Io.Dir.WriteFileError || error{
+    ExpectedOsInputAndOutputPaths,
+    UnsupportedTarget,
+};
+
 const exports = [_][]const u8{
     symbols.roc_shim_get_ops,
     symbols.roc_entrypoint,
@@ -50,7 +77,7 @@ const Check = struct {
     found: [exports.len]bool = @splat(false),
     members: usize = 0,
 
-    fn symbol(self: *Check, name: []const u8, defined: bool, global: bool) !void {
+    fn symbol(self: *Check, name: []const u8, defined: bool, global: bool) ArchiveError!void {
         if (!global) return;
         if (defined) {
             for (exports, 0..) |expected, i| {
@@ -75,7 +102,7 @@ const Check = struct {
         }
     }
 
-    fn finish(self: *const Check) !void {
+    fn finish(self: *const Check) ArchiveError!void {
         if (self.members == 0) return error.NoObjectMembers;
         for (exports, self.found) |name, found| {
             if (!found) {
@@ -92,7 +119,7 @@ fn contains(names: []const []const u8, name: []const u8) bool {
 }
 
 /// Prepare and verify an input archive, writing output only after its contract passes.
-pub fn main(init: std.process.Init) !void {
+pub fn main(init: std.process.Init) MainError!void {
     const gpa = init.gpa;
     const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4) return error.ExpectedOsInputAndOutputPaths;
@@ -113,22 +140,22 @@ pub fn main(init: std.process.Init) !void {
 // All byte access is checked. Truncated files, missing symbol tables, unknown
 // archive members and unsupported encodings must fail closed, never pass a
 // vacuous check. Shipped native targets are 64-bit little endian.
-fn slice(bytes: []const u8, offset: usize, len: usize) ![]const u8 {
+fn slice(bytes: []const u8, offset: usize, len: usize) error{MalformedObject}![]const u8 {
     if (offset > bytes.len or len > bytes.len - offset) return error.MalformedObject;
     return bytes[offset..][0..len];
 }
-fn int(comptime T: type, bytes: []const u8, offset: usize) !T {
+fn int(comptime T: type, bytes: []const u8, offset: usize) error{MalformedObject}!T {
     return std.mem.readInt(T, (try slice(bytes, offset, @sizeOf(T)))[0..@sizeOf(T)], .little);
 }
-fn string(bytes: []const u8, offset: usize) ![]const u8 {
+fn string(bytes: []const u8, offset: usize) error{MalformedObject}![]const u8 {
     const rest = try slice(bytes, offset, bytes.len -| offset);
     const len = std.mem.findScalar(u8, rest, 0) orelse return error.MalformedObject;
     return rest[0..len];
 }
 
-fn scanArchive(bytes: []const u8, check: *Check) !void {
+fn scanArchive(bytes: []const u8, check: *Check) ArchiveError!void {
     try walkArchive(bytes, check.os, check, struct {
-        fn visit(state: *Check, member: []const u8) !void {
+        fn visit(state: *Check, member: []const u8) ArchiveError!void {
             switch (state.os) {
                 .linux => try scanElf(member, state),
                 .macos => try scanMachO(member, state),
@@ -139,7 +166,7 @@ fn scanArchive(bytes: []const u8, check: *Check) !void {
     }.visit);
 }
 
-fn walkArchive(bytes: []const u8, os: Os, context: anytype, comptime visit: anytype) !void {
+fn walkArchive(bytes: []const u8, os: Os, context: anytype, comptime visit: anytype) ArchiveError!void {
     if (!std.mem.startsWith(u8, bytes, "!<arch>\n")) return error.NotAnArchive;
     var offset: usize = 8;
     var long_names: []const u8 = &.{};
@@ -176,7 +203,7 @@ fn walkArchive(bytes: []const u8, os: Os, context: anytype, comptime visit: anyt
     }
 }
 
-fn scanElf(bytes: []const u8, check: *Check) !void {
+fn scanElf(bytes: []const u8, check: *Check) ArchiveError!void {
     if (!std.mem.startsWith(u8, bytes, "\x7fELF")) return error.NotElf;
     if (try int(u8, bytes, 4) != 2 or try int(u8, bytes, 5) != 1) return error.UnsupportedElf;
     if (try int(u16, bytes, 16) != @intFromEnum(std.elf.ET.REL)) return error.NotRelocatable;
@@ -209,7 +236,7 @@ fn scanElf(bytes: []const u8, check: *Check) !void {
     if (!found_table) return error.MissingSymbolTable;
 }
 
-fn scanMachO(bytes: []const u8, check: *Check) !void {
+fn scanMachO(bytes: []const u8, check: *Check) ArchiveError!void {
     if (try int(u32, bytes, 0) != std.macho.MH_MAGIC_64) return error.NotMachO;
     if (try int(u32, bytes, 12) != std.macho.MH_OBJECT) return error.NotRelocatable;
     const count = try int(u32, bytes, 16);
@@ -242,7 +269,7 @@ fn scanMachO(bytes: []const u8, check: *Check) !void {
     if (offset != commands.len or !found_table) return error.MissingSymbolTable;
 }
 
-fn scanCoff(bytes: []const u8, check: *Check) !void {
+fn scanCoff(bytes: []const u8, check: *Check) ArchiveError!void {
     const machine = try int(u16, bytes, 0);
     if (machine != 0x8664 and machine != 0xaa64) return error.UnsupportedCoff;
     if (try int(u16, bytes, 16) != 0) return error.NotRelocatable;
@@ -306,10 +333,10 @@ test "empty and malformed archives cannot pass" {
 /// COMDAT definitions. These are compiler-owned, so localize their binding
 /// before they can meet platform inputs. This is a single-object composition:
 /// another object would require a relocatable link before localization.
-fn prepareCoffArchive(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+fn prepareCoffArchive(gpa: std.mem.Allocator, bytes: []const u8) PrepareError![]u8 {
     const Member = struct {
         object: ?[]const u8 = null,
-        fn visit(self: *@This(), member: []const u8) !void {
+        fn visit(self: *@This(), member: []const u8) ArchiveError!void {
             if (self.object != null) return error.CoffCompositionRequiresOneObject;
             self.object = member;
         }
@@ -345,12 +372,12 @@ fn prepareCoffArchive(gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     return out;
 }
 
-fn archiveHeader(out: *[60]u8, name: []const u8, size: usize) !void {
+fn archiveHeader(out: *[60]u8, name: []const u8, size: usize) error{ NoSpaceLeft, MalformedArchive }!void {
     const header = try std.fmt.bufPrint(out, "{s:<16}{d:<12}{d:<6}{d:<6}{o:<8}{d:<10}`\n", .{ name, @as(u32, 0), @as(u32, 0), @as(u32, 0), @as(u32, 0o644), size });
     if (header.len != out.len) return error.MalformedArchive;
 }
 
-fn localizeCoff(bytes: []u8) !void {
+fn localizeCoff(bytes: []u8) ArchiveError!void {
     const machine = try int(u16, bytes, 0);
     if (machine != 0x8664 and machine != 0xaa64) return error.UnsupportedCoff;
     if (try int(u16, bytes, 16) != 0) return error.NotRelocatable;
