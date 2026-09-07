@@ -3467,11 +3467,14 @@ parse_nested = Nested.parser_for(encoding)
 ```
 
 `encoding.rename_field(name)` is ordinary method-call syntax for a pure format
-method whose first argument is the encoding value. Every encoding provides it;
-identity is the normal implementation. Taking the encoding value as an argument
-lets one encoding type store parser-construction configuration such as JSON
-field naming style. `Encoding.FieldName.FieldNames.rename_fields` applies that
-function to every requested record field, discards the original names from the
+method whose first argument is the encoding value. Deriving a record codec
+requires this method only when the record has fields; identity is the normal
+implementation. Empty records use the same record-protocol validation as other
+records, requiring no rename method and emitting no rename calls. Taking the
+encoding value as an argument lets one encoding type store parser-construction
+configuration such as JSON field naming style.
+`Encoding.FieldName.FieldNames.rename_fields` applies that function to every
+requested record field, discards the original names from the
 returned `Encoding.FieldName.FieldNames`, and rebuilds the length buckets used by
 `Encoding.FieldName.FieldNames.for_size`, `Encoding.FieldName.FieldNames.shortest_name`,
 and `Encoding.FieldName.FieldNames.longest_name`. If parser construction is

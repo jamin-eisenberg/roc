@@ -37674,12 +37674,7 @@ fn validateDerivedParseVar(
     return switch (resolved.desc.content) {
         .structure => |structure| switch (structure) {
             .nominal_type => |nominal| try self.validateDerivedParseNominal(var_, nominal, encoding_var, state_var, err_var, constraint, env, region, walk, context, failure_expr),
-            .record => blk: {
-                if (walk.visited.contains(resolved.var_)) break :blk .ok;
-                try walk.visited.put(resolved.var_, {});
-                break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .record_unbound => blk: {
+            .record, .record_unbound, .empty_record => blk: {
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseRecord(var_, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
@@ -37693,29 +37688,6 @@ fn validateDerivedParseVar(
                 if (walk.visited.contains(resolved.var_)) break :blk .ok;
                 try walk.visited.put(resolved.var_, {});
                 break :blk try self.validateDerivedParseTuple(resolved.var_, tuple, encoding_var, state_var, err_var, constraint, env, region, walk, failure_expr);
-            },
-            .empty_record => blk: {
-                switch (try self.validateRenameFieldMethod(encoding_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_start, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateParseFormatMethod(encoding_var, state_var, var_, .record_after_field, err_var, constraint, env, region, failure_expr)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                switch (try self.validateSkipRecordFieldMethod(encoding_var, state_var, err_var, constraint, env, region, failure_expr, walk)) {
-                    .ok => {},
-                    .unsupported, .reported_error => |result| break :blk result,
-                }
-                break :blk .ok;
             },
             .empty_tag_union => .unsupported,
             .fn_pure, .fn_effectful, .fn_unbound => .unsupported,
