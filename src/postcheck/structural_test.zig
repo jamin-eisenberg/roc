@@ -1479,7 +1479,7 @@ test "each primitive mapping has exactly one definition" {
     };
     const single_definition = [_][]const u8{
         "fn primitiveLayout(",
-        "fn primitiveInspectLowLevelOp(",
+        "fn primitiveInspectLowering(",
         "fn hasherWriteOp(",
     };
     for (single_definition) |decl| {
@@ -1488,7 +1488,7 @@ test "each primitive mapping has exactly one definition" {
         try std.testing.expectEqual(@as(usize, 1), total);
     }
     try expectContains(@embedFile("common.zig"), "pub fn primitiveLayout(");
-    try expectContains(@embedFile("common.zig"), "pub fn primitiveInspectLowLevelOp(");
+    try expectContains(@embedFile("common.zig"), "pub fn primitiveInspectLowering(");
     try expectContains(@embedFile("common.zig"), "pub fn hasherWriteOp(");
 
     // The primitive-to-owner table lives beside `CheckedPrimitive` itself, so

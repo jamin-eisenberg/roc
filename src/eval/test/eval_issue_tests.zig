@@ -1238,4 +1238,92 @@ pub const tests = [_]TestCase{
         ,
         .expected = .{ .inspect_str = "\"hi!\"" },
     },
+    .{
+        // https://github.com/roc-lang/roc/issues/11170
+        // `Str.inspect` of a SIMD vector must render through the vector's
+        // `to_inspect` method in `Builtin.roc`, the same string `dbg` prints.
+        .name = "issue 11170: Str.inspect of a SIMD vector renders its lanes",
+        .source = "U8x16.default().with_lane(1, 1)",
+        .expected = .{ .inspect_str = "U8x16(0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)" },
+    },
+    .{
+        .name = "issue 11170: U8x16 inspect preserves lane order and bounds",
+        .source = "U8x16.default().with_lane(0, 0).with_lane(15, 255)",
+        .expected = .{ .inspect_str = "U8x16(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255)" },
+    },
+    .{
+        .name = "issue 11170: I8x16 inspect preserves lane order and bounds",
+        .source = "I8x16.default().with_lane(0, -128).with_lane(15, 127)",
+        .expected = .{ .inspect_str = "I8x16(-128, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 127)" },
+    },
+    .{
+        .name = "issue 11170: U16x8 inspect preserves lane order and bounds",
+        .source = "U16x8.default().with_lane(0, 0).with_lane(7, 65535)",
+        .expected = .{ .inspect_str = "U16x8(0, 0, 0, 0, 0, 0, 0, 65535)" },
+    },
+    .{
+        .name = "issue 11170: I16x8 inspect preserves lane order and bounds",
+        .source = "I16x8.default().with_lane(0, -32768).with_lane(7, 32767)",
+        .expected = .{ .inspect_str = "I16x8(-32768, 0, 0, 0, 0, 0, 0, 32767)" },
+    },
+    .{
+        .name = "issue 11170: U32x4 inspect preserves lane order and bounds",
+        .source = "U32x4.default().with_lane(0, 0).with_lane(3, 4294967295)",
+        .expected = .{ .inspect_str = "U32x4(0, 0, 0, 4294967295)" },
+    },
+    .{
+        .name = "issue 11170: I32x4 inspect preserves lane order and bounds",
+        .source = "I32x4.default().with_lane(0, -2147483648).with_lane(3, 2147483647)",
+        .expected = .{ .inspect_str = "I32x4(-2147483648, 0, 0, 2147483647)" },
+    },
+    .{
+        .name = "issue 11170: U64x2 inspect preserves lane order and bounds",
+        .source = "U64x2.default().with_lane(0, 0).with_lane(1, 18446744073709551615)",
+        .expected = .{ .inspect_str = "U64x2(0, 18446744073709551615)" },
+    },
+    .{
+        .name = "issue 11170: I64x2 inspect preserves lane order and bounds",
+        .source = "I64x2.default().with_lane(0, -9223372036854775808).with_lane(1, 9223372036854775807)",
+        .expected = .{ .inspect_str = "I64x2(-9223372036854775808, 9223372036854775807)" },
+    },
+    .{
+        .name = "issue 11170: deferred inspect of nested SIMD values",
+        .source_kind = .module,
+        .source =
+        \\render = |value| Str.inspect(value)
+        \\main = render({ vectors: [U64x2.default().with_lane(1, 9)], pair: (I64x2.splat(-1), Some(U32x4.splat(7))) }) == "{ pair: (I64x2(-1, -1), Some(U32x4(7, 7, 7, 7))), vectors: [U64x2(0, 9)] }"
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11170: inspect destructures a nominal SIMD backing",
+        .source_kind = .module,
+        .source =
+        \\Vector := U64x2
+        \\main = Vector.(U64x2.default().with_lane(1, 9))
+        ,
+        .expected = .{ .inspect_str = "U64x2(0, 9)" },
+    },
+    .{
+        .name = "issue 11170: deferred inspect destructures nested nominal SIMD backings",
+        .source_kind = .module,
+        .source =
+        \\Vector := U64x2
+        \\Wrapped := Vector
+        \\render = |value| Str.inspect(value)
+        \\main = render(Wrapped.(Vector.(U64x2.default().with_lane(1, 9)))) == "U64x2(0, 9)"
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11170: nominal custom inspect takes precedence over SIMD backing",
+        .source_kind = .module,
+        .source =
+        \\Vector := U64x2.{
+        \\    to_inspect = |_vector| "custom vector"
+        \\}
+        \\main = Vector.(U64x2.default())
+        ,
+        .expected = .{ .inspect_str = "custom vector" },
+    },
 };

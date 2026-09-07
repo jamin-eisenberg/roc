@@ -3975,7 +3975,8 @@ const ProcedureBuilder = struct {
     }
 
     fn layoutNeedsNestedBoxyDesc(self: *const ProcedureBuilder, layout_idx: layout.Idx) bool {
-        return switch (self.result.layouts.getLayout(layout_idx).tag) {
+        const value_layout = self.result.layouts.getLayout(layout_idx);
+        return switch (value_layout.tag) {
             .box,
             .erased_box,
             .list,
@@ -3983,7 +3984,7 @@ const ProcedureBuilder = struct {
             .struct_,
             .tag_union,
             => true,
-            .scalar,
+            .scalar => value_layout.getScalar().tag == .vector,
             .box_of_zst,
             .closure,
             .erased_callable,
@@ -4162,10 +4163,10 @@ const ProcedureBuilder = struct {
             => true,
             .alias => self.repNeedsTagPayloadDesc(self.singleChildRepForDesc(rep_id, .alias_backing) orelse return true),
             .nominal => self.repNeedsTagPayloadDesc(self.singleChildRepForDesc(rep_id, .nominal_backing) orelse return true),
+            .primitive => |primitive| Common.primitiveInspectLowering(primitive) == .builtin_method,
             .in_progress,
             .dynamic,
             .erased_callable,
-            .primitive,
             .empty_record,
             .empty_tag_union,
             => false,
@@ -28007,7 +28008,7 @@ const ProcBodyBuilder = struct {
             => try self.assignStringBytesLiteral(target, "<opaque>", next),
             .list => try self.lowerListInspectLocalsInto(target, source, rep_id, next),
             .box => try self.lowerBoxInspectLocalsInto(target, source, rep_id, next),
-            .primitive => |primitive| try self.lowerPrimitiveInspectLocalsInto(target, source, primitive, next),
+            .primitive => |primitive| try self.lowerPrimitiveInspectLocalsInto(target, source, rep_id, primitive, next),
             .bool_tag_union => try self.lowerBoolInspectLocalsInto(target, source, next),
             .empty_record => try self.assignStringBytesLiteral(target, "{}", next),
             .empty_tag_union => try self.parent.result.store.addCFStmt(.{ .crash = .{
@@ -28048,6 +28049,16 @@ const ProcBodyBuilder = struct {
         next: LIR.CFStmtId,
     ) Allocator.Error!?LIR.CFStmtId {
         const worker_id = self.parent.methodWorkerForRepByName(rep_id, "to_inspect") orelse return null;
+        return try self.lowerToInspectWorkerInto(target, source, worker_id, next);
+    }
+
+    fn lowerToInspectWorkerInto(
+        self: *ProcBodyBuilder,
+        target: LIR.LocalId,
+        source: LIR.LocalId,
+        worker_id: Plan.WorkerPlanId,
+        next: LIR.CFStmtId,
+    ) Allocator.Error!LIR.CFStmtId {
         const worker = self.parent.plan.workers.items[@intFromEnum(worker_id)];
         if (worker.hidden_descs.len != 0 or worker.hidden_dicts.len != 0) {
             boxyLowerInvariant("boxy to_inspect method worker carried hidden parameters");
@@ -28117,13 +28128,19 @@ const ProcBodyBuilder = struct {
         self: *ProcBodyBuilder,
         target: LIR.LocalId,
         source: LIR.LocalId,
+        rep_id: Plan.TypeRepId,
         primitive: checked.CheckedPrimitive,
         next: LIR.CFStmtId,
     ) Allocator.Error!LIR.CFStmtId {
-        if (primitive == .bool) {
-            return try self.lowerBoolInspectLocalsInto(target, source, next);
-        }
-        const op = Common.primitiveInspectLowLevelOp(primitive);
+        const op = switch (Common.primitiveInspectLowering(primitive)) {
+            .low_level => |op| op,
+            .bool_tag_union => return try self.lowerBoolInspectLocalsInto(target, source, next),
+            .builtin_method => {
+                const method = self.parent.plan.inspectMethodForRep(rep_id) orelse
+                    boxyLowerInvariant("primitive inspect had no planned to_inspect worker");
+                return try self.lowerToInspectWorkerInto(target, source, method.worker, next);
+            },
+        };
         return try self.parent.result.store.addCFStmt(.{ .assign_low_level = .{
             .target = target,
             .op = op,

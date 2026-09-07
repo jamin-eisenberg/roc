@@ -829,6 +829,18 @@ const all_syntax_expected_stdout =
     \\
 ;
 
+const simd_inspect_expected_dbg =
+    \\ROC DBG: U8x16(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+    \\ROC DBG: I8x16(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1)
+    \\ROC DBG: U16x8(0, 0, 0, 0, 0, 0, 0, 1)
+    \\ROC DBG: I16x8(0, 0, 0, 0, 0, 0, 0, 1)
+    \\ROC DBG: U32x4(0, 0, 0, 1)
+    \\ROC DBG: I32x4(0, 0, 0, 1)
+    \\ROC DBG: U64x2(0, 1)
+    \\ROC DBG: I64x2(0, 1)
+    \\ROC DBG: (U64x2(0, 1), I64x2(-1, -1))
+;
+
 const all_syntax_expected_stderr =
     \\[dbg] 42.0
     \\
@@ -1773,6 +1785,18 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc U128 addition overflow crashes (issue 9360, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/issue9360_integer_add_overflow_u128.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "Integer addition overflowed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc I128 subtraction underflow crashes (issue 9361, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/issue9361_integer_sub_underflow_i128.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "Integer subtraction overflowed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc runtime-count U128 shift links in a standalone dev executable", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/runtime_u128_shift_dev_link.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "undefined symbol" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=yes, interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=yes, interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .success, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=yes, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=yes, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .success, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=yes, speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=yes, speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--specialize=yes", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .{ .code = 2 }, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=no, interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=no, interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .success, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=no, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=no, dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .success, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD inspect (specialize=no, speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_inspect.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11170: SIMD dbg (specialize=no, speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/simd_dbg.roc", .exit = .{ .code = 2 }, .contains = &.{.{ .stream = .stderr, .text = simd_inspect_expected_dbg }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (LLVM speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },

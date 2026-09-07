@@ -310,6 +310,84 @@ test "boxy abi reentrant inspect specialization keeps descriptors outside per-ca
     try setup.env.checkForLeaks();
 }
 
+test "issue 11170 boxy record inspect reborrows descriptor refs after a custom method" {
+    const allocator = std.testing.allocator;
+    var setup = try TestSetup.init(allocator);
+    defer setup.deinit();
+    const aggregate_layout = try setup.layouts.putStructFields(&.{
+        .{ .index = 0, .layout = .u64x2 },
+        .{ .index = 1, .layout = .u64x2 },
+    });
+    const descs = [_]BoxyTypeDesc{
+        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(0) },
+        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(1) },
+    };
+    const refs = [_]LIR.BoxyDescRef{.{ .static = @enumFromInt(0) }};
+    const slots = [_]LirProgram.BoxyMethodSlot{
+        .{ .method = @enumFromInt(0), .proc = @enumFromInt(0), .adapter = .{
+            .arg_layouts = .{ .start = 0, .len = 1 },
+            .arg_descs = .{ .start = 0, .len = 1 },
+        } },
+        .{ .method = @enumFromInt(0), .proc = @enumFromInt(1), .adapter = .{
+            .arg_layouts = .{ .start = 0, .len = 1 },
+            .arg_descs = .{ .start = 0, .len = 1 },
+        } },
+    };
+    const runtime = try boxy_abi.createRuntimeFromStores(allocator, &setup.store, &setup.layouts, .{
+        .type_descs = &descs,
+        .desc_refs = &refs,
+        .method_slots = &slots,
+        .method_arg_layouts = &.{.u64x2},
+    }, setup.env.get_ops());
+    defer boxy_abi.deinitRuntime(runtime);
+    const previous = boxy_abi.swapActiveRuntime(runtime);
+    defer _ = boxy_abi.swapActiveRuntime(previous);
+    try runtime.runtime_boxy_desc_refs.appendSlice(allocator, &.{ refs[0], refs[0] });
+
+    const State = struct {
+        runtime: *boxy_abi.GlobalBoxyRuntime,
+        old_refs: std.ArrayList(LIR.BoxyDescRef) = .empty,
+
+        fn current(ops: *builtins.host_abi.RocOps, context: ?*anyopaque, _: [*]const ?*const anyopaque, ret: ?*anyopaque, ret_desc: *?*const anyopaque) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(context.?));
+            if (state.old_refs.items.len == 0) {
+                // Force relocation while the old allocation is still live.
+                // Keep and poison it so a stale read deterministically renders
+                // the wrong method instead of depending on allocator behavior.
+                var replacement: std.ArrayList(LIR.BoxyDescRef) = .empty;
+                replacement.appendSlice(state.runtime.gpa, state.runtime.runtime_boxy_desc_refs.items) catch @panic("OOM");
+                state.old_refs = state.runtime.runtime_boxy_desc_refs;
+                state.runtime.runtime_boxy_desc_refs = replacement;
+                state.old_refs.items[1] = .{ .static = @enumFromInt(1) };
+            }
+            const out: *align(1) builtins.str.RocStr = @ptrCast(ret.?);
+            out.* = builtins.str.RocStr.fromSlice("current", ops);
+            ret_desc.* = null;
+        }
+
+        fn stale(ops: *builtins.host_abi.RocOps, _: ?*anyopaque, _: [*]const ?*const anyopaque, ret: ?*anyopaque, ret_desc: *?*const anyopaque) callconv(.c) void {
+            const out: *align(1) builtins.str.RocStr = @ptrCast(ret.?);
+            out.* = builtins.str.RocStr.fromSlice("stale", ops);
+            ret_desc.* = null;
+        }
+    };
+    var state = State{ .runtime = runtime };
+    defer state.old_refs.deinit(allocator);
+    boxy_abi.roc_boxy_register_proc(0, &State.current, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    boxy_abi.roc_boxy_register_proc(1, &State.stale, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    const aggregate_desc = BoxyTypeDesc{
+        .payload_layout = aggregate_layout,
+        .contains_refcounted = false,
+        .nested_descs = boxy_runtime.makeRuntimeBoxySpan(0, 2),
+    };
+    var values: [4]u64 align(16) = .{ 1, 2, 3, 4 };
+    var rendered: builtins.str.RocStr = undefined;
+    boxy_abi.roc_boxy_inspect(@ptrCast(&rendered), @ptrCast(&state), @ptrCast(&values), @intFromEnum(aggregate_layout), &aggregate_desc);
+    try std.testing.expectEqualStrings("(current, current)", rendered.asSlice());
+    rendered.decref(setup.env.get_ops());
+    try setup.env.checkForLeaks();
+}
+
 test "boxy abi custom inspect preserves a full descriptor across a payload-shaped borrowed boundary" {
     const allocator = std.testing.allocator;
     var setup = try TestSetup.init(allocator);

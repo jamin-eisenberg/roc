@@ -802,7 +802,8 @@ pub const BoxyRuntime = struct {
     }
 
     pub fn layoutNeedsBoxyStructuralDesc(self: *const BoxyRuntime, layout_idx: layout_mod.Idx) bool {
-        return switch (self.layout_store.getLayout(layout_idx).tag) {
+        const value_layout = self.layout_store.getLayout(layout_idx);
+        return switch (value_layout.tag) {
             .erased_box,
             .box,
             .list,
@@ -810,7 +811,7 @@ pub const BoxyRuntime = struct {
             .struct_,
             .tag_union,
             => true,
-            .scalar,
+            .scalar => value_layout.getScalar().tag == .vector,
             .box_of_zst,
             .closure,
             .erased_callable,
@@ -5719,7 +5720,10 @@ pub const BoxyRuntime = struct {
         const struct_layout_val = self.layout_store.getLayout(struct_layout);
         const struct_idx = struct_layout_val.getStruct().idx;
         const struct_data = self.layout_store.getStructData(struct_idx);
-        const desc_refs = if (desc) |struct_desc| self.requireBoxyDescRefs(struct_desc.nested_descs) else &.{};
+        // A field's custom inspector can instantiate more runtime descriptors.
+        // Retain the span and reborrow each ref after recursive calls, because
+        // their append-only backing table can reallocate during those calls.
+        const desc_span = if (desc) |struct_desc| struct_desc.nested_descs else LIR.BoxySpan{};
         const field_names = if (desc) |struct_desc| self.requireBoxyFieldNames(struct_desc.field_names) else &.{};
         var next_desc: usize = 0;
 
@@ -5740,8 +5744,8 @@ pub const BoxyRuntime = struct {
                 try out.appendSlice(self.eval_arena, ": ");
             }
             const field_offset = self.layout_store.getStructFieldOffsetByOriginalIndex(struct_idx, original_index);
-            const field_desc = if (self.layoutNeedsBoxyStructuralDesc(field_layout) and next_desc < desc_refs.len) blk: {
-                const resolved = try hooks.resolveDescRef(desc_refs[next_desc]);
+            const field_desc = if (self.layoutNeedsBoxyStructuralDesc(field_layout) and next_desc < desc_span.len) blk: {
+                const resolved = try hooks.resolveDescRef(self.requireBoxyDescRefs(desc_span)[next_desc]);
                 next_desc += 1;
                 break :blk resolved;
             } else null;
