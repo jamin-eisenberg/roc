@@ -2693,6 +2693,95 @@ test "issue 10978 repeated recursive nominal constructions scan bounded backing 
     try std.testing.expect(find_growth_linear);
 }
 
+/// The event-handler view from issue 11144, with one nested lambda per item.
+fn issue11144EventHandlerViewSource(allocator: Allocator, item_count: usize) Allocator.Error![]u8 {
+    var source = std.ArrayList(u8).empty;
+    errdefer source.deinit(allocator);
+    try source.appendSlice(allocator,
+        \\Attribute(msg) := [Attr(Str, Str), On(Str, ({} -> msg))]
+        \\Html(msg) := [Text(Str), Element(Str, List(Attribute(msg)), List(Html(msg)))]
+        \\div : List(Attribute(msg)), List(Html(msg)) -> Html(msg)
+        \\div = |attrs, children| Element("div", attrs, children)
+        \\class : Str -> Attribute(msg)
+        \\class = |name| Attr("class", name)
+        \\text : Str -> Html(msg)
+        \\text = |s| Text(s)
+        \\render : Html(msg) -> Str
+        \\render = |html|
+        \\    match html {
+        \\        Text(s) => s
+        \\        Element(tag, _attrs, children) => "<${tag}>${Str.join_with(children.map(render), "")}</${tag}>"
+        \\    }
+        \\view : Str -> Html([Clicked(U64)])
+        \\view = |s| div([class("page")], [
+        \\
+    );
+    for (0..item_count) |index| {
+        const item = try std.fmt.allocPrint(
+            allocator,
+            "    div([class(\"item\"), On(\"click\", |{{}}| Clicked({d}))], [text(s), text(\"{d}\")]),\n",
+            .{ index + 1, index + 1 },
+        );
+        defer allocator.free(item);
+        try source.appendSlice(allocator, item);
+    }
+    try source.appendSlice(allocator,
+        \\])
+        \\main : Str
+        \\main = render(view("hi"))
+        \\
+    );
+    return try source.toOwnedSlice(allocator);
+}
+
+test "issue 11144 nested lambdas in one large body specialize in linear work" {
+    const allocator = std.testing.allocator;
+    {
+        const source = try issue11144EventHandlerViewSource(allocator, 2);
+        defer allocator.free(source);
+        var resources = try helpers.parseAndCheckProgramForProblemsWithBuiltin(
+            allocator,
+            .module,
+            source,
+            &.{},
+            try sharedPrePublishedBuiltin(),
+        );
+        defer resources.deinit(allocator);
+        const diagnostics = try resources.main.module_env.getDiagnostics();
+        defer allocator.free(diagnostics);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.parse_ast.tokenize_diagnostics.items.len);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.parse_ast.parse_diagnostics.items.len);
+        try std.testing.expectEqual(@as(usize, 0), diagnostics.len);
+        try std.testing.expectEqual(@as(usize, 0), resources.main.checker.problems.problems.items.len);
+    }
+    const Counts = struct { snapshots: u64, backing_slots: u64, lookup_probes: u64, commit_steps: u64 };
+    var counts: [3]Counts = undefined;
+    for ([_]usize{ 16, 32, 64 }, &counts) |n, *out| {
+        const source = try issue11144EventHandlerViewSource(allocator, n);
+        defer allocator.free(source);
+        var diagnostics = MonoLower.Diagnostics{};
+        var lowered = try lowerMonotypeModuleWithOptions(allocator, source, .{ .diagnostics = &diagnostics });
+        defer lowered.deinit(allocator);
+        out.* = .{
+            .snapshots = diagnostics.graph.argument_class_members_snapshotted,
+            .backing_slots = diagnostics.graph.structural_backing_scan_slots,
+            .lookup_probes = diagnostics.body.nested_lookup_probes,
+            .commit_steps = diagnostics.body.draft_commit_lookup_steps,
+        };
+    }
+    // Compare deltas to remove fixed module work. A linear delta doubles;
+    // quadratic work approaches four times the preceding delta.
+    inline for (std.meta.fields(Counts)) |field| {
+        const small = @field(counts[0], field.name);
+        const medium = @field(counts[1], field.name);
+        const large = @field(counts[2], field.name);
+        const linear = small <= medium and medium <= large and
+            large - medium <= ((medium - small) *| 5) / 2;
+        if (!linear) std.debug.print("issue 11144 {s} grew nonlinearly: {d}->{d}->{d}\n", .{ field.name, small, medium, large });
+        try std.testing.expect(linear);
+    }
+}
+
 test "closed direct method calls reuse specialization before durable key construction" {
     const allocator = std.testing.allocator;
     const one_call =

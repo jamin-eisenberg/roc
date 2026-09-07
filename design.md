@@ -3502,11 +3502,14 @@ parse_nested = Nested.parser_for(encoding)
 ```
 
 `encoding.rename_field(name)` is ordinary method-call syntax for a pure format
-method whose first argument is the encoding value. Every encoding provides it;
-identity is the normal implementation. Taking the encoding value as an argument
-lets one encoding type store parser-construction configuration such as JSON
-field naming style. `Encoding.FieldName.FieldNames.rename_fields` applies that
-function to every requested record field, discards the original names from the
+method whose first argument is the encoding value. Deriving a record codec
+requires this method only when the record has fields; identity is the normal
+implementation. Empty records use the same record-protocol validation as other
+records, requiring no rename method and emitting no rename calls. Taking the
+encoding value as an argument lets one encoding type store parser-construction
+configuration such as JSON field naming style.
+`Encoding.FieldName.FieldNames.rename_fields` applies that function to every
+requested record field, discards the original names from the
 returned `Encoding.FieldName.FieldNames`, and rebuilds the length buckets used by
 `Encoding.FieldName.FieldNames.for_size`, `Encoding.FieldName.FieldNames.shortest_name`,
 and `Encoding.FieldName.FieldNames.longest_name`. If parser construction is
@@ -4138,10 +4141,14 @@ representation decision.
 
 Recursive specialization contributes an explicit second proof of the dynamic
 tier. Each in-progress specialization snapshots every permanent member of each
-ordered argument's union class. When a recursive edge reaches that
-specialization, a request argument introduced after the snapshot is recorded as
-a representation-growing recursive slot before the two function interfaces are
-related. If that slot subsequently joins distinct minted iterator identities,
+ordered argument's union class. The snapshot retains the first and last
+permanent node of the class-member list at entry. Unions only concatenate
+lists, so links inside the saved segment never change: stopping at its saved
+last node preserves exact historical membership without copying the class or
+adding history maintenance to union operations. When a recursive edge reaches
+that specialization, a request argument introduced after the snapshot is
+recorded as a representation-growing recursive slot before the two function
+interfaces are related. If that slot subsequently joins distinct minted iterator identities,
 the graph records that the resulting iterator class must use the forced-dynamic
 fixed point. Recursion through any alias already present in the initial class is
 not representation growth and remains eligible for the minted tier. This makes
@@ -7872,6 +7879,24 @@ specialize predictably across module boundaries: checked bodies remain
 immutable, every monomorphic specialization records its own closed
 instantiation, and interface solving never depends on lowering a body into its
 caller.
+
+Draft nested lookup first checks exact callable-family membership. An absent
+family proves a miss without enumerating interface aliases, regardless of the
+size of the enclosing graph. Existing families retain exact interface, evidence,
+capture, and recursive-reference checks; no mutable union-root key is treated
+as an immutable specialization identity.
+
+Draft commit indexes sealed specialization records by their explicit draft
+function ids, and indexes prior retained identities by the same digest bucket
+as the durable specialization store. Exact type, codec-contract, and evidence
+equality remain collision authorities. Suppressed lexical children never enter
+that index, and equal retained identities keep the first assigned function
+slot. Commit work does not scan earlier functions or specialization tables for
+each new lambda.
+
+Structural backing walks reuse graph-owned sparse scratch. Each walk visits
+only its backing chain and returns the first repeated node on a cycle; graph
+size does not determine scratch initialization work.
 
 The specialization store must make this lookup direct. It must not scan all
 specializations for a callable family and recompute recursive type digests while
