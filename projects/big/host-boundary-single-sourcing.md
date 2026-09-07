@@ -166,3 +166,90 @@ generated files for the test platforms before/after).
 - [../small/hosted-extern-declared-abi.md](../small/hosted-extern-declared-abi.md)—
   the type-level half of the host contract; this project is the
   symbol/layout half.
+
+## Implementation audit (2026-09-07)
+
+The original problem statement above records the motivating code, not the
+current repository architecture. In the implementation worktree:
+
+- `src/builtins/shim_symbols.zig` already existed at the starting revision,
+  along with most shim/emitter consumers and the IPC `HEADER_MAGIC` fix.
+  This change completes remaining runtime-name consumers in the LLVM/dev/Wasm
+  backends, Wasm host registration, checker reserved-name set, and test
+  fixtures. `host_abi.ExternHostFns` now declares canonical function-pointer
+  signatures independently of linkage; `extern_host` uses those types and
+  `@extern` with the shared symbol constants. Diagnostic text mentioning an
+  operation is not a linker declaration.
+- The old `src/glue/platform/host.zig` and its eight handwritten extern
+  mirrors were already removed before this change. The glue runner uses
+  checked runtime record schemas and committed LIR layouts. This change adds
+  the checked-source schema tests in `src/glue/glue.zig`, including rejected
+  renamed, added, and differently typed fields; the contract is documented
+  in `design.md`. It does not reintroduce mirrors or a source-layout parser.
+- The existing Zig glue ABI lock is strengthened for canonical field types.
+  `test/glue/generate_abi_lock.zig` derives C/Rust declarations and assertions
+  from the actual builtins types. `run-check-glue-abi` compiles those locks
+  with generated bindings. `RocHost` is explicitly the host-state prefix of
+  `RocOps`; it is not the interpreter's complete hosted-dispatch table and
+  is not passed to compiled entrypoints. The design and glue README explain
+  this relationship.
+- `src/host_alloc/mod.zig` was already shared by most native test hosts.
+  This change strengthens its accounting tests and moves the remaining
+  standalone Wasm fixtures and all ten generated-glue Zig hosts onto one
+  allocation core, `src/host_alloc/tracking.zig`. The ordinary runtime module
+  retains tracing wrappers; generated-glue conformance hosts retain their
+  canary and ownership instrumentation around shared-core allocations. All
+  test hosts use `shim_symbols.exportRuntimeFns` for the runtime export block
+  (through the typed runtime wrapper or directly from a generated fixture).
+
+Verified during this implementation:
+
+- `zig build run-test-shim-boundary-link` passed. It links a minimal host
+  executable against each real shim archive, resolves the applicable shared
+  and shim-specific symbols, checks the hosted table, and exercises callback
+  routing back to host runtime exports.
+- Both registered granular steps passed:
+  `run-test-zig-machine-code-boundary-link` and
+  `run-test-zig-interpreter-boundary-link`.
+- `zig build run-test-zig-machine-code-shim` passed before the subsequent
+  expanded runtime-symbol audit.
+
+- `zig build run-test-zig-module-backend run-test-zig-module-check
+  build-test-wasm-static-lib-runner` passed after the expanded symbol audit.
+- The checked-source glue schema suite passed, including isolated field
+  rename, field addition, nested-record, tag-payload, and leaf-type mutation
+  rejection (nine mutations). The allocator-core migration passed a fresh
+  30-case runtime matrix. The final export-helper migration passed all ten
+  affected Zig runtime cases and the allocator unit tests.
+- Mutation runs passed for canonical callback signatures and the string,
+  list, and erased-callable representations: unchanged C/Rust/Zig baselines
+  compiled, then the relevant foreign-language locks rejected each mutation.
+  `RocOps` callback mutation applies to Zig/Rust `RocHost`; C has no RocHost
+  helper. Evidence for this run is `/tmp/host-boundary-mutations-final.log`.
+
+- Generated `test/glue/layout-probe/main.roc` output is byte-identical for
+  C, Zig, and Rust. The baseline compiler in the original checkout and the
+  worktree compiler both report `debug-9cc0955b`; baseline specs were extracted
+  from `HEAD`. The final change leaves all three templates unchanged and puts
+  the new canonical assertions in the test harness. Compared artifacts are
+  under `/tmp/roc-boundary-output-ey54nvsg/*-baseline-compiler` and `*-final`.
+- Additional isolated mutations to explicit field alignment and same-typed
+  field order are rejected by the foreign declaration generator rather than
+  silently accepting a naturally aligned or positionally matched mirror.
+
+`zig build build-ci -j2 --summary all --color off` passed all 661 steps.
+Standalone CLI unit-test module imports, explicit error sets, current stdlib
+API names, and new-file Git tracking were corrected through MiniCI's targeted
+retry loop. The final allocator and export-helper changes passed Zig lints,
+tidy, and Git lints before resuming the full run.
+
+The final `zig build run-check-glue-abi -j2` matrix passed with the unchanged
+templates and strict canonical alignment/order guards. The final
+`zig build minici -j2` passed all 76 sections with no failures, crashes, or
+skips (1462.536 seconds). Its log is
+`/tmp/host-boundary-minici-semantic-fixed.log`. The design documentation's
+terminology was corrected through the targeted semantic-audit retry before
+this full run. The link tests above prove
+archive symbol resolution and callback routing; they do not themselves
+execute a generated LIR program or resolve unrelated platform-specific
+entrypoints through both shims.

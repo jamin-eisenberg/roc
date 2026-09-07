@@ -12669,6 +12669,25 @@ interpreter-internal structure (the dev-build translation shim and
 compiler-internal evaluation construct one); it is not part of any host ABI,
 and glue never emits it.
 
+Generated Zig and Rust bindings provide a `RocHost` helper for host-owned
+allocation state. Its fields are exactly the `env` and callback prefix of
+`RocOps`, with callback self pointers referring to `RocHost`. It has no
+`hosted_fns` member: hosted calls use the platform's declared linker symbols.
+This helper is not passed across compiled Roc entrypoints. The glue ABI lock
+compares its complete prefix size, alignment, field offsets, and callback
+signatures with the interpreter types defined by builtins. C bindings call the runtime
+symbols directly. C and Rust declarations generated from builtins are compiled
+alongside generated bindings to lock their runtime value layouts and callback
+signatures; template-local numeric assertions alone do not establish agreement
+with builtins.
+
+The glue script input and output are written using checked runtime record
+schemas and committed LIR layouts. No handwritten Zig extern record mirrors
+stand between `src/glue/platform/*.roc` and the glue runner. Named fields select
+schema logical indices; the layout store supplies their byte offsets and
+layouts. A checked-source schema regression test locks the remaining marshaller
+field names and leaf types.
+
 The platform header maps linker symbols explicitly, symbol-string first, in
 both directions:
 

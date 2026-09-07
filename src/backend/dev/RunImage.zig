@@ -690,7 +690,7 @@ test "writeToSharedMemory serializes only executable image sections" {
         .{ .name = "roc__proc_2a", .code_offset = 3 },
     };
     const relocations = [_]Relocation{
-        .{ .linked_function = .{ .offset = 1, .name = "roc_alloc" } },
+        .{ .linked_function = .{ .offset = 1, .name = @import("builtins").shim_symbols.roc_alloc } },
         .{ .linked_data = .{ .offset = 2, .name = "roc__answer", .kind = .rel32 } },
     };
     const data_bytes = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
@@ -767,7 +767,7 @@ test "writeToSharedMemory serializes only executable image sections" {
     try std.testing.expectEqual(@as(usize, relocations.len), view.relocations.len);
     try std.testing.expectEqual(RelocationKind.linked_function, try view.relocations[0].relocationKind());
     try std.testing.expectEqual(@as(u64, 1), view.relocations[0].code_offset);
-    try std.testing.expectEqualStrings("roc_alloc", try view.symbolName(view.relocations[0].symbol));
+    try std.testing.expectEqualStrings(@import("builtins").shim_symbols.roc_alloc, try view.symbolName(view.relocations[0].symbol));
     try std.testing.expectEqual(RelocationKind.linked_data_rel32, try view.relocations[1].relocationKind());
     try std.testing.expectEqual(@as(u64, 2), view.relocations[1].code_offset);
     try std.testing.expectEqualStrings("roc__answer", try view.symbolName(view.relocations[1].symbol));
