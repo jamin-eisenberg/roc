@@ -63,6 +63,7 @@ pub const BodyPrefix = struct {
     pattern_ids: u32,
     inline_scopes: u32,
     strings: u32,
+    boxy_names: u32,
     proc_specs: u32,
     proc_locs: u32,
     proc_debug_names: u32,
@@ -113,7 +114,7 @@ pub const AppendedBody = struct {
 
 /// Failures while validating or appending a private body suffix.
 pub const AppendBodyError = Allocator.Error || error{
-    /// String or inline-scope interning changed after the frozen prefix.
+    /// String, Boxy name, or inline-scope interning changed after the frozen prefix.
     /// The coordinator may retry this body through serial lowering.
     UnsupportedShardMetadata,
     InvalidBodyPrefix,
@@ -149,6 +150,7 @@ pub fn captureBodyPrefix(self: *const Self) BodyPrefix {
         .pattern_ids = @intCast(self.pattern_ids.len()),
         .inline_scopes = @intCast(self.inline_scopes.len()),
         .strings = self.stringEntryCount(),
+        .boxy_names = self.boxyNameCount(),
         .proc_specs = @intCast(self.proc_specs.len()),
         .proc_locs = @intCast(self.proc_locs.len()),
         .proc_debug_names = @intCast(self.proc_debug_names.len()),
@@ -179,6 +181,7 @@ pub fn captureBodyShard(self: *const Self, prefix: BodyPrefix) AppendBodyError!B
         if (!std.meta.eql(prefix, self.body_prefix)) return error.InvalidBodyPrefix;
         if (self.inline_scopes.len() != 0 or
             self.ownStringEntryCount() != 0 or
+            self.boxy_names.count() != 0 or
             self.proc_specs.len() != 0 or
             self.proc_locs.len() != 0 or
             self.proc_debug_names.len() != 0 or
@@ -205,6 +208,7 @@ pub fn captureBodyShard(self: *const Self, prefix: BodyPrefix) AppendBodyError!B
         prefix.pattern_ids > self.pattern_ids.len() or
         prefix.inline_scopes > self.inline_scopes.len() or
         prefix.strings > self.stringEntryCount() or
+        prefix.boxy_names > self.boxyNameCount() or
         prefix.proc_specs > self.proc_specs.len() or
         prefix.proc_locs > self.proc_locs.len() or
         prefix.proc_debug_names > self.proc_debug_names.len() or
@@ -217,6 +221,7 @@ pub fn captureBodyShard(self: *const Self, prefix: BodyPrefix) AppendBodyError!B
     }
     if (prefix.inline_scopes != self.inline_scopes.len() or
         prefix.strings != self.stringEntryCount() or
+        prefix.boxy_names != self.boxyNameCount() or
         prefix.proc_specs != self.proc_specs.len() or
         prefix.proc_locs != self.proc_locs.len() or
         prefix.proc_debug_names != self.proc_debug_names.len() or
@@ -388,6 +393,8 @@ u32s: GuardedList.List(u32, "LirStore.u32s"),
 erased_call_arg_plans: GuardedList.List(ErasedCallArgsPlan, "LirStore.erased_call_arg_plans"),
 proc_specs: GuardedList.List(LirProcSpec, "LirStore.proc_specs"),
 strings: base.StringLiteral.Store,
+/// Boxy semantic names and their transient insertion index.
+boxy_names: @import("BoxyNames.zig") = .{},
 string_builder: base.StringLiteral.BuilderState,
 strings_insertable: bool,
 allocator: Allocator,
@@ -491,6 +498,7 @@ pub fn deinit(self: *Self) void {
     self.proc_specs.deinit(self.allocator);
     self.string_builder.deinit(self.allocator);
     self.strings.deinit(self.allocator);
+    self.boxy_names.deinit(self.allocator);
     self.patterns.deinit(self.allocator);
     self.pattern_ids.deinit(self.allocator);
     self.source_file_bytes.deinit(self.allocator);
@@ -708,6 +716,23 @@ pub fn freshSyntheticSymbol(self: *Self) Symbol {
     const symbol = Symbol.fromRaw(self.next_synthetic_symbol);
     self.next_synthetic_symbol += 1;
     return symbol;
+}
+
+fn boxyNameCount(self: *const Self) u32 {
+    if (self.body_coordinator) |coordinator| return coordinator.boxyNameCount();
+    return self.boxy_names.count();
+}
+
+/// Assigns a Boxy identity without inserting bytes into the literal store.
+pub fn insertBoxyName(self: *Self, text: []const u8) Allocator.Error!lir_defs.BoxyNameId {
+    self.assertStringsInsertable();
+    return self.boxy_names.insert(self.allocator, text);
+}
+
+/// Resolves a Boxy name in the same identity domain used by generated code.
+pub fn getBoxyName(self: *const Self, id: lir_defs.BoxyNameId) []const u8 {
+    if (self.body_coordinator) |coordinator| return coordinator.getBoxyName(id);
+    return self.boxy_names.get(id);
 }
 
 /// Interns a string literal in the store-level string table.
@@ -1636,6 +1661,25 @@ pub fn procNeedsStackProbe(self: *const Self, layouts: *const layout.Store, proc
     if (self.localSpanNeedsStackProbe(layouts, proc.frame_locals)) return true;
     if (lir_defs.layoutNeedsStackProbe(layouts, proc.ret_layout)) return true;
     return false;
+}
+
+test "body shards borrow Boxy identities and reject added name metadata" {
+    const allocator = std.testing.allocator;
+    var coordinator = Self.init(allocator);
+    defer coordinator.deinit();
+    const name = try coordinator.insertBoxyName("Only");
+    var worker = try coordinator.cloneForBodyShard(allocator);
+    defer worker.deinit();
+    try std.testing.expectEqualStrings("Only", worker.getBoxyName(name));
+    try std.testing.expectEqual(@as(u32, 0), worker.boxy_names.count());
+    const prefix = worker.captureBodyPrefix();
+    _ = try worker.captureBodyShard(prefix);
+    // A shard must never publish locally assigned ids into the coordinator.
+    _ = try worker.boxy_names.insert(allocator, "Different");
+    try std.testing.expectError(error.UnsupportedShardMetadata, worker.captureBodyShard(prefix));
+    const coordinator_prefix = coordinator.captureBodyPrefix();
+    _ = try coordinator.insertBoxyName("Later");
+    try std.testing.expectError(error.UnsupportedShardMetadata, coordinator.captureBodyShard(coordinator_prefix));
 }
 
 test "source file table stores display and package-qualified names per entry" {
