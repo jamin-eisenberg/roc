@@ -833,7 +833,8 @@ ownership and presence model.
 
 ## Set Storage
 
-`Set(item)` wraps `Dict(item, {})`. The empty-record value carries no runtime
+`Set(item) :: Dict(item, {})` gives Set its own nominal identity directly over
+Dict, without an additional tag union. The empty-record value carries no runtime
 payload; Set shares Dict's dense entries, hash buckets, load-factor capacity,
 seed-domain metadata, collision handling, and rehashing implementation.
 Set operations remain ordinary Roc functions, with no backend-specific Set
