@@ -1383,8 +1383,10 @@ test "tail-call proof rejects an intervening effect and a forwarding cycle" {
         store.tail_call_builder = &builder;
         defer store.tail_call_builder = null;
         const ret = try store.addCFStmt(.{ .ret = .{ .value = result } });
+        var next_join: u32 = 0;
+        const join_id = freshJoinPointId(&next_join);
         const suffix = if (cycle)
-            try store.addCFStmt(.{ .jump = .{ .target = @enumFromInt(0) } })
+            try store.addCFStmt(.{ .jump = .{ .target = join_id } })
         else
             try store.addCFStmt(.{ .expect = .{ .condition = cond, .next = ret } });
         const call = try store.addCFStmt(.{ .assign_call = .{
@@ -1394,7 +1396,7 @@ test "tail-call proof rejects an intervening effect and a forwarding cycle" {
             .next = suffix,
         } });
         const body = if (cycle) try store.addCFStmt(.{ .join = .{
-            .id = @enumFromInt(0),
+            .id = join_id,
             .params = LIR.LocalSpan.empty(),
             .body = suffix,
             .remainder = call,
@@ -1429,15 +1431,18 @@ test "tail-call proof consumes the explicit boxy adapter operation" {
         defer builder.deinit();
         store.tail_call_builder = &builder;
         defer store.tail_call_builder = null;
-        const adapters = [_]lir.Program.BoxyAdapter{.{
+        var adapters: std.ArrayList(lir.Program.BoxyAdapter) = .empty;
+        defer adapters.deinit(allocator);
+        const adapter_id: LIR.BoxyAdapterId = @enumFromInt(adapters.items.len);
+        try adapters.append(allocator, .{
             .kind = .boxy_to_boxy,
             .operation = operation,
             .source_layout = .u64,
             .target_layout = .u64,
             .consumes_source = true,
             .produces_owned_result = true,
-        }};
-        builder.adapters = &adapters;
+        });
+        builder.adapters = adapters.items;
         const ret = try store.addCFStmt(.{ .ret = .{ .value = forwarded } });
         const adapt = try store.addCFStmt(.{ .assign_boxy_adapt = .{
             .source = result,
@@ -1445,7 +1450,7 @@ test "tail-call proof consumes the explicit boxy adapter operation" {
             .source_desc = null,
             .target_desc = null,
             .source_mode = .move,
-            .adapter = @enumFromInt(0),
+            .adapter = adapter_id,
             .next = ret,
         } });
         const call = try store.addCFStmt(.{ .assign_call = .{

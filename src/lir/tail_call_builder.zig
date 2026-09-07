@@ -11,7 +11,7 @@ const Self = @This();
 const Proof = union(enum) { visiting, done: ?LIR.LocalId };
 
 allocator: std.mem.Allocator,
-proc: LIR.LirProcSpecId,
+proc: ?LIR.LirProcSpecId = null,
 joins: collections.DenseMap(LIR.JoinPointId, LIR.CFStmtId),
 calls: std.ArrayList(LIR.CFStmtId) = .empty,
 proofs: collections.DenseMap(LIR.CFStmtId, Proof),
@@ -23,9 +23,16 @@ adapters: []const @import("program.zig").BoxyAdapter = &.{},
 
 /// Start recording one exact procedure identity.
 pub fn init(allocator: std.mem.Allocator, proc: LIR.LirProcSpecId) Self {
+    var self = initScratch(allocator);
+    self.reset(proc);
+    return self;
+}
+
+/// Allocate reusable scratch before a procedure is selected. `reset` must
+/// supply its exact identity before recording or publishing statements.
+pub fn initScratch(allocator: std.mem.Allocator) Self {
     return .{
         .allocator = allocator,
-        .proc = proc,
         .joins = .init(allocator),
         .proofs = .init(allocator),
     };
@@ -54,12 +61,13 @@ pub fn reset(self: *Self, proc: LIR.LirProcSpecId) void {
 /// Called by the statement producer, including when filling a placeholder.
 pub fn record(self: *Self, id: LIR.CFStmtId, stmt: LIR.CFStmt) std.mem.Allocator.Error!void {
     std.debug.assert(!self.published);
+    const proc = self.proc.?;
     switch (stmt) {
         .join => |join| {
             try self.joins.put(join.id, join.body);
             self.next_join = @max(self.next_join, @intFromEnum(join.id) + 1);
         },
-        .assign_call => |call| if (call.proc == self.proc) {
+        .assign_call => |call| if (call.proc == proc) {
             try self.calls.append(self.allocator, id);
         },
         .init_uninitialized,
@@ -114,6 +122,7 @@ pub fn record(self: *Self, id: LIR.CFStmtId, stmt: LIR.CFStmt) std.mem.Allocator
 /// the proof along with the calls without another store-wide side table.
 pub fn finish(self: *Self, store: anytype) std.mem.Allocator.Error!?LIR.TailCalls {
     std.debug.assert(!self.published);
+    const proc = self.proc.?;
     self.published = true;
     var head: ?LIR.CFStmtId = null;
     for (self.calls.items) |id| {
@@ -121,7 +130,7 @@ pub fn finish(self: *Self, store: anytype) std.mem.Allocator.Error!?LIR.TailCall
         // A producer can move a provisional call and retire its old node.
         if (stmt != .assign_call) continue;
         const call = stmt.assign_call;
-        std.debug.assert(call.proc == self.proc);
+        std.debug.assert(call.proc == proc);
         if (call.tail_call != null) continue;
         // A runtime result descriptor is another call output; forwarding the
         // value alone does not establish that descriptor's return contract.

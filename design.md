@@ -3839,7 +3839,7 @@ adaptation. Calls with an additional runtime descriptor output need a proof for
 that output too; value-only forwarding does not authorize their elimination.
 Return-destination reuse metadata is not a tail-position proof.
 
-The producer publishes a linked list of proven sites in the call nodes and a
+The producer records a linked list of proven sites in the call nodes and a
 fresh loop join identity in the procedure. Body shards relocate these statement
 references with the rest of the body. Ordinary TCE consumes the list directly:
 it replaces each call node with simultaneous argument transfer followed by a
@@ -3866,7 +3866,7 @@ Mixed procedures use one loop for both kinds of recursive site; ordinary tails
 preserve the current hole, and constructor sites advance it. Return epilogues
 remain present for every surviving return, including returns shared with paths
 that do not recurse. Later producers that expose new self-tail sites must
-publish the same continuation proof rather than relying on downstream discovery.
+record the same continuation proof rather than relying on downstream discovery.
 
 The explicit `InlineMode` controls the optional specialization work:
 
