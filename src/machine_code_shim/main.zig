@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const stack_probe = @import("stack_probe.zig");
 const base_mod = @import("base");
 const backend = @import("backend");
 const builtins = @import("builtins");
@@ -529,7 +530,10 @@ fn hostArch() HostArch {
 }
 
 fn flushInstructionCache(memory: []const u8) void {
-    switch (hostArch()) {
+    // Resolved at comptime so the `__clear_cache` reference is only analyzed
+    // on the architectures that need it. The shim no longer links compiler-rt,
+    // which is where that builtin would come from.
+    switch (comptime hostArch()) {
         .x86, .x86_64 => {},
         .aarch64, .other => {
             const clearCache = struct {
@@ -954,6 +958,7 @@ fn shimEntrypoint(
 }
 
 fn shimDefaultMain(argc: usize, argv: [*][*:0]const u8) callconv(.c) usize {
+    stack_probe.retain();
     const ops = shim_host_abi.getOps();
     const app_args = if (argc > 1) argv[1..argc] else argv[0..0];
     var cli_args_list = shim_host_abi.buildDefaultRunCliArgs(app_args, allocator()) catch {
@@ -995,6 +1000,7 @@ test "loaded dev program borrows direct shared image metadata" {
         page_size,
         code,
         &entrypoints,
+        &.{},
         &.{},
         &.{},
         &.{},

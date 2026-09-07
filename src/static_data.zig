@@ -17,10 +17,15 @@ const Checked = check.CheckedArtifact;
 const CheckedModule = check.CheckedModule;
 const GuardedList = @import("collections").GuardedList;
 
+/// Dense index in the export slice returned by one static-data materialization.
+pub const StaticDataSymbolId = enum(u32) { _ };
+
 /// Immutable data symbol materialized in the target's readonly representation.
 pub const StaticDataExport = struct {
     /// Linker-visible symbol name, for example `roc__answer`.
     symbol_name: []const u8,
+    /// LIR static root represented by this export, when it is an internal value.
+    value_id: ?lir.LIR.StaticDataId = null,
     /// Fully materialized Roc ABI bytes for the constant.
     bytes: []const u8,
     /// Offset inside `bytes` where `symbol_name` points.
@@ -47,6 +52,8 @@ pub const StaticDataRelocation = struct {
     offset: u64,
     /// Symbol whose address should be written at `offset`.
     target_symbol_name: []const u8,
+    /// Address identity: an explicit linker declaration or a row in the owning export slice.
+    target: union(enum) { named, data_symbol: StaticDataSymbolId } = .named,
     /// Addend applied to the target symbol address.
     addend: i64 = 0,
     /// Runtime meaning of the stored pointer.
@@ -96,6 +103,31 @@ pub fn collectRequiredRcHelpers(
     return try result.toOwnedSlice(allocator);
 }
 
+/// Collect the distinct LIR procedures a static-data graph names by symbol.
+///
+/// A procedure an object outside the code module references by name has to keep
+/// external linkage; every other one can stay internal to its module.
+pub fn collectReferencedProcs(
+    allocator: Allocator,
+    exports: []const StaticDataExport,
+) Allocator.Error![]lir.LIR.LirProcSpecId {
+    var seen = std.AutoHashMap(u32, void).init(allocator);
+    defer seen.deinit();
+    var result = std.ArrayList(lir.LIR.LirProcSpecId).empty;
+    errdefer result.deinit(allocator);
+
+    for (exports) |data_export| {
+        for (data_export.relocations) |relocation| {
+            const proc = relocation.procedure orelse continue;
+            const gop = try seen.getOrPut(@intFromEnum(proc));
+            if (gop.found_existing) continue;
+            try result.append(allocator, proc);
+        }
+    }
+
+    return try result.toOwnedSlice(allocator);
+}
+
 /// Deterministic object-file symbol name for an internal LIR procedure.
 pub fn procSymbolName(allocator: Allocator, proc_symbol: lir.Symbol) Allocator.Error![]u8 {
     return try std.fmt.allocPrint(allocator, "roc__proc_{x}", .{proc_symbol.raw()});
@@ -112,6 +144,7 @@ const MaterializationError = Allocator.Error || error{
 };
 
 const PointerTarget = struct {
+    symbol: StaticDataSymbolId,
     symbol_name: []const u8,
     addend: i64,
 };
@@ -713,6 +746,7 @@ const StaticInitializerMachine = struct {
                 break :blk .{ .outer = value, .base = value, .base_layout = target_layout };
             },
             .scalar,
+            .erased_box,
             .list,
             .list_of_zst,
             .closure,
@@ -764,6 +798,7 @@ const StaticInitializerMachine = struct {
             .box => self.layoutValue(self.layouts().builtinBoxAbi(union_layout).elem_layout_idx orelse .zst),
             .scalar,
             .box_of_zst,
+            .erased_box,
             .list,
             .list_of_zst,
             .struct_,
@@ -959,6 +994,8 @@ const StaticDataBuilder = struct {
     initializer_machine: StaticInitializerMachine,
     frozen_allocations: collections.DenseMap(SymbolicAllocationId, PointerTarget),
     local_symbol_ordinal: u32,
+    procedure_names: collections.DenseMap(lir.LIR.LirProcSpecId, []u8),
+    helper_names: std.AutoHashMap(layout.RcHelperKey, []u8),
     include_provided_exports: bool,
     include_requested_exports: bool,
 
@@ -980,6 +1017,8 @@ const StaticDataBuilder = struct {
             .initializer_machine = try StaticInitializerMachine.init(allocator, lowered, target_usize),
             .frozen_allocations = collections.DenseMap(SymbolicAllocationId, PointerTarget).init(allocator),
             .local_symbol_ordinal = 0,
+            .procedure_names = .init(allocator),
+            .helper_names = .init(allocator),
             .include_provided_exports = options.include_provided_exports,
             .include_requested_exports = options.include_requested_exports,
         };
@@ -988,6 +1027,9 @@ const StaticDataBuilder = struct {
     fn deinitScratch(self: *StaticDataBuilder) void {
         self.initializer_machine.deinit();
         self.frozen_allocations.deinit();
+        // The first relocation to each function owns its cached name.
+        self.procedure_names.deinit();
+        self.helper_names.deinit();
     }
 
     fn build(self: *StaticDataBuilder) MaterializationError![]StaticDataExport {
@@ -1069,6 +1111,7 @@ const StaticDataBuilder = struct {
 
             try self.nodes.append(self.allocator, .{
                 .symbol_name = symbol_name,
+                .value_id = static_data_id,
                 .bytes = materialized.bytes,
                 .alignment = materialized.alignment,
                 .is_global = true,
@@ -1122,32 +1165,40 @@ const StaticDataBuilder = struct {
                     dest.* = .{
                         .offset = source.offset,
                         .target_symbol_name = target.symbol_name,
+                        .target = .{ .data_symbol = target.symbol },
                         .addend = target.addend + source.addend,
                         .kind = source.kind,
                         .callable_capture_offset = source.callable_capture_offset,
                     };
                 },
                 .procedure => |proc_id| {
-                    const proc = self.lowered.lir_result.store.getProcSpec(proc_id);
+                    const cached_name = self.procedure_names.get(proc_id);
+                    const name = cached_name orelse try procSymbolName(self.allocator, self.lowered.lir_result.store.getProcSpec(proc_id).name);
+                    errdefer if (cached_name == null) self.allocator.free(name);
+                    if (cached_name == null) try self.procedure_names.put(proc_id, name);
                     dest.* = .{
                         .offset = source.offset,
-                        .target_symbol_name = try procSymbolName(self.allocator, proc.name),
+                        .target_symbol_name = name,
                         .addend = source.addend,
                         .kind = .function_pointer,
                         .callable_capture_offset = source.callable_capture_offset,
                         .procedure = proc_id,
-                        .owns_target_symbol_name = true,
+                        .owns_target_symbol_name = cached_name == null,
                     };
                 },
                 .rc_helper => |helper| {
+                    const cached_name = self.helper_names.get(helper);
+                    const name = cached_name orelse try atomicRcHelperSymbolName(self.allocator, helper);
+                    errdefer if (cached_name == null) self.allocator.free(name);
+                    if (cached_name == null) try self.helper_names.put(helper, name);
                     dest.* = .{
                         .offset = source.offset,
-                        .target_symbol_name = try atomicRcHelperSymbolName(self.allocator, helper),
+                        .target_symbol_name = name,
                         .addend = source.addend,
                         .kind = .function_pointer,
                         .callable_capture_offset = source.callable_capture_offset,
                         .rc_helper = helper,
-                        .owns_target_symbol_name = true,
+                        .owns_target_symbol_name = cached_name == null,
                     };
                 },
             }
@@ -1200,6 +1251,7 @@ const StaticDataBuilder = struct {
         });
         node_appended = true;
         const target = PointerTarget{
+            .symbol = @enumFromInt(node_index),
             .symbol_name = symbol_name,
             .addend = @intCast(data_offset),
         };

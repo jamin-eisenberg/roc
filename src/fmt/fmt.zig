@@ -1265,10 +1265,14 @@ const Formatter = struct {
                 return .{ .region = field.region, .ends_with_multiline_string_line = false };
             }
         }
-        if (field.value) |v| {
-            try fmt.pushAll(": ");
-            const formatted_value = try fmt.formatExprWithInfo(v);
-            ends_with_multiline_string_line = formatted_value.ends_with_multiline_string_line;
+        switch (field.value) {
+            .supplied => |v| {
+                try fmt.pushAll(": ");
+                const formatted_value = try fmt.formatExprWithInfo(v);
+                ends_with_multiline_string_line = formatted_value.ends_with_multiline_string_line;
+            },
+            .punned => {},
+            .unset => try fmt.pushAll(": _"),
         }
 
         return .{
@@ -1451,6 +1455,31 @@ const Formatter = struct {
         return formatted;
     }
 
+    fn formatPipeTargetParens(fmt: *Formatter, expr_idx: AST.Expr.Idx, expand: bool) FormatAstError!void {
+        const pipe_indent = fmt.curr_indent;
+        defer fmt.curr_indent = pipe_indent;
+
+        // Multiline strings consume their whole physical line. Expand direct
+        // targets up front; the output state below catches nested terminal
+        // strings without a recursive layout prepass.
+        try fmt.push('(');
+        if (expand) {
+            fmt.curr_indent += 1;
+            try fmt.ensureNewline();
+            try fmt.pushIndent();
+        }
+
+        const formatted = try fmt.formatExprInner(expr_idx, .{ .behavior = .no_indent_on_access });
+        Formatter.discardRegion(formatted.region);
+
+        fmt.curr_indent = pipe_indent;
+        if (formatted.ends_with_multiline_string_line or fmt.has_multiline_string) {
+            try fmt.ensureNewline();
+            try fmt.pushIndent();
+        }
+        try fmt.push(')');
+    }
+
     fn formatExprInner(fmt: *Formatter, ei: AST.Expr.Idx, format_context: ExprFormatContext) FormatAstError!FormattedExpr {
         const expr = fmt.ast.store.getExpr(ei);
         const region = fmt.nodeRegion(@intFromEnum(ei));
@@ -1560,6 +1589,10 @@ const Formatter = struct {
             },
             .single_quote => |s| {
                 try fmt.pushTokenText(s.token);
+                if (s.type_ident) |type_ident| {
+                    try fmt.push('.');
+                    try fmt.pushAll(fmt.ast.env.getIdent(type_ident));
+                }
             },
             .ident => |i| {
                 const qualifier_tokens = fmt.ast.store.tokenSlice(i.qualifiers);
@@ -1675,6 +1708,9 @@ const Formatter = struct {
                         const apply_fn_idx = apply.@"fn";
                         const apply_fn = fmt.ast.store.getExpr(apply_fn_idx);
                         const args = fmt.ast.store.exprSlice(apply.args);
+                        const fn_is_call = apply_fn == .apply or
+                            apply_fn == .method_call or
+                            apply_fn == .nominal_apply;
 
                         // A direct empty argument list contributes no arguments
                         // beyond the piped value. Remove it unless a following
@@ -1682,24 +1718,24 @@ const Formatter = struct {
                         // doing so would expose another application as the RHS.
                         // (`value |> make()()` must remain distinct from
                         // `value |> make()`.)
-                        if (args.len == 0 and apply_fn != .apply and !format_context.question_suffix_follows) {
+                        if (args.len == 0 and !fn_is_call and !format_context.question_suffix_follows) {
                             const right_region = fmt.nodeRegion(@intFromEnum(ld.right));
                             const closing_token = right_region.end - 1;
                             if (fmt.hasCommentBefore(closing_token) and try fmt.flushCommentsBefore(closing_token)) {
                                 try fmt.pushIndent();
                             }
                             const target_needs_parens = !fmt.exprCanStartPipeTargetUnparenthesized(apply_fn_idx);
-                            if (target_needs_parens) try fmt.push('(');
-                            try fmt.formatExprInnerDiscard(apply_fn_idx, .no_indent_on_access);
-                            if (target_needs_parens) try fmt.push(')');
+                            if (target_needs_parens) {
+                                try fmt.formatPipeTargetParens(apply_fn_idx, apply_fn == .multiline_string or apply_fn == .typed_multiline_string);
+                            } else {
+                                try fmt.formatExprInnerDiscard(apply_fn_idx, .no_indent_on_access);
+                            }
                         } else {
                             // Parenthesize a non-atomic callee before printing its
                             // argument list, preserving chains such as `fn()()`.
                             const fn_needs_parens = !fmt.exprCanStartPipeTargetUnparenthesized(apply_fn_idx);
                             if (fn_needs_parens) {
-                                try fmt.push('(');
-                                try fmt.formatExprInnerDiscard(apply_fn_idx, .no_indent_on_access);
-                                try fmt.push(')');
+                                try fmt.formatPipeTargetParens(apply_fn_idx, apply_fn == .multiline_string or apply_fn == .typed_multiline_string);
                                 const right_region = fmt.nodeRegion(@intFromEnum(ld.right));
                                 const fn_region = fmt.nodeRegion(@intFromEnum(apply_fn_idx));
                                 const args_region = AST.TokenizedRegion{ .start = fn_region.end, .end = right_region.end };
@@ -1746,14 +1782,19 @@ const Formatter = struct {
                     .for_expr,
                     .malformed,
                     => {
-                        // A pipe target can start with a name or grouping
-                        // parenthesis. Postfix chains rooted in a name are
-                        // therefore safe without grouping; all other ASTs need
-                        // parentheses so migrating `->` preserves valid syntax.
-                        const needs_parens = !fmt.exprCanStartPipeTargetUnparenthesized(ld.right);
-                        if (needs_parens) try fmt.push('(');
-                        try fmt.formatExprInnerDiscard(ld.right, .no_indent_on_access);
-                        if (needs_parens) try fmt.push(')');
+                        // Method-insertion syntax is intentionally ungrouped.
+                        // Ordinary complete method calls stay grouped so they
+                        // continue to mean "call the method result." Other ASTs
+                        // follow the general pipe-target grammar.
+                        const needs_parens = switch (ld.target_kind) {
+                            .method_call => false,
+                            .ordinary => right_expr == .method_call or !fmt.exprCanStartPipeTargetUnparenthesized(ld.right),
+                        };
+                        if (needs_parens) {
+                            try fmt.formatPipeTargetParens(ld.right, right_expr == .multiline_string or right_expr == .typed_multiline_string);
+                        } else {
+                            try fmt.formatExprInnerDiscard(ld.right, .no_indent_on_access);
+                        }
                     },
                 }
             },
@@ -2396,6 +2437,10 @@ const Formatter = struct {
             .single_quote => |sq| {
                 region = sq.region;
                 try fmt.formatIdent(sq.token, null);
+                if (sq.type_ident) |type_ident| {
+                    try fmt.push('.');
+                    try fmt.pushAll(fmt.ast.env.getIdent(type_ident));
+                }
             },
             .int => |n| {
                 region = n.region;
@@ -2778,6 +2823,64 @@ const Formatter = struct {
         return .{ .field = field_idx, .version = current };
     }
 
+    fn formatPackageDependencyRecord(
+        fmt: *Formatter,
+        packages_idx: AST.Collection.Idx,
+        platform_idx: ?AST.RecordField.Idx,
+    ) FormatAstError!void {
+        const packages = fmt.ast.store.getCollection(packages_idx);
+        const packages_multiline = fmt.collectionWillBeMultiline(AST.RecordField.Idx, packages_idx);
+        const packages_empty = packages.span.len == 0;
+        try fmt.push('{');
+        if (packages_multiline) {
+            fmt.curr_indent += 1;
+        } else if (!packages_empty) {
+            try fmt.push(' ');
+        }
+
+        // Visit fields in source order so comment flushing preserves their attachment.
+        const package_slice = fmt.ast.store.recordFieldSlice(.{ .span = packages.span });
+        for (package_slice, 0..) |field_idx, i| {
+            const item_region = fmt.nodeRegion(@intFromEnum(field_idx));
+            if (packages_multiline) {
+                try fmt.flushCommentsBeforeDiscard(item_region.start);
+                try fmt.ensureNewline();
+                try fmt.pushIndent();
+            }
+            var ends_with_multiline_string_line = false;
+            if (platform_idx != null and field_idx == platform_idx.?) {
+                const field = fmt.ast.store.getRecordField(field_idx);
+                try fmt.pushTokenText(field.name);
+                if (field.value == .supplied) {
+                    try fmt.pushAll(": platform ");
+                    try fmt.formatExprDiscard(field.value.supplied);
+                }
+            } else {
+                const formatted_field = try fmt.formatRecordFieldWithInfo(field_idx);
+                Formatter.discardRegion(formatted_field.region);
+                ends_with_multiline_string_line = formatted_field.ends_with_multiline_string_line;
+            }
+            if (packages_multiline) {
+                if (ends_with_multiline_string_line or fmt.has_multiline_string) {
+                    try fmt.ensureNewline();
+                    try fmt.pushIndent();
+                }
+                try fmt.push(',');
+            } else if (i < package_slice.len - 1) {
+                try fmt.pushAll(", ");
+            }
+        }
+        if (packages_multiline) {
+            try fmt.flushCommentsBeforeDiscard(packages.region.end - 1);
+            fmt.curr_indent -= 1;
+            try fmt.ensureNewline();
+            try fmt.pushIndent();
+        } else if (!packages_empty) {
+            try fmt.push(' ');
+        }
+        try fmt.push('}');
+    }
+
     fn formatHeader(fmt: *Formatter, hi: AST.Header.Idx) FormatAstError!void {
         const header = fmt.ast.store.getHeader(hi);
         const start_indent = fmt.curr_indent;
@@ -2818,10 +2921,13 @@ const Formatter = struct {
                 }
                 const packages = fmt.ast.store.getCollection(a.packages);
                 const packages_multiline = fmt.collectionWillBeMultiline(AST.RecordField.Idx, a.packages);
+                // An app that names no platform and no packages writes `{}`,
+                // with nothing to separate from the braces.
+                const packages_empty = packages.span.len == 0;
                 try fmt.push('{');
                 if (packages_multiline) {
                     fmt.curr_indent += 1;
-                } else {
+                } else if (!packages_empty) {
                     try fmt.push(' ');
                 }
 
@@ -2829,9 +2935,11 @@ const Formatter = struct {
                 var package_fields_list = try std.array_list.Managed(AST.RecordField.Idx).initCapacity(fmt.ast.store.gpa, 10);
                 const packages_slice = fmt.ast.store.recordFieldSlice(.{ .span = packages.span });
                 for (packages_slice) |package_idx| {
-                    if (package_idx == a.platform_idx) {
-                        platform_field = package_idx;
-                        continue;
+                    if (a.platform_idx) |header_platform_idx| {
+                        if (package_idx == header_platform_idx) {
+                            platform_field = package_idx;
+                            continue;
+                        }
                     }
                     try package_fields_list.append(package_idx);
                 }
@@ -2846,12 +2954,12 @@ const Formatter = struct {
                         try fmt.pushIndent();
                     }
                     try fmt.pushTokenText(field.name);
-                    if (field.value) |v| {
+                    if (field.value == .supplied) {
                         try fmt.push(':');
                         try fmt.push(' ');
                         try fmt.pushAll("platform");
                         try fmt.push(' ');
-                        try fmt.formatExprDiscard(v);
+                        try fmt.formatExprDiscard(field.value.supplied);
                     }
                     if (packages_multiline) {
                         try fmt.push(',');
@@ -2883,7 +2991,7 @@ const Formatter = struct {
                     fmt.curr_indent -= 1;
                     try fmt.ensureNewline();
                     try fmt.pushIndent();
-                } else {
+                } else if (!packages_empty) {
                     try fmt.push(' ');
                 }
 
@@ -2952,16 +3060,7 @@ const Formatter = struct {
                 } else {
                     try fmt.push(' ');
                 }
-                const packages = fmt.ast.store.getCollection(p.packages);
-                const packagesItems = fmt.ast.store.recordFieldSlice(.{ .span = packages.span });
-                try fmt.formatCollection(
-                    packages.region,
-                    packages.layout,
-                    .curly,
-                    AST.RecordField.Idx,
-                    packagesItems,
-                    Formatter.formatRecordField,
-                );
+                try fmt.formatPackageDependencyRecord(p.packages, p.platform_idx);
             },
             .platform => |p| {
                 try fmt.pushAll("platform");
@@ -3563,7 +3662,7 @@ const Formatter = struct {
                         try fmt.newline();
                     }
                 } else if (!fmt.has_newline) {
-                    try fmt.push(' ');
+                    fmt.setInlineCommentSeparator();
                 }
                 try fmt.push('#');
                 const comment_text = between_text[comment_start..comment_end];
@@ -3639,7 +3738,7 @@ const Formatter = struct {
                 if (newline_count > 0 or fmt.has_newline) {
                     try fmt.pushIndent();
                 } else {
-                    try fmt.push(' ');
+                    fmt.setInlineCommentSeparator();
                 }
                 try fmt.push('#');
                 const comment_text = between_text[comment_start..comment_end];
@@ -3682,6 +3781,11 @@ const Formatter = struct {
 
         // Return true if there was a newline, whether or not there was a comment
         return newline_count > 0;
+    }
+
+    inline fn setInlineCommentSeparator(fmt: *Formatter) void {
+        std.debug.assert(!fmt.has_newline);
+        fmt.pending_spaces = 1;
     }
 
     fn push(fmt: *Formatter, c: u8) error{WriteFailed}!void {
@@ -4150,8 +4254,8 @@ const Formatter = struct {
                 return true;
             }
 
-            if (recordField.value) |value| {
-                if (fmt.nodeWillBeMultiline(AST.Expr.Idx, value)) {
+            if (recordField.value == .supplied) {
+                if (fmt.nodeWillBeMultiline(AST.Expr.Idx, recordField.value.supplied)) {
                     return true;
                 }
             }
@@ -4388,6 +4492,52 @@ test "issue 10480: package qualifier preserved in exposed aliased imports" {
     defer std.testing.allocator.free(result);
 
     try std.testing.expectEqualStrings("module [o as n, F.s as I]\n", result);
+}
+
+test "package platform dependency formatting is stable" {
+    const result = try moduleFmtsStable(
+        std.testing.allocator,
+        "package[Wrapper]{pf:platform \"../platform/main.roc\",util:\"../util/main.roc\",roc:\"nightly-2026-08-05-24f0b47\"}",
+        false,
+    );
+    defer std.testing.allocator.free(result);
+
+    try std.testing.expectEqualStrings(
+        "package [Wrapper] { pf: platform \"../platform/main.roc\", util: \"../util/main.roc\", roc: \"nightly-2026-08-05-24f0b47\" }\n",
+        result,
+    );
+}
+
+test "package platform dependency preserves source order and comments" {
+    const input = "package [Wrapper] {\n" ++
+        "\t# Utility dependency\n" ++
+        "\tutil: \"../util/main.roc\",\n" ++
+        "\t# Platform dependency\n" ++
+        "\tpf: platform \"../platform/main.roc\",\n" ++
+        "\t# Another dependency\n" ++
+        "\textra: \"../extra/main.roc\",\n" ++
+        "\t# End of dependencies\n" ++
+        "}\n";
+    const result = try moduleFmtsStable(std.testing.allocator, input, false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("package\n" ++
+        "\t[Wrapper]\n" ++
+        "\t{\n" ++
+        "\t\t# Utility dependency\n" ++
+        "\t\tutil: \"../util/main.roc\",\n" ++
+        "\t\t# Platform dependency\n" ++
+        "\t\tpf: platform \"../platform/main.roc\",\n" ++
+        "\t\t# Another dependency\n" ++
+        "\t\textra: \"../extra/main.roc\",\n" ++
+        "\t\t# End of dependencies\n" ++
+        "\t}\n", result);
+}
+
+test "package platform dependency preserves inline source order" {
+    const input = "package [Wrapper] { util: \"../util/main.roc\", pf: platform \"../platform/main.roc\" }\n";
+    const result = try moduleFmtsStable(std.testing.allocator, input, false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(input, result);
 }
 
 test "issue 10431: wrapped declaration has no trailing whitespace" {
@@ -4877,6 +5027,26 @@ test "pipe owns the postfix chain on its right" {
     try std.testing.expectEqualStrings("a = foo |> bar(baz).blah()\n", result);
 }
 
+test "literal method pipe targets and grouped result calls format stably" {
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\a=[1,2,3]|>[1].concat()
+        \\b=1|>1.plus()
+        \\c="roc "|>"and roll".with_prefix()
+        \\d=x|>(receiver.method())
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "a = [1, 2, 3] |> [1].concat()\n" ++
+            "\n" ++
+            "b = 1 |> (1).plus()\n" ++
+            "\n" ++
+            "c = \"roc \" |> \"and roll\".with_prefix()\n" ++
+            "\n" ++
+            "d = x |> (receiver.method())\n",
+        result,
+    );
+}
+
 test "formatter preserves an old arrow's postfix grouping during migration" {
     const result = try moduleFmtsStable(std.testing.allocator, "a=foo->bar(baz).blah()", false);
     defer std.testing.allocator.free(result);
@@ -4887,6 +5057,26 @@ test "pipe drops direct empty target argument lists" {
     const result = try moduleFmtsStable(std.testing.allocator, "a=(x|>foo(),x|>Ok(),x|>(|v|v)())", false);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("a = (x |> foo, x |> Ok, x |> (|v| v))\n", result);
+}
+
+test "issue 11045: pipe keeps empty argument lists on method targets" {
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\my_const = []
+        \\
+        \\_ = [1, 2, 3] |> my_const.concat()
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings(
+        "my_const = []\n\n" ++
+            "_ = [1, 2, 3] |> my_const.concat()\n",
+        result,
+    );
+}
+
+test "pipe keeps an empty target application after a method call" {
+    const result = try moduleFmtsStable(std.testing.allocator, "a=x|>receiver.method()()", false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("a = x |> receiver.method()()\n", result);
 }
 
 test "pipe keeps comments from removed empty argument lists" {
@@ -4912,6 +5102,15 @@ test "pipe keeps comments from removed empty argument lists" {
             "\tfoo\n",
         result,
     );
+}
+
+test "issue 11043: parenthesized pipe target with a comment-only argument list is idempotent" {
+    // Repro for https://github.com/roc-lang/roc/issues/11043
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\t=0|>(0)(#
+        \\)
+    , false);
+    defer std.testing.allocator.free(result);
 }
 
 test "multiline pipes start indented lines" {
@@ -5102,6 +5301,26 @@ test "issue 9785: multiline string followed by tuple access formats to valid sou
     , false);
     defer std.testing.allocator.free(result);
     try std.testing.expectEqualStrings("n = \\\\\n\t.0 - ||\n\t0\n", result);
+}
+
+test "issue 10817: parenthesized multiline string pipe target stays expanded" {
+    // https://github.com/roc-lang/roc/issues/10817
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\a=()->(\\
+        \\)
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("a = ()\n\t|> (\n\t\t\\\\\n\t)\n", result);
+}
+
+test "parenthesized pipe target preserves multiline string indentation" {
+    const result = try moduleFmtsStable(std.testing.allocator,
+        \\a=()|>(\\first
+        \\\\second
+        \\)
+    , false);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("a = ()\n\t|> (\n\t\t\\\\first\n\t\t\\\\second\n\t)\n", result);
 }
 
 test "parenthesized type application with leading newline is idempotent" {

@@ -49,11 +49,11 @@ NO CHANGE
 ~~~clojure
 (e-list
 	(elems
-		(e-runtime-error (tag "erroneous_value_expr"))
+		(e-typed-int (value "1") (type "U8"))
 		(e-typed-int (value "2") (type "U8"))
-		(e-num (value "300"))))
+		(e-runtime-error (tag "erroneous_value_expr"))))
 ~~~
 # TYPES
 ~~~clojure
-(expr (type "List(Error)"))
+(expr (type "List(U8)"))
 ~~~

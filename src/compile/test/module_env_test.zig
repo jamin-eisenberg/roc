@@ -35,11 +35,15 @@ test "ModuleEnv.Serialized roundtrip" {
     try original.recordBindingScheme(@enumFromInt(42));
     try original.recordBindingScheme(@enumFromInt(7));
     try original.recordBindingScheme(@enumFromInt(42));
+    try original.recordBindingSchemeCodecRequirement(@enumFromInt(42), @enumFromInt(90), @enumFromInt(12), 34);
+    try original.recordBindingSchemeCodecRequirement(@enumFromInt(7), @enumFromInt(91), @enumFromInt(56), 78);
+    try original.recordBindingSchemeCodecRequirement(@enumFromInt(42), @enumFromInt(90), @enumFromInt(13), 35);
+    try original.recordBindingSchemeCodecRequirement(@enumFromInt(42), @enumFromInt(90), @enumFromInt(12), 34);
     original.top_level_value_defs = .{ .span = .{ .start = 17, .len = 2 } };
     original.value_binding_defs = .{ .span = .{ .start = 23, .len = 4 } };
     _ = try original.provided_low_level_defs.append(gpa, .{
         .def_idx = 7,
-        .op = .num_plus_wrap,
+        .op = .num_int_add_wrap,
     });
     _ = try original.provided_low_level_defs.append(gpa, .{
         .def_idx = 11,
@@ -113,9 +117,22 @@ test "ModuleEnv.Serialized roundtrip" {
     try std.testing.expect(env.nodeIsBindingScheme(@enumFromInt(42)));
     try std.testing.expect(!env.nodeIsBindingScheme(@enumFromInt(41)));
     try std.testing.expectEqual(@as(usize, 2), env.binding_schemes.items.items.len);
+    const codec_requirements_7 = env.bindingSchemeCodecRequirementsForNode(@enumFromInt(7));
+    try std.testing.expectEqual(@as(usize, 1), codec_requirements_7.len);
+    try std.testing.expectEqual(@as(u32, 91), codec_requirements_7[0].scheme_root);
+    try std.testing.expectEqual(@as(u32, 56), codec_requirements_7[0].receiver_var);
+    try std.testing.expectEqual(@as(u32, 78), codec_requirements_7[0].constraint_index);
+    const codec_requirements_42 = env.bindingSchemeCodecRequirementsForNode(@enumFromInt(42));
+    try std.testing.expectEqual(@as(usize, 2), codec_requirements_42.len);
+    try std.testing.expectEqual(@as(u32, 90), codec_requirements_42[0].scheme_root);
+    try std.testing.expectEqual(@as(u32, 12), codec_requirements_42[0].receiver_var);
+    try std.testing.expectEqual(@as(u32, 34), codec_requirements_42[0].constraint_index);
+    try std.testing.expectEqual(@as(u32, 13), codec_requirements_42[1].receiver_var);
+    try std.testing.expectEqual(@as(u32, 35), codec_requirements_42[1].constraint_index);
+    try std.testing.expectEqual(@as(usize, 0), env.bindingSchemeCodecRequirementsForNode(@enumFromInt(41)).len);
     try std.testing.expectEqual(original.top_level_value_defs.span, env.top_level_value_defs.span);
     try std.testing.expectEqual(original.value_binding_defs.span, env.value_binding_defs.span);
-    try std.testing.expectEqual(base.LowLevel.num_plus_wrap, env.providedLowLevelForDef(@enumFromInt(7)).?);
+    try std.testing.expectEqual(base.LowLevel.num_int_add_wrap, env.providedLowLevelForDef(@enumFromInt(7)).?);
     try std.testing.expectEqual(base.LowLevel.num_bitwise_xor, env.providedLowLevelForDef(@enumFromInt(11)).?);
     try std.testing.expect(env.providedLowLevelForDef(@enumFromInt(9)) == null);
 
@@ -246,14 +263,14 @@ test "ModuleEnv.Serialized roundtrip preserves file dependency states" {
 
     try original.initCIRFields("Test");
 
-    const present_idx = try original.recordFileDependency("data.txt");
+    const present_idx = try original.recordFileDependency("data.txt", 0, 0);
     const present_hash = [_]u8{0x11} ** 32;
     original.setFileDependencyContentHash(present_idx, present_hash);
 
-    const missing_idx = try original.recordFileDependency("missing.txt");
+    const missing_idx = try original.recordFileDependency("missing.txt", 0, 0);
     original.setFileDependencyMissing(missing_idx);
 
-    const unreadable_idx = try original.recordFileDependency("denied.txt");
+    const unreadable_idx = try original.recordFileDependency("denied.txt", 0, 0);
     original.setFileDependencyUnreadable(unreadable_idx);
 
     var arena = collections.SingleThreadArena.init(gpa);

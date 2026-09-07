@@ -26,12 +26,14 @@
 //! reverse dependencies to take parameter modes to a fixpoint with returns
 //! pessimistically owned: parameters start borrowed and flip to owned when
 //! any occurrence demands a unit, so every parameter bit is queued at most
-//! once. Calls in tail position to procs in the same call-graph
-//! strongly-connected component demand ownership of their arguments so
-//! emission never needs a statement after the call. Phase B then marks
-//! returns borrowed when every returned value is a borrow anchored on a
-//! borrowed parameter, and re-solves binding modes so callers may borrow such
-//! results. After signatures settle,
+//! once. Phase B then marks returns borrowed when every returned value is a
+//! borrow anchored on a borrowed parameter, and re-solves binding modes so
+//! callers may borrow such results. Same-SCC tail calls retain their ordinary
+//! mode constraints and record the exact borrowed caller parameter, if any,
+//! whose entry lifetime contains each argument occurrence. Emission transfers
+//! ownership only when that anchor is absent or owned in the current variant,
+//! so frame replacement preserves external borrows without leaving cleanup
+//! after the call. After signatures settle,
 //! unique returns solve to a fixpoint with the born-unique analysis: a
 //! proc's return is unique when every `ret` returns a born-unique value
 //! surviving to the return with no other holder, and a direct-call result
@@ -83,6 +85,40 @@ pub const JoinBody = struct {
     jump_count: u32 = 0,
 };
 
+const no_param_anchor: u8 = std.math.maxInt(u8);
+
+/// Exact lifetime fact for one direct call to a callee in the same call-graph
+/// SCC whose result is immediately returned by the caller. Each represented
+/// argument either names the caller parameter whose borrowed entry lifetime
+/// contains the recursive call, or has no such anchor and must transfer an
+/// ownership unit before the caller frame can be replaced.
+pub const TailCallLifetime = struct {
+    stmt: LIR.CFStmtId,
+    anchor_params: [arc_sig.tracked_param_count]u8,
+    carriers: [arc_sig.tracked_param_count]u32,
+
+    pub fn anchorParam(self: *const TailCallLifetime, position: usize) ?usize {
+        if (position >= arc_sig.tracked_param_count) return null;
+        const anchor = self.anchor_params[position];
+        return if (anchor == no_param_anchor) null else anchor;
+    }
+
+    pub fn carrier(self: *const TailCallLifetime, position: usize) ?LIR.LocalId {
+        if (position >= arc_sig.tracked_param_count) return null;
+        const local = self.carriers[position];
+        return if (local == no_local) null else @enumFromInt(local);
+    }
+
+    pub fn argumentOutlivesScc(
+        self: *const TailCallLifetime,
+        position: usize,
+        caller_sig: arc_sig.RcSig,
+    ) bool {
+        const anchor = self.anchorParam(position) orelse return false;
+        return caller_sig.paramMode(anchor) == .borrowed;
+    }
+};
+
 /// Per-local binding-mode solution, liveness groups, and per-proc ownership
 /// signatures. A group is one leader local together with every borrowed
 /// local whose liveness anchors on it; emission keeps the leader's ownership
@@ -101,6 +137,11 @@ pub const Solution = struct {
     leader: []u32,
     /// Source local of each pure same-value alias, or `no_local`.
     alias_source: []u32,
+    /// Immediate lender of each solved-borrowed local: the local whose value
+    /// it borrows through (its alias source, the container of its field or
+    /// payload read, or the argument a borrowed call result borrows from), or
+    /// `no_local` for owned bindings and borrowed parameters.
+    borrow_source: []u32,
     /// Solved ownership signature per proc.
     sigs: []arc_sig.RcSig,
     /// Flat complete outcome rows referenced by `RcSig.outcomes`.
@@ -116,6 +157,12 @@ pub const Solution = struct {
     /// Parameter positions whose values can reach a consuming low-level
     /// runtime uniqueness check in this proc's ownership-neutral body.
     unique_seed_masks: []arc_sig.ParamMask,
+    /// Same-SCC tail-call lifetime facts, partitioned by source proc. These
+    /// preserve the exact SCC-entry lender for each represented argument so
+    /// variants can re-evaluate the constraint under their demanded ABI.
+    tail_call_offsets: []u32,
+    tail_call_lens: []u32,
+    tail_calls: []TailCallLifetime,
     /// Flat join-body facts per source proc, indexed through the adjacent
     /// offsets and lengths.
     join_body_offsets: []u32,
@@ -163,11 +210,15 @@ pub const Solution = struct {
         self.borrowed_call_result.deinit(self.allocator);
         self.allocator.free(self.leader);
         self.allocator.free(self.alias_source);
+        self.allocator.free(self.borrow_source);
         self.allocator.free(self.sigs);
         self.allocator.free(self.outcomes);
         self.allocator.free(self.available_outcome_spans);
         self.allocator.free(self.restitution_params_by_stmt);
         self.allocator.free(self.unique_seed_masks);
+        self.allocator.free(self.tail_call_offsets);
+        self.allocator.free(self.tail_call_lens);
+        self.allocator.free(self.tail_calls);
         self.allocator.free(self.join_body_offsets);
         self.allocator.free(self.join_body_lens);
         self.allocator.free(self.join_bodies);
@@ -259,15 +310,28 @@ pub const Solution = struct {
     /// aliases already have their own retained unit, and field/payload borrows
     /// are not the same value as their liveness leader.
     pub fn unitLocalOf(self: *const Solution, local: LIR.LocalId) LIR.LocalId {
-        if (!self.isBorrowed(local)) return local;
         var cursor = @intFromEnum(local);
         var steps: usize = 0;
-        while (cursor < self.alias_source.len and self.alias_source[cursor] != no_local) {
+        // Every owned binding has an independent unit, even when its value
+        // came from another local. Only borrowed links forward that unit.
+        while (cursor < self.alias_source.len and
+            self.isBorrowed(@enumFromInt(cursor)) and
+            self.alias_source[cursor] != no_local)
+        {
             cursor = self.alias_source[cursor];
             steps += 1;
             if (steps > self.alias_source.len) solveInvariant("ARC alias-source chain contained a cycle");
         }
         return @enumFromInt(cursor);
+    }
+
+    /// The local a solved-borrowed local borrows its value through, or null
+    /// for owned bindings and borrowed parameters.
+    pub fn borrowSourceOf(self: *const Solution, local: LIR.LocalId) ?LIR.LocalId {
+        const index = @intFromEnum(local);
+        if (index >= self.borrow_source.len) return null;
+        const source = self.borrow_source[index];
+        return if (source == no_local) null else @enumFromInt(source);
     }
 
     pub fn sigTable(self: *const Solution) arc_sig.SigTable {
@@ -294,6 +358,33 @@ pub const Solution = struct {
         const index = @intFromEnum(stmt);
         if (index >= self.restitution_params_by_stmt.len) return 0;
         return self.restitution_params_by_stmt[index];
+    }
+
+    pub fn tailCallsOf(self: *const Solution, proc: LIR.LirProcSpecId) []const TailCallLifetime {
+        const index = @intFromEnum(proc);
+        if (index >= self.tail_call_offsets.len) return &.{};
+        const offset = self.tail_call_offsets[index];
+        const len = self.tail_call_lens[index];
+        return self.tail_calls[offset..][0..len];
+    }
+
+    pub fn tailCallAt(self: *const Solution, proc: LIR.LirProcSpecId, stmt: LIR.CFStmtId) ?*const TailCallLifetime {
+        const tail_calls = self.tailCallsOf(proc);
+        const stmt_index = @intFromEnum(stmt);
+        var left: usize = 0;
+        var right = tail_calls.len;
+        while (left < right) {
+            const middle = left + (right - left) / 2;
+            const middle_index = @intFromEnum(tail_calls[middle].stmt);
+            if (middle_index < stmt_index) {
+                left = middle + 1;
+            } else if (middle_index > stmt_index) {
+                right = middle;
+            } else {
+                return &tail_calls[middle];
+            }
+        }
+        return null;
     }
 
     pub fn joinBodiesOf(self: *const Solution, proc: LIR.LirProcSpecId) []const JoinBody {
@@ -366,9 +457,7 @@ pub fn computeLocalContainsRefcounted(
     for (0..local_count) |index| {
         const local_id: LIR.LocalId = @enumFromInt(@as(u32, @intCast(index)));
         const local = store.getLocal(local_id);
-        const boxy_desc = if (boxy_rc_descs.len == 0) local.boxy_desc else boxy_rc_descs[index];
-        contains[index] = layouts.layoutContainsRefcounted(layouts.getLayout(local.layout_idx)) or
-            (boxy_desc != null and layouts.layoutContainsRcErasedBox(layouts.getLayout(local.layout_idx)));
+        contains[index] = layouts.layoutContainsRefcounted(layouts.getLayout(local.layout_idx));
     }
 
     var changed = true;
@@ -483,6 +572,7 @@ const ArcLocalDomain = struct {
 
 const DirectCallFact = struct {
     caller: u32,
+    stmt: LIR.CFStmtId,
     callee: LIR.LirProcSpecId,
     args: LIR.LocalSpan,
     target: LIR.LocalId,
@@ -786,6 +876,10 @@ pub fn solve(
         }
     }
 
+    var tail_call_table = try buildTailCallTable(&solver, &binding);
+    var tail_call_table_kept = false;
+    defer if (!tail_call_table_kept) tail_call_table.deinit(allocator);
+
     var visible = try computeVisibilityFromFacts(allocator, &solver);
     errdefer visible.deinit(allocator);
     if (builtin.mode == .Debug) {
@@ -855,6 +949,8 @@ pub fn solve(
     errdefer allocator.free(leader);
     const alias_source = try allocator.alloc(u32, local_count);
     errdefer allocator.free(alias_source);
+    const borrow_source = try allocator.alloc(u32, local_count);
+    errdefer allocator.free(borrow_source);
     const maybe_uninitialized_condition = try allocator.alloc(u32, local_count);
     errdefer allocator.free(maybe_uninitialized_condition);
     const maybe_uninitialized_condition_mask = try allocator.alloc(u64, local_count);
@@ -865,10 +961,17 @@ pub fn solve(
     errdefer maybe_uninitialized_join_param.deinit(allocator);
     for (leader, 0..) |*entry, index| entry.* = @intCast(index);
     @memset(alias_source, no_local);
+    @memset(borrow_source, no_local);
     @memset(maybe_uninitialized_condition, no_local);
     @memset(maybe_uninitialized_condition_mask, 0);
     for (domain.arc_to_local, 0..) |local_index, arc_index| {
-        if (binding.borrowed.isSet(arc_index)) borrowed.set(local_index);
+        if (binding.borrowed.isSet(arc_index)) {
+            borrowed.set(local_index);
+            switch (solver.defs[arc_index]) {
+                .borrow_capable => |lender| borrow_source[local_index] = domain.localAt(lender),
+                .none, .multi, .fresh => {},
+            }
+        }
         leader[local_index] = domain.localAt(binding.leader[arc_index]);
         const source = solver.alias_source[arc_index];
         if (source != no_local) alias_source[local_index] = domain.localAt(source);
@@ -890,11 +993,15 @@ pub fn solve(
         .borrowed_call_result = borrowed_call_result,
         .leader = leader,
         .alias_source = alias_source,
+        .borrow_source = borrow_source,
         .sigs = solver.sigs,
         .outcomes = &.{},
         .available_outcome_spans = try allocator.alloc(arc_sig.OutcomeSpan, proc_count),
         .restitution_params_by_stmt = try allocator.alloc(arc_sig.ParamMask, store.cfStmtCount()),
         .unique_seed_masks = solver.unique_seed_masks,
+        .tail_call_offsets = tail_call_table.offsets,
+        .tail_call_lens = tail_call_table.lens,
+        .tail_calls = tail_call_table.facts,
         .join_body_offsets = join_body_offsets,
         .join_body_lens = join_body_lens,
         .join_bodies = join_bodies,
@@ -916,16 +1023,21 @@ pub fn solve(
     @memset(solution.available_outcome_spans, .empty);
     solver_sigs_kept = true;
     solver_join_indices_kept = true;
+    tail_call_table_kept = true;
     errdefer {
         solution.borrowed.deinit(allocator);
         solution.borrowed_call_result.deinit(allocator);
         allocator.free(solution.leader);
         allocator.free(solution.alias_source);
+        allocator.free(solution.borrow_source);
         allocator.free(solution.sigs);
         allocator.free(solution.outcomes);
         allocator.free(solution.available_outcome_spans);
         allocator.free(solution.restitution_params_by_stmt);
         allocator.free(solution.unique_seed_masks);
+        allocator.free(solution.tail_call_offsets);
+        allocator.free(solution.tail_call_lens);
+        allocator.free(solution.tail_calls);
         allocator.free(solution.join_body_offsets);
         allocator.free(solution.join_body_lens);
         allocator.free(solution.join_bodies);
@@ -1566,6 +1678,18 @@ const BindingResult = struct {
     }
 };
 
+const TailCallTable = struct {
+    offsets: []u32,
+    lens: []u32,
+    facts: []TailCallLifetime,
+
+    fn deinit(self: *TailCallTable, allocator: Allocator) void {
+        allocator.free(self.offsets);
+        allocator.free(self.lens);
+        allocator.free(self.facts);
+    }
+};
+
 /// Resolves each local's lender chain against the current defs/demands.
 /// A chain link stays borrowed only if the link itself qualifies and the
 /// chain bottoms out at a once-bound leader that is either owned or a
@@ -1638,6 +1762,93 @@ fn resolveBindings(solver: *Solver) SolveError!BindingResult {
     }
 
     return .{ .borrowed = borrowed, .leader = leader };
+}
+
+/// Builds the exact lifetime boundary facts for recursive tail calls after
+/// parameter modes and borrowed-return lenders are final. A borrowed argument
+/// outlives frame replacement exactly when its solved lender is a borrowed
+/// entry parameter of this caller. Every other represented RC argument names
+/// the local that must carry an ownership unit into a mandatory callee
+/// variant.
+fn buildTailCallTable(
+    solver: *const Solver,
+    binding: *const BindingResult,
+) SolveError!TailCallTable {
+    const allocator = solver.allocator;
+    const proc_count = solver.sigs.len;
+    const offsets = try allocator.alloc(u32, proc_count);
+    errdefer allocator.free(offsets);
+    const lens = try allocator.alloc(u32, proc_count);
+    errdefer allocator.free(lens);
+    @memset(lens, 0);
+
+    for (solver.direct_calls.items) |call| {
+        if (!call.tail) continue;
+        if (solver.scc[call.caller] != solver.scc[@intFromEnum(call.callee)]) continue;
+        lens[call.caller] += 1;
+    }
+
+    var fact_count: u32 = 0;
+    for (lens, 0..) |len, proc_index| {
+        offsets[proc_index] = fact_count;
+        fact_count += len;
+    }
+    const facts = try allocator.alloc(TailCallLifetime, fact_count);
+    errdefer allocator.free(facts);
+    const fill = try allocator.dupe(u32, offsets);
+    defer allocator.free(fill);
+
+    for (solver.direct_calls.items) |call| {
+        if (!call.tail) continue;
+        if (solver.scc[call.caller] != solver.scc[@intFromEnum(call.callee)]) continue;
+
+        var fact = TailCallLifetime{
+            .stmt = call.stmt,
+            .anchor_params = [_]u8{no_param_anchor} ** arc_sig.tracked_param_count,
+            .carriers = [_]u32{no_local} ** arc_sig.tracked_param_count,
+        };
+        const args = solver.store.getLocalSpan(call.args);
+        for (0..@min(GuardedList.borrowLen(args), arc_sig.tracked_param_count)) |position| {
+            const argument = solver.domain.indexOf(GuardedList.at(args, position)) orelse continue;
+            if (!binding.borrowed.isSet(argument)) continue;
+            fact.carriers[position] = tailArgumentCarrier(solver, binding, argument);
+            const leader = binding.leader[argument];
+            if (!paramIsBorrowed(solver, leader)) continue;
+            if (solver.param_proc[leader] != call.caller) continue;
+            const anchor = solver.param_position[leader];
+            if (anchor >= arc_sig.tracked_param_count) continue;
+            fact.anchor_params[position] = @intCast(anchor);
+        }
+
+        facts[fill[call.caller]] = fact;
+        fill[call.caller] += 1;
+    }
+
+    for (offsets, lens) |offset, len| {
+        const start: usize = @intCast(offset);
+        const count: usize = @intCast(len);
+        std.mem.sort(TailCallLifetime, facts[start..][0..count], {}, tailCallLifetimeLessThan);
+    }
+
+    return .{ .offsets = offsets, .lens = lens, .facts = facts };
+}
+
+fn tailCallLifetimeLessThan(_: void, left: TailCallLifetime, right: TailCallLifetime) bool {
+    return @intFromEnum(left.stmt) < @intFromEnum(right.stmt);
+}
+
+/// Mirrors `Solution.unitLocalOf` in the dense solver domain. Borrowed pure
+/// aliases transfer their source's unit; other borrowed definitions need an
+/// owned override on their own binding when a tail-call lifetime escapes.
+fn tailArgumentCarrier(solver: *const Solver, binding: *const BindingResult, argument: u32) u32 {
+    var cursor = argument;
+    var steps: usize = 0;
+    while (binding.borrowed.isSet(cursor) and solver.alias_source[cursor] != no_local) {
+        cursor = solver.alias_source[cursor];
+        steps += 1;
+        if (steps > solver.alias_source.len) solveInvariant("ARC tail-call carrier alias chain contained a cycle");
+    }
+    return solver.domain.localAt(cursor);
 }
 
 fn paramIsBorrowed(solver: *const Solver, local_index: u32) bool {
@@ -1989,6 +2200,7 @@ fn liftProcStmtFacts(
     switch (solver.store.getCFStmt(current)) {
         .assign_call => |assign| try solver.direct_calls.append(solver.allocator, .{
             .caller = proc_index,
+            .stmt = current,
             .callee = assign.proc,
             .args = assign.args,
             .target = assign.target,
@@ -2281,23 +2493,23 @@ fn collectAll(solver: *Solver) SolveError!void {
     };
 
     // Direct-call demands are the only binding facts that depend on the
-    // solved call SCCs and the current optimistic parameter signatures.
+    // current optimistic parameter signatures. Tailness never changes the
+    // ownership relation: same-SCC tail arguments get a separate exact
+    // lifetime fact after borrowed-return lenders settle.
     for (solver.direct_calls.items) |call| {
         const callee_sig = solver.sigs[@intFromEnum(call.callee)];
         const args = solver.store.getLocalSpan(call.args);
-        const same_scc = solver.scc[@intFromEnum(call.callee)] == solver.scc[call.caller];
-        const tail_call = same_scc and call.tail;
         for (0..GuardedList.borrowLen(args)) |position| {
             const arg = GuardedList.at(args, position);
             const argument = solver.domain.indexOf(arg) orelse continue;
-            if (!tail_call and position < arc_sig.tracked_param_count) {
+            if (position < arc_sig.tracked_param_count) {
                 const key = @intFromEnum(call.callee) * arc_sig.tracked_param_count + position;
                 try solver.param_uses.append(solver.allocator, .{
                     .key = @intCast(key),
                     .argument = argument,
                 });
             }
-            if (!tail_call and callee_sig.paramMode(position) == .borrowed) continue;
+            if (callee_sig.paramMode(position) == .borrowed) continue;
             noteDemand(solver, arg);
         }
     }

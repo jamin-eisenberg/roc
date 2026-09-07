@@ -105,6 +105,7 @@ const ExprNodeTag = enum {
     method_call,
     tuple_access,
     arrow_call,
+    arrow_method_call,
     lambda,
     apply,
     suffix_single_question,
@@ -578,15 +579,15 @@ pub fn addHeader(store: *NodeStore, header: AST.Header) std.mem.Allocator.Error!
     switch (header) {
         .app => |app| {
             node.tag = .app_header;
-            // TODO this doesn't seem right, were giving it a record_field index instead of a token index
-            node.main_token = @intFromEnum(app.platform_idx);
             // Store provides collection
             node.data.lhs = @intFromEnum(app.provides);
-            // `packages` and the optional `roc` version pin do not both fit in
-            // the node, so they share an extra_data record.
-            const ed_start = try store.reserveExtraDataStart(2);
+            // `packages`, the optional platform entry, and the optional `roc`
+            // version pin do not all fit in the node, so they share an
+            // extra_data record.
+            const ed_start = try store.reserveExtraDataStart(3);
             store.extra_data.appendAssumeCapacity(@intFromEnum(app.packages));
             store.extra_data.appendAssumeCapacity(try packOptionalIndex(app.roc_version));
+            store.extra_data.appendAssumeCapacity(try packOptionalIndex(app.platform_idx));
             node.data.rhs = ed_start;
             node.region = app.region;
         },
@@ -603,10 +604,11 @@ pub fn addHeader(store: *NodeStore, header: AST.Header) std.mem.Allocator.Error!
         .package => |package| {
             node.tag = .package_header;
             node.data.lhs = @intFromEnum(package.exposes);
-            node.data.rhs = @intFromEnum(package.packages);
-            // A package header has no name token, so the optional `roc`
-            // version pin fits in main_token without an extra_data record.
-            node.main_token = try packOptionalIndex(package.roc_version);
+            const ed_start = try store.reserveExtraDataStart(3);
+            store.extra_data.appendAssumeCapacity(@intFromEnum(package.packages));
+            store.extra_data.appendAssumeCapacity(try packOptionalIndex(package.roc_version));
+            store.extra_data.appendAssumeCapacity(try packOptionalIndex(package.platform_idx));
+            node.data.rhs = ed_start;
             node.region = package.region;
         },
         .platform => |platform| {
@@ -972,6 +974,10 @@ pub fn addPattern(store: *NodeStore, pattern: AST.Pattern) std.mem.Allocator.Err
             node.tag = .single_quote_patt;
             node.region = sq.region;
             node.main_token = sq.token;
+            if (sq.type_ident) |type_ident| {
+                node.data.lhs = @bitCast(type_ident);
+                node.data.rhs = @intFromBool(true);
+            }
         },
         .record => |r| {
             node.tag = .record_patt;
@@ -1071,6 +1077,10 @@ pub fn addExpr(store: *NodeStore, expr: AST.Expr) std.mem.Allocator.Error!AST.Ex
             node.tag = .single_quote;
             node.region = e.region;
             node.main_token = e.token;
+            if (e.type_ident) |type_ident| {
+                node.data.lhs = @bitCast(type_ident);
+                node.data.rhs = @intFromBool(true);
+            }
         },
         .string_part => |e| {
             node.tag = .string_part;
@@ -1188,7 +1198,10 @@ pub fn addExpr(store: *NodeStore, expr: AST.Expr) std.mem.Allocator.Error!AST.Ex
             node.data.lhs = @intFromEnum(ta.expr);
         },
         .arrow_call => |ld| {
-            node.tag = .arrow_call;
+            node.tag = switch (ld.target_kind) {
+                .ordinary => .arrow_call,
+                .method_call => .arrow_method_call,
+            };
             node.region = ld.region;
             node.main_token = ld.operator;
             node.data.lhs = @intFromEnum(ld.left);
@@ -1357,8 +1370,15 @@ pub fn addRecordField(store: *NodeStore, field: AST.RecordField) std.mem.Allocat
     };
     node.tag = .record_field;
     node.main_token = field.name;
-    if (field.value) |v| {
-        node.data.lhs = @intFromEnum(v);
+    // rhs discriminates the value state: 0 = punned, 1 = unset, 2 = supplied
+    // (with lhs holding the expression index).
+    switch (field.value) {
+        .supplied => |v| {
+            node.data.lhs = @intFromEnum(v);
+            node.data.rhs = 2;
+        },
+        .punned => node.data.rhs = 0,
+        .unset => node.data.rhs = 1,
     }
 
     const nid = try store.nodes.append(store.gpa, node);
@@ -1748,7 +1768,7 @@ pub fn getHeader(store: *const NodeStore, header_idx: AST.Header.Idx) AST.Header
         .app_header => {
             const ed_start = node.data.rhs;
             return .{ .app = .{
-                .platform_idx = @enumFromInt(node.main_token),
+                .platform_idx = unpackOptionalIndex(AST.RecordField.Idx, store.extra_data.items[ed_start + 2]),
                 .provides = @enumFromInt(node.data.lhs),
                 .packages = @enumFromInt(store.extra_data.items[ed_start]),
                 .roc_version = unpackOptionalIndex(AST.RecordField.Idx, store.extra_data.items[ed_start + 1]),
@@ -1768,10 +1788,12 @@ pub fn getHeader(store: *const NodeStore, header_idx: AST.Header.Idx) AST.Header
             } };
         },
         .package_header => {
+            const ed_start = node.data.rhs;
             return .{ .package = .{
                 .exposes = @enumFromInt(node.data.lhs),
-                .packages = @enumFromInt(node.data.rhs),
-                .roc_version = unpackOptionalIndex(AST.RecordField.Idx, node.main_token),
+                .packages = @enumFromInt(store.extra_data.items[ed_start]),
+                .roc_version = unpackOptionalIndex(AST.RecordField.Idx, store.extra_data.items[ed_start + 1]),
+                .platform_idx = unpackOptionalIndex(AST.RecordField.Idx, store.extra_data.items[ed_start + 2]),
                 .region = node.region,
             } };
         },
@@ -2174,6 +2196,7 @@ pub fn getPattern(store: *const NodeStore, pattern_idx: AST.Pattern.Idx) AST.Pat
         .single_quote_patt => {
             return .{ .single_quote = .{
                 .token = node.main_token,
+                .type_ident = if (node.data.rhs != 0) @bitCast(node.data.lhs) else null,
                 .region = node.region,
             } };
         },
@@ -2309,6 +2332,7 @@ pub fn getExpr(store: *const NodeStore, expr_idx: AST.Expr.Idx) AST.Expr {
         .single_quote => {
             return .{ .single_quote = .{
                 .token = node.main_token,
+                .type_ident = if (node.data.rhs != 0) @bitCast(node.data.lhs) else null,
                 .region = node.region,
             } };
         },
@@ -2465,6 +2489,16 @@ pub fn getExpr(store: *const NodeStore, expr_idx: AST.Expr.Idx) AST.Expr {
                 .right = @enumFromInt(node.data.rhs),
                 .operator = node.main_token,
                 .region = node.region,
+                .target_kind = .ordinary,
+            } };
+        },
+        .arrow_method_call => {
+            return .{ .arrow_call = .{
+                .left = @enumFromInt(node.data.lhs),
+                .right = @enumFromInt(node.data.rhs),
+                .operator = node.main_token,
+                .region = node.region,
+                .target_kind = .method_call,
             } };
         },
         .lambda => {
@@ -2627,7 +2661,13 @@ pub fn getExpr(store: *const NodeStore, expr_idx: AST.Expr.Idx) AST.Expr {
 pub fn getRecordField(store: *const NodeStore, field_idx: AST.RecordField.Idx) AST.RecordField {
     const node = store.nodes.get(@enumFromInt(@intFromEnum(field_idx)));
     const name = node.main_token;
-    const value: ?AST.Expr.Idx = if (node.tag == .malformed) null else if (node.data.lhs > 0) @enumFromInt(node.data.lhs) else null;
+    const value: AST.RecordField.Value = if (node.tag == .malformed)
+        .punned
+    else switch (node.data.rhs) {
+        0 => .punned,
+        1 => .unset,
+        else => .{ .supplied = @enumFromInt(node.data.lhs) },
+    };
 
     return .{
         .name = name,

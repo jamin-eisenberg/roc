@@ -17,19 +17,41 @@ pub const DeclaredTypeKind = enum(u8) {
     alias,
     @"opaque",
     where_alias,
+    nominal,
 
-    /// The noun to use when describing this declaration to the user.
-    pub fn label(self: DeclaredTypeKind) []const u8 {
+    /// The headline of an underscore diagnostic for this declaration.
+    pub fn underscoreHeadline(self: DeclaredTypeKind) []const u8 {
         return switch (self) {
-            .alias => "alias",
-            .@"opaque" => "opaque type",
-            .where_alias => "where alias",
+            .alias => "Underscores are not allowed in type alias declarations.",
+            .where_alias => "Underscores are not allowed in where alias declarations.",
+            .@"opaque" => "A bare underscore is not allowed in opaque type declarations.",
+            .nominal => "A bare underscore is not allowed in nominal type declarations.",
+        };
+    }
+
+    /// The title of an underscore diagnostic for this declaration.
+    pub fn underscoreReportTitle(self: DeclaredTypeKind) []const u8 {
+        return switch (self) {
+            .alias, .where_alias => "Underscore In Type Alias",
+            .@"opaque" => "Underscore In Opaque Type",
+            .nominal => "Underscore In Nominal Type",
         };
     }
 };
 
+/// Public codec family that owns an otherwise unnameable builtin state type.
+pub const InternalBuiltinTypeKind = enum(u8) {
+    json,
+    http_header,
+};
+
 /// Different types of diagnostic errors
 pub const Diagnostic = union(enum) {
+    pub const BindingMutability = enum(u1) {
+        immutable,
+        mutable,
+    };
+
     not_implemented: struct {
         feature: StringLiteral.Idx,
         region: Region,
@@ -178,7 +200,29 @@ pub const Diagnostic = union(enum) {
     unnamed_field_cannot_have_default: struct {
         region: Region,
     },
-    record_default_not_literal: struct {
+    /// A `??` default declared outside a nominal type declaration's backing
+    /// record: defaults are only legal on the direct fields of a nominal
+    /// (`:=`) backing record, never in structural record types (type
+    /// aliases, inline annotations, or nested records).
+    default_not_allowed_in_structural_record: struct {
+        region: Region,
+    },
+    /// A `??` default on a nominal (or opaque) type declaration inside a
+    /// block: a local declaration's default canonicalizes in function scope,
+    /// so it could capture locals that no other construction site can
+    /// supply, and the end-of-module default-cycle pass only sees top-level
+    /// declarations. Defaults are only legal on module top-level nominal
+    /// declarations; the default is dropped and the field degrades to
+    /// required.
+    default_not_allowed_on_local_type_decl: struct {
+        region: Region,
+    },
+    /// A `??` default whose materialization cycles back to itself through
+    /// name-resolvable edges: references to same-module top-level defs
+    /// and/or local nominal constructions that omit defaulted fields.
+    /// Detected by the end-of-module default-cycle pass; dispatch-mediated
+    /// cycles are the checker's residue (design.md "Defaulted Fields").
+    record_default_reference_cycle: struct {
         field_name: Ident.Idx,
         region: Region,
     },
@@ -189,6 +233,11 @@ pub const Diagnostic = union(enum) {
         ident: Ident.Idx,
         region: Region,
         original_region: Region,
+    },
+    binding_name_does_not_match_mutability: struct {
+        ident: Ident.Idx,
+        mutability: BindingMutability,
+        region: Region,
     },
     type_redeclared: struct {
         name: Ident.Idx,
@@ -251,6 +300,14 @@ pub const Diagnostic = union(enum) {
     nested_type_not_found: struct {
         parent_name: Ident.Idx,
         nested_name: Ident.Idx,
+        region: Region,
+    },
+    /// A nested builtin type that exists but is internal to the format module
+    /// that owns it, so Roc code has no way to name it.
+    internal_builtin_type: struct {
+        parent_name: Ident.Idx,
+        nested_name: Ident.Idx,
+        kind: InternalBuiltinTypeKind,
         region: Region,
     },
     nested_value_not_found: struct {
@@ -399,6 +456,14 @@ pub const Diagnostic = union(enum) {
     infinite_loop_never_exits: struct {
         region: Region,
     },
+    /// A `?` applied to the value a function returns: the final expression of
+    /// the function body (looking through blocks, `if` branches, and `match`
+    /// branches) or the operand of a `return`. Such a `?` unwraps the `Try` the
+    /// function was about to return, which only type-checks for a nested `Try`
+    /// and is almost always a mistake.
+    trailing_try_suffix: struct {
+        region: Region,
+    },
     return_outside_fn: struct {
         region: Region,
         context: ReturnContext,
@@ -470,9 +535,12 @@ pub const Diagnostic = union(enum) {
             .unnamed_field_not_allowed_in_structural_record => |d| d.region,
             .optional_field_cannot_have_default => |d| d.region,
             .unnamed_field_cannot_have_default => |d| d.region,
-            .record_default_not_literal => |d| d.region,
+            .default_not_allowed_in_structural_record => |d| d.region,
+            .default_not_allowed_on_local_type_decl => |d| d.region,
+            .record_default_reference_cycle => |d| d.region,
             .var_across_function_boundary => |d| d.region,
             .shadowing_warning => |d| d.region,
+            .binding_name_does_not_match_mutability => |d| d.region,
             .type_redeclared => |d| d.redeclared_region,
             .tuple_elem_not_canonicalized => |d| d.region,
             .file_import_not_found => |d| d.region,
@@ -487,6 +555,7 @@ pub const Diagnostic = union(enum) {
             .type_from_missing_module => |d| d.region,
             .module_not_imported => |d| d.region,
             .nested_type_not_found => |d| d.region,
+            .internal_builtin_type => |d| d.region,
             .nested_value_not_found => |d| d.region,
             .record_builder_map2_not_found => |d| d.region,
             .too_many_exports => |d| d.region,
@@ -522,6 +591,7 @@ pub const Diagnostic = union(enum) {
             .underscore_in_type_declaration => |d| d.region,
             .break_outside_loop => |d| d.region,
             .infinite_loop_never_exits => |d| d.region,
+            .trailing_try_suffix => |d| d.region,
             .return_outside_fn => |d| d.region,
             .mutually_recursive_type_aliases => |d| d.region,
             .deprecated_number_suffix => |d| d.region,

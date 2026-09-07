@@ -106,7 +106,7 @@ NO CHANGE
 				(ty-record))))
 	(d-let
 		(p-assign (ident "main!"))
-		(e-call (constraint-fn-var 241)
+		(e-call (constraint-fn-var 248)
 			(e-lookup-local
 				(p-assign (ident "print_msg!")))
 			(e-string
@@ -118,9 +118,9 @@ NO CHANGE
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "Str => Error"))
+		(patt (type "Str => {}"))
 		(patt (type "Error")))
 	(expressions
-		(expr (type "Str => Error"))
+		(expr (type "Str => {}"))
 		(expr (type "Error"))))
 ~~~

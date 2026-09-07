@@ -8,35 +8,23 @@ type=expr
 !(C(2))
 ~~~
 # EXPECTED
-MISSING METHOD - not_tag.md:1:1:1:8
+TYPE MISMATCH - not_tag.md:1:3:1:7
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity runtime_error)
-		(title "Missing Method")
-		(region (start 1 1) (end 1 8))
-		(headline
-			(reflow "This")
-			(reflow " ")
-			(annotated code "not")
-			(reflow " ")
-			(reflow "method is being called on a value whose type doesn't have that method."))
-		(document
-			(source-region (file "not_tag.md") (start 1 1) (end 1 8) (annotation error) (line-text "!(C(2))"))
-			(line-break)
-			(reflow "The value's type, which does not have a method named ")
-			(annotated code "not")
-			(reflow ",")
-			(reflow " ")
-			(reflow "is:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "[C(a), ..] where [a.from_numeral : Numeral -> Try(a, [InvalidNumeral(Str)])]")
-			(annotation-end))))
-~~~
+── ✗ type mismatch ────────────────────────────────────────────── not_tag.md:1:3
+
+The first argument being passed to this function has the wrong type.
+
+!(C(2))
+  ^^^^
+
+This argument has the type:
+
+    [C(a), ..] where [a.from_numeral : Numeral -> Try(a, [InvalidNumeral(Str)])]
+
+But the function needs the first argument to be:
+
+    Bool
+
 # TOKENS
 ~~~zig
 OpBang,NoSpaceOpenRound,UpperIdent,NoSpaceOpenRound,Int,CloseRound,CloseRound,
@@ -56,9 +44,13 @@ NO CHANGE
 ~~~
 # CANONICALIZE
 ~~~clojure
-(e-runtime-error (tag "erroneous_value_expr"))
+(e-call
+	(e-lookup-associated-resolved (source "Bool.not") (builtin) (target-node "17379") (target-def "17379"))
+	(e-tag (name "C")
+		(args
+			(e-num (value "2")))))
 ~~~
 # TYPES
 ~~~clojure
-(expr (type "[C(Dec), ..]"))
+(expr (type "Error"))
 ~~~

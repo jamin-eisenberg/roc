@@ -15,7 +15,7 @@ fn rand_idx(random: std.Random, comptime T: type) T {
             .attributes = .{
                 .effectful = random.boolean(),
                 .ignored = random.boolean(),
-                .reassignable = random.boolean(),
+                .reserved = random.boolean(),
             },
             .idx = random.int(u29),
         };
@@ -63,9 +63,20 @@ test "NodeStore round trip - Headers" {
     try headers.append(gpa, AST.Header{
         .app = .{
             .packages = rand_idx(random, AST.Collection.Idx),
-            .platform_idx = rand_idx(random, AST.RecordField.Idx),
+            .platform_idx = @enumFromInt(11),
             .provides = rand_idx(random, AST.Collection.Idx),
             .roc_version = @enumFromInt(7),
+            .region = rand_region(random),
+        },
+    });
+
+    // An app header that names no platform round trips with a null platform.
+    try headers.append(gpa, AST.Header{
+        .app = .{
+            .packages = rand_idx(random, AST.Collection.Idx),
+            .platform_idx = null,
+            .provides = rand_idx(random, AST.Collection.Idx),
+            .roc_version = null,
             .region = rand_region(random),
         },
     });
@@ -81,6 +92,7 @@ test "NodeStore round trip - Headers" {
         .package = .{
             .exposes = rand_idx(random, AST.Collection.Idx),
             .packages = rand_idx(random, AST.Collection.Idx),
+            .platform_idx = @enumFromInt(9),
             .roc_version = null,
             .region = rand_region(random),
         },
@@ -464,6 +476,7 @@ test "NodeStore round trip - Pattern" {
         .single_quote = .{
             .region = rand_region(random),
             .token = rand_token_idx(random),
+            .type_ident = rand_idx(random, base.Ident.Idx),
         },
     });
     try patterns.append(gpa, AST.Pattern{
@@ -702,6 +715,7 @@ test "NodeStore round trip - Expr" {
         .single_quote = .{
             .region = rand_region(random),
             .token = rand_token_idx(random),
+            .type_ident = rand_idx(random, base.Ident.Idx),
         },
     });
     try expressions.append(gpa, AST.Expr{
@@ -815,6 +829,7 @@ test "NodeStore round trip - Expr" {
             .right = rand_idx(random, AST.Expr.Idx),
             .operator = rand_token_idx(random),
             .region = rand_region(random),
+            .target_kind = if (random.boolean()) .method_call else .ordinary,
         },
     });
     try expressions.append(gpa, AST.Expr{
@@ -1128,6 +1143,35 @@ test "NodeStore rejects optional index sentinel overflow in release builds" {
         .body = @enumFromInt(1),
         .region = .{ .start = 0, .end = 0 },
     }));
+}
+
+test "NodeStore round trip - expression record field value states" {
+    const gpa = testing.allocator;
+    var store = try NodeStore.initCapacity(gpa, 4);
+    defer store.deinit();
+
+    const fields = [_]AST.RecordField{
+        .{
+            .name = 1,
+            .value = .{ .supplied = @enumFromInt(2) },
+            .region = .{ .start = 1, .end = 3 },
+        },
+        .{
+            .name = 4,
+            .value = .punned,
+            .region = .{ .start = 4, .end = 5 },
+        },
+        .{
+            .name = 6,
+            .value = .unset,
+            .region = .{ .start = 6, .end = 8 },
+        },
+    };
+
+    for (fields) |field| {
+        const idx = try store.addRecordField(field);
+        try testing.expectEqualDeep(field, store.getRecordField(idx));
+    }
 }
 
 test "NodeStore round trip - annotation record field optional marker" {

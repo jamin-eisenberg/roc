@@ -7,8 +7,11 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const base = @import("base");
 const builtins = @import("builtins");
 const sljmp = @import("sljmp");
+
+const signal_handler = base.signal_handler;
 
 const RocOps = builtins.host_abi.RocOps;
 const JmpBuf = sljmp.JmpBuf;
@@ -155,6 +158,8 @@ allocation_tracker: std.AutoHashMap(usize, AllocationInfo),
 allocation_call_count: u32 = 0,
 longjmp_on_crash: bool = true,
 event_callback: ?EventCallback = null,
+expect_passed: []u64 = &.{},
+expect_failed: []u64 = &.{},
 
 pub fn init(allocator: std.mem.Allocator) RuntimeHostEnv {
     // Runtime byte leak checking is handled by allocation_tracker itself, so
@@ -204,6 +209,23 @@ pub fn setLongjmpOnCrash(self: *RuntimeHostEnv, enabled: bool) void {
 /// Install or clear the live host-event observer for this runtime environment.
 pub fn setEventCallback(self: *RuntimeHostEnv, callback: ?EventCallback) void {
     self.event_callback = callback;
+}
+
+/// Bind the worker-local dense arrays used by generated test code.
+pub fn setExpectCounters(self: *RuntimeHostEnv, passed: []u64, failed: []u64) void {
+    std.debug.assert(passed.len == failed.len);
+    self.expect_passed = passed;
+    self.expect_failed = failed;
+}
+
+/// Native dev-code callback for one executed source `expect`.
+pub fn rocExpectObserved(ops: *RocOps, site: u32, passed: u8) callconv(.c) void {
+    const self: *RuntimeHostEnv = @ptrCast(@alignCast(ops.env));
+    if (site >= self.expect_passed.len) {
+        std.debug.panic("runtime expect observation site {d} exceeded {d} counters", .{ site, self.expect_passed.len });
+    }
+    const counts = if (passed != 0) self.expect_passed else self.expect_failed;
+    counts[site] +|= 1;
 }
 
 /// Public function `get_ops`.
@@ -269,6 +291,9 @@ pub fn snapshot(self: *const RuntimeHostEnv, allocator: std.mem.Allocator) Alloc
 pub const CrashBoundary = struct {
     env: *RuntimeHostEnv,
     prev_jmp_buf: ?*JmpBuf,
+    recovery: signal_handler.StackOverflowRecovery = undefined,
+    prev_recovery: ?*const signal_handler.StackOverflowRecovery = null,
+    recovery_registered: bool = false,
 
     pub fn init(env: *RuntimeHostEnv) CrashBoundary {
         return .{
@@ -278,13 +303,50 @@ pub const CrashBoundary = struct {
     }
 
     pub fn deinit(self: *CrashBoundary) void {
+        if (self.recovery_registered) {
+            _ = signal_handler.setStackOverflowRecovery(self.prev_recovery);
+            self.recovery_registered = false;
+        }
         self.env.restoreJumpBuf(self.prev_jmp_buf);
     }
 
     pub inline fn set(self: *CrashBoundary) c_int {
-        return setjmp(&self.env.jmp_buf);
+        const sj = setjmp(&self.env.jmp_buf);
+        if (sj == 0) {
+            // Register this boundary as the thread's escape route for a stack
+            // overflow in the code the caller is about to run: the fault
+            // handler longjmps back here instead of taking the process down.
+            self.recovery = .{
+                .context = @ptrCast(self.env),
+                .escape = &escapeStackOverflow,
+            };
+            self.prev_recovery = signal_handler.setStackOverflowRecovery(&self.recovery);
+            self.recovery_registered = true;
+        } else if (sj == signal_handler.stack_overflow_longjmp_value) {
+            signal_handler.restoreStackGuardAfterOverflow();
+            self.env.noteStackOverflow();
+        }
+        return sj;
     }
 };
+
+fn escapeStackOverflow(context: *anyopaque) noreturn {
+    const env: *RuntimeHostEnv = @ptrCast(@alignCast(context));
+    const active_jmp_buf = env.active_jmp_buf orelse std.process.exit(134);
+    env.active_jmp_buf = null;
+    longjmp(active_jmp_buf, signal_handler.stack_overflow_longjmp_value);
+}
+
+/// The message recorded when compiled Roc code overflows its stack. Worded to
+/// match the interpreter's own stack-overflow report.
+pub const STACK_OVERFLOW_MESSAGE = "This Roc program overflowed its stack memory. This usually means there is very deep or infinite recursion somewhere in the code.";
+
+/// Record a caught stack overflow exactly the way a Roc `crash` is recorded,
+/// so callers report it as this run's ordinary crash outcome.
+pub fn noteStackOverflow(self: *RuntimeHostEnv) void {
+    self.appendEvent(.crashed, STACK_OVERFLOW_MESSAGE);
+    self.termination = .crashed;
+}
 
 /// Public function `enterCrashBoundary`.
 pub fn enterCrashBoundary(self: *RuntimeHostEnv) CrashBoundary {

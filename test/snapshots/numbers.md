@@ -189,5 +189,5 @@ EndOfFile,
 ~~~
 # TYPES
 ~~~clojure
-(expr (type "(Dec, Dec, Dec, Dec, Dec, Dec, Error, Error, Error, Error, Dec, Dec, Dec)"))
+(expr (type "(Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec, Dec)"))
 ~~~

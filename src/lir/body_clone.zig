@@ -27,6 +27,39 @@ pub const ForwardedAlias = struct {
     next: CFStmtId,
 };
 
+/// Runtime parameters associated with every join identity in the current LIR.
+/// Index each procedure once before rewriting it and update the index as the
+/// pass adds joins, so subtree clones can resolve external jump targets
+/// without rescanning the procedure for every cloned branch.
+pub const JoinParamIndex = struct {
+    params: collections.DenseMap(LIR.JoinPointId, LIR.LocalSpan),
+
+    pub fn init(allocator: Allocator) JoinParamIndex {
+        return .{ .params = collections.DenseMap(LIR.JoinPointId, LIR.LocalSpan).init(allocator) };
+    }
+
+    pub fn deinit(self: *JoinParamIndex) void {
+        self.params.deinit();
+    }
+
+    pub fn record(self: *JoinParamIndex, join: @FieldType(LIR.CFStmt, "join")) Allocator.Error!void {
+        try self.params.put(join.id, join.params);
+    }
+
+    pub fn indexReachable(self: *JoinParamIndex, store: *LirStore, body: CFStmtId) Allocator.Error!void {
+        var walk = try ReachableStmts.init(store, body);
+        defer walk.deinit();
+        while (try walk.next()) |stmt_id| {
+            const stmt = store.getCFStmt(stmt_id);
+            if (stmt == .join) try self.record(stmt.join);
+        }
+    }
+
+    fn get(self: *const JoinParamIndex, id: LIR.JoinPointId) ?LIR.LocalSpan {
+        return self.params.get(id);
+    }
+};
+
 /// Follow a straight-line chain of `assign_ref .local` aliases of `source`,
 /// returning the final aliased local and the first statement that is not such
 /// an alias. Only aliases that copy the tracked value into a same-layout local
@@ -378,6 +411,245 @@ pub fn localIdLessThan(_: void, a: LocalId, b: LocalId) bool {
     return @intFromEnum(a) < @intFromEnum(b);
 }
 
+/// The body of a proc these passes may rewrite, or null when the proc has no
+/// body of its own to clone: a hosted proc's implementation comes from the
+/// host, and a non-Roc ABI proc's calling convention is fixed by its boundary.
+pub fn rewritableProcBody(store: *const LirStore, proc_id: LIR.LirProcSpecId) ?CFStmtId {
+    const proc = store.getProcSpec(proc_id);
+    if (proc.hosted != null or proc.abi != .roc) return null;
+    return proc.body;
+}
+
+/// Every statement reachable from a proc body, visited exactly once. Shared
+/// join targets are reached through whichever predecessor arrives first.
+pub const ReachableStmts = struct {
+    store: *LirStore,
+    work: std.ArrayList(CFStmtId),
+    visited: collections.DenseMap(CFStmtId, void),
+
+    /// Start a walk rooted at `body`.
+    pub fn init(store: *LirStore, body: CFStmtId) Allocator.Error!ReachableStmts {
+        var work = std.ArrayList(CFStmtId).empty;
+        errdefer work.deinit(store.allocator);
+        try work.append(store.allocator, body);
+        return .{
+            .store = store,
+            .work = work,
+            .visited = collections.DenseMap(CFStmtId, void).init(store.allocator),
+        };
+    }
+
+    /// Release the walk's scratch storage.
+    pub fn deinit(self: *ReachableStmts) void {
+        self.work.deinit(self.store.allocator);
+        self.visited.deinit();
+    }
+
+    /// The next unvisited statement, or null when the walk is done.
+    pub fn next(self: *ReachableStmts) Allocator.Error!?CFStmtId {
+        while (self.work.pop()) |stmt_id| {
+            const entry = try self.visited.getOrPut(stmt_id);
+            if (entry.found_existing) continue;
+            try appendSuccessors(self.store, &self.work, stmt_id);
+            return stmt_id;
+        }
+        return null;
+    }
+};
+
+/// Return one flag per store local identifying definitions reachable from
+/// `body`. Clone passes use this to give definitions fresh identities while
+/// retaining read-only external inputs.
+pub fn collectReachableDefinitions(store: *LirStore, body: CFStmtId) Allocator.Error![]bool {
+    const defined = try store.allocator.alloc(bool, store.localCount());
+    errdefer store.allocator.free(defined);
+    @memset(defined, false);
+
+    var walk = try ReachableStmts.init(store, body);
+    defer walk.deinit();
+    while (try walk.next()) |stmt_id| markStmtDefinitions(store, defined, stmt_id);
+    return defined;
+}
+
+/// Add every local defined by `stmt_id` to an existing definition set.
+pub fn markStmtDefinitions(store: *const LirStore, defined: []bool, stmt_id: CFStmtId) void {
+    switch (store.getCFStmt(stmt_id)) {
+        inline .init_uninitialized,
+        .assign_ref,
+        .assign_literal,
+        .assign_packed_erased_fn,
+        .assign_boxy_desc_ref,
+        .assign_boxy_dict_ref,
+        .assign_boxy_box,
+        .assign_boxy_reuse_box,
+        .assign_boxy_unbox,
+        .assign_boxy_adapt,
+        .assign_boxy_inspect,
+        .assign_boxy_eq,
+        .assign_boxy_tag,
+        .assign_call_dict,
+        .assign_low_level,
+        .assign_list,
+        .assign_struct,
+        .assign_tag,
+        => |stmt| defined[@intFromEnum(stmt.target)] = true,
+        .assign_call => |stmt| {
+            defined[@intFromEnum(stmt.target)] = true;
+            if (stmt.out_desc) |out_desc| defined[@intFromEnum(out_desc)] = true;
+        },
+        .assign_call_erased => |stmt| {
+            defined[@intFromEnum(stmt.target)] = true;
+            if (stmt.out_desc) |out_desc| defined[@intFromEnum(out_desc)] = true;
+        },
+        .assign_boxy_tag_payload => |stmt| {
+            defined[@intFromEnum(stmt.target)] = true;
+            if (stmt.target_desc) |target_desc| defined[@intFromEnum(target_desc)] = true;
+        },
+        .join => |join| {
+            const params = store.getLocalSpan(join.params);
+            for (0..params.len) |index| defined[@intFromEnum(GuardedList.at(params, index))] = true;
+            const maybe_uninitialized = store.getLocalSpan(join.maybe_uninitialized_params);
+            for (0..maybe_uninitialized.len) |index| defined[@intFromEnum(GuardedList.at(maybe_uninitialized, index))] = true;
+        },
+        .str_match => |str_match| markStrMatchDefinitions(store, defined, str_match.steps),
+        .str_match_set => |str_match_set| {
+            const arms = store.getStrMatchArms(str_match_set.arms);
+            for (0..arms.len) |index| {
+                markStrMatchDefinitions(store, defined, GuardedList.at(arms, index).steps);
+            }
+        },
+        .store_struct,
+        .store_tag,
+        .set_local,
+        .debug,
+        .expect,
+        .expect_err,
+        .runtime_error,
+        .comptime_exhaustiveness_failed,
+        .comptime_branch_taken,
+        .incref,
+        .decref,
+        .decref_if_initialized,
+        .free,
+        .switch_stmt,
+        .switch_initialized_payload,
+        .boxy_tag_match,
+        .loop_continue,
+        .loop_break,
+        .jump,
+        .ret,
+        .crash,
+        => {},
+    }
+}
+
+fn markStrMatchDefinitions(store: *const LirStore, defined: []bool, span: LIR.StrMatchStepSpan) void {
+    const steps = store.getStrMatchSteps(span);
+    for (0..steps.len) |index| switch (GuardedList.at(steps, index).capture) {
+        .discard => {},
+        .view => |local| defined[@intFromEnum(local)] = true,
+    };
+}
+
+/// Whether every local in `chain` has exactly one read across the proc.
+///
+/// This is the soundness guard for fusing a call with the statement that
+/// consumes its result: the result is aliased or consumed exactly once, each
+/// alias feeds the next link exactly once, and the final value is the matched
+/// consumer's only reader. Any extra read means the fusion would orphan a
+/// still-live local, so both fusion passes must ask exactly this question.
+pub fn chainIsSingleUse(store: *LirStore, proc_body: CFStmtId, chain: []const LocalId) Allocator.Error!bool {
+    var reads = try countReachableReads(store, proc_body);
+    defer reads.deinit();
+    for (chain) |local| {
+        if (reads.get(local) != 1) return false;
+    }
+    return true;
+}
+
+/// What a cloned call variant adds to the proc it was cloned from.
+pub const CallVariantSpec = struct {
+    /// Locals prepended to the variant's argument list, ahead of the source
+    /// proc's own arguments. The fused call passes these at the call site.
+    leading_args: []const LocalId,
+    /// Locals the variant's frame needs that are neither its arguments nor
+    /// created by cloning the body.
+    extra_frame_locals: []const LocalId = &.{},
+    /// The variant's return layout, which the rewritten returns produce.
+    ret_layout: layout_mod.Idx,
+};
+
+/// Clone `source` into an internal variant whose returns are rewritten by
+/// `rewriter` and whose arguments are `spec.leading_args` followed by the
+/// source's own. The source proc is left untouched; callers cache the result
+/// so one variant serves every fused call site.
+pub fn cloneCallVariant(
+    comptime Rewriter: type,
+    store: *LirStore,
+    source: LIR.LirProcSpecId,
+    rewriter: Rewriter,
+    spec: CallVariantSpec,
+) Allocator.Error!LIR.LirProcSpecId {
+    const source_spec = store.getProcSpec(source);
+    const source_body = source_spec.body orelse
+        @panic("call-variant clone reached a proc with no body");
+    const source_args = store.getLocalSpan(source_spec.args);
+
+    var variant_args = try std.ArrayList(LocalId).initCapacity(
+        store.allocator,
+        source_args.len + spec.leading_args.len,
+    );
+    defer variant_args.deinit(store.allocator);
+    variant_args.appendSliceAssumeCapacity(spec.leading_args);
+
+    for (0..source_args.len) |index| {
+        const source_arg = GuardedList.at(source_args, index);
+        const arg = try store.addLocal(.{ .layout_idx = store.getLocal(source_arg).layout_idx });
+        variant_args.appendAssumeCapacity(arg);
+    }
+
+    var cloner = try BodyCloner(Rewriter).init(store, rewriter);
+    defer cloner.deinit();
+
+    for (0..source_args.len) |index| {
+        const source_arg = GuardedList.at(source_args, index);
+        cloner.local_map[@intFromEnum(source_arg)] = variant_args.items[index + spec.leading_args.len];
+    }
+
+    try cloner.new_locals.appendSlice(store.allocator, variant_args.items);
+    try cloner.new_locals.appendSlice(store.allocator, spec.extra_frame_locals);
+
+    const source_frame = store.getLocalSpan(source_spec.frame_locals);
+    for (0..source_frame.len) |index| {
+        _ = try cloner.mapLocal(GuardedList.at(source_frame, index));
+    }
+
+    const body = try cloner.cloneStmt(source_body);
+    const erased_reuse_arg = if (source_spec.erased_reuse_arg) |source_arg|
+        try cloner.mapLocal(source_arg)
+    else
+        null;
+
+    var frame_locals = try std.ArrayList(LocalId).initCapacity(store.allocator, cloner.new_locals.items.len);
+    defer frame_locals.deinit(store.allocator);
+    frame_locals.appendSliceAssumeCapacity(cloner.new_locals.items);
+    std.mem.sort(LocalId, frame_locals.items, {}, localIdLessThan);
+    const unique_len = uniqueSortedLocals(frame_locals.items);
+
+    const variant = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(variant_args.items),
+        .erased_reuse_arg = erased_reuse_arg,
+        .frame_locals = try store.addLocalSpan(frame_locals.items[0..unique_len]),
+        .body = body,
+        .ret_layout = spec.ret_layout,
+        .abi = .roc,
+    });
+    try store.copyProcDebugInfo(variant, source);
+
+    return variant;
+}
+
 /// Clone a source proc body into fresh statements and locals, delegating return
 /// handling to `Rewriter`.
 ///
@@ -406,17 +678,80 @@ pub fn BodyCloner(comptime Rewriter: type) type {
         stmt_map: collections.DenseMap(CFStmtId, CFStmtId),
         /// Every local created by this clone, in creation order.
         new_locals: std.ArrayList(LocalId),
+        /// Optional virtual frame under which cloned source scopes are rebased.
+        inline_scope_outer: LIR.InlineScopeId,
+        inline_scope_map: []?LIR.InlineScopeId,
+        /// Which join identities must be alpha-renamed. Whole-procedure
+        /// inlining owns every jump target and remaps all of them. A cloned
+        /// subtree remaps only declarations structurally contained in that
+        /// subtree, preserving jumps to lexically enclosing joins.
+        join_remap: enum { none, all, declared },
+        declared_joins: collections.DenseMap(LIR.JoinPointId, void),
+        join_params: ?*JoinParamIndex,
+        join_map: collections.DenseMap(LIR.JoinPointId, LIR.JoinPointId),
+        next_join_point: u32,
 
         /// Allocate the clone state sized for the store's current locals.
         pub fn init(store: *LirStore, rewriter: Rewriter) Allocator.Error!Self {
+            return initInternal(store, rewriter, LIR.InlineScopeId.none, .none, null);
+        }
+
+        /// Allocate clone state and rebase every cloned source location below
+        /// `outer`. Procedure variants pass `.none`; true call-site inlining
+        /// supplies the virtual frame representing the removed call.
+        pub fn initWithInlineScopeOuter(
+            store: *LirStore,
+            rewriter: Rewriter,
+            outer: LIR.InlineScopeId,
+        ) Allocator.Error!Self {
+            return initInternal(store, rewriter, outer, .all, null);
+        }
+
+        /// Clone a control-flow subtree within its current procedure. Join
+        /// declarations owned by the subtree receive fresh identities, while
+        /// jumps to lexically enclosing declarations retain their targets.
+        pub fn initWithFreshDeclaredJoins(
+            store: *LirStore,
+            rewriter: Rewriter,
+            body: CFStmtId,
+            join_params: *JoinParamIndex,
+        ) Allocator.Error!Self {
+            var self = try initInternal(store, rewriter, LIR.InlineScopeId.none, .declared, join_params);
+            errdefer self.deinit();
+            var walk = try ReachableStmts.init(store, body);
+            defer walk.deinit();
+            while (try walk.next()) |stmt_id| {
+                const stmt = store.getCFStmt(stmt_id);
+                if (stmt == .join) try self.declared_joins.put(stmt.join.id, {});
+            }
+            return self;
+        }
+
+        fn initInternal(
+            store: *LirStore,
+            rewriter: Rewriter,
+            outer: LIR.InlineScopeId,
+            join_remap: @FieldType(Self, "join_remap"),
+            join_params: ?*JoinParamIndex,
+        ) Allocator.Error!Self {
             const local_map = try store.allocator.alloc(?LocalId, store.localCount());
+            errdefer store.allocator.free(local_map);
             @memset(local_map, null);
+            const inline_scope_map = try store.allocator.alloc(?LIR.InlineScopeId, store.inlineScopeCount());
+            @memset(inline_scope_map, null);
             return .{
                 .store = store,
                 .rewriter = rewriter,
                 .local_map = local_map,
                 .stmt_map = collections.DenseMap(CFStmtId, CFStmtId).init(store.allocator),
                 .new_locals = .empty,
+                .inline_scope_outer = outer,
+                .inline_scope_map = inline_scope_map,
+                .join_remap = join_remap,
+                .declared_joins = collections.DenseMap(LIR.JoinPointId, void).init(store.allocator),
+                .join_params = join_params,
+                .join_map = collections.DenseMap(LIR.JoinPointId, LIR.JoinPointId).init(store.allocator),
+                .next_join_point = if (join_remap != .none) nextJoinPointRaw(store) else 0,
             };
         }
 
@@ -424,6 +759,9 @@ pub fn BodyCloner(comptime Rewriter: type) type {
         pub fn deinit(self: *Self) void {
             self.new_locals.deinit(self.store.allocator);
             self.stmt_map.deinit();
+            self.join_map.deinit();
+            self.declared_joins.deinit();
+            self.store.allocator.free(self.inline_scope_map);
             self.store.allocator.free(self.local_map);
         }
 
@@ -440,7 +778,7 @@ pub fn BodyCloner(comptime Rewriter: type) type {
             defer self.store.current_inline_scope = saved_inline_scope;
             self.store.current_loc = self.store.stmtLoc(old_id);
             self.store.current_region = self.store.stmtRegion(old_id);
-            self.store.current_inline_scope = self.store.stmtInlineScope(old_id);
+            self.store.current_inline_scope = try self.mapInlineScope(self.store.stmtInlineScope(old_id));
 
             const stmt = self.store.getCFStmt(old_id);
             if (@hasDecl(Rewriter, "interceptStmt")) {
@@ -458,6 +796,7 @@ pub fn BodyCloner(comptime Rewriter: type) type {
                 .assign_ref => |s| try self.store.addCFStmt(.{ .assign_ref = .{
                     .target = try self.mapLocal(s.target),
                     .op = try self.mapRefOp(s.op),
+                    .take_kind = s.take_kind,
                     .residual_shell_absent_fields = s.residual_shell_absent_fields,
                     .next = try self.cloneStmt(s.next),
                 } }),
@@ -655,6 +994,7 @@ pub fn BodyCloner(comptime Rewriter: type) type {
                 } }),
                 .expect => |s| try self.store.addCFStmt(.{ .expect = .{
                     .condition = try self.mapLocal(s.condition),
+                    .site = s.site,
                     .next = try self.cloneStmt(s.next),
                 } }),
                 .expect_err => |s| try self.store.addCFStmt(.{ .expect_err = .{
@@ -717,16 +1057,8 @@ pub fn BodyCloner(comptime Rewriter: type) type {
                 .str_match_set => |s| try self.cloneStrMatchSet(s),
                 .loop_continue => try self.store.addCFStmt(.loop_continue),
                 .loop_break => try self.store.addCFStmt(.loop_break),
-                .join => |s| try self.store.addCFStmt(.{ .join = .{
-                    .id = s.id,
-                    .params = try self.mapLocalSpan(s.params),
-                    .maybe_uninitialized_params = try self.mapLocalSpan(s.maybe_uninitialized_params),
-                    .maybe_uninitialized_conditions = try self.mapLocalSpan(s.maybe_uninitialized_conditions),
-                    .maybe_uninitialized_condition_masks = s.maybe_uninitialized_condition_masks,
-                    .body = try self.cloneStmt(s.body),
-                    .remainder = try self.cloneStmt(s.remainder),
-                } }),
-                .jump => |s| try self.store.addCFStmt(.{ .jump = .{ .target = s.target } }),
+                .join => |s| try self.cloneJoin(s),
+                .jump => |s| try self.cloneJump(s),
                 .ret => |s| try self.rewriter.cloneRet(self, s.value),
                 .crash => |s| try self.store.addCFStmt(.{ .crash = .{ .msg = switch (s.msg) {
                     .literal => |literal| .{ .literal = literal },
@@ -738,6 +1070,57 @@ pub fn BodyCloner(comptime Rewriter: type) type {
             return cloned;
         }
 
+        fn cloneJoin(self: *Self, join: @FieldType(LIR.CFStmt, "join")) Allocator.Error!CFStmtId {
+            const cloned = try self.store.addCFStmt(.{ .join = .{
+                .id = try self.mapJoinPoint(join.id),
+                .params = try self.mapLocalSpan(join.params),
+                .retained = try self.mapLocalSpan(join.retained),
+                .maybe_uninitialized_params = try self.mapLocalSpan(join.maybe_uninitialized_params),
+                .maybe_uninitialized_conditions = try self.mapLocalSpan(join.maybe_uninitialized_conditions),
+                .maybe_uninitialized_condition_masks = join.maybe_uninitialized_condition_masks,
+                .body = try self.cloneStmt(join.body),
+                .remainder = try self.cloneStmt(join.remainder),
+            } });
+            if (self.join_params) |params| try params.record(self.store.getCFStmt(cloned).join);
+            return cloned;
+        }
+
+        /// A declared-subtree clone can alpha-rename a local that is also a
+        /// parameter of an enclosing join. Jumps encode their arguments as
+        /// preceding writes, so bridge each remapped value back into the
+        /// enclosing join's original parameter before leaving the clone.
+        fn cloneJump(self: *Self, jump: @FieldType(LIR.CFStmt, "jump")) Allocator.Error!CFStmtId {
+            var next = try self.store.addCFStmt(.{ .jump = .{ .target = try self.mapJoinPoint(jump.target) } });
+            if (self.join_remap != .declared or self.declared_joins.contains(jump.target)) return next;
+
+            const params = self.join_params.?.get(jump.target) orelse
+                @panic("subtree clone jumped to an unknown external join");
+            next = try self.bridgeExternalJoinParams(params, next);
+            return next;
+        }
+
+        fn bridgeExternalJoinParams(self: *Self, span: LIR.LocalSpan, tail: CFStmtId) Allocator.Error!CFStmtId {
+            var next = tail;
+            const params = self.store.getLocalSpan(span);
+            var index = params.len;
+            while (index > 0) {
+                index -= 1;
+                const param = GuardedList.at(params, index);
+                const mapped = self.local_map[@intFromEnum(param)] orelse {
+                    self.local_map[@intFromEnum(param)] = param;
+                    continue;
+                };
+                if (mapped == param) continue;
+                next = try self.store.addCFStmt(.{ .set_local = .{
+                    .target = param,
+                    .value = mapped,
+                    .mode = .initialize_join_param,
+                    .next = next,
+                } });
+            }
+            return next;
+        }
+
         /// True when `next` is a `ret` of exactly `value`, marking a direct
         /// constructor/concat return the rewriter may fuse into its tail.
         pub fn directReturnOf(self: *const Self, next: CFStmtId, value: LocalId) bool {
@@ -746,11 +1129,19 @@ pub fn BodyCloner(comptime Rewriter: type) type {
         }
 
         fn cloneSwitch(self: *Self, s: anytype) Allocator.Error!CFStmtId {
-            const old_branches = self.store.getCFSwitchBranches(s.branches);
+            // Recursive body cloning appends switch branches and can therefore
+            // invalidate a guarded borrow of this same backing list. Own the
+            // source descriptors before cloning any branch body.
+            const old_branches = try GuardedList.dupe(
+                self.store.allocator,
+                LIR.CFSwitchBranch,
+                self.store.getCFSwitchBranches(s.branches),
+            );
+            defer self.store.allocator.free(old_branches);
             const branches = try self.store.allocator.alloc(LIR.CFSwitchBranch, old_branches.len);
             defer self.store.allocator.free(branches);
             for (0..old_branches.len) |index| {
-                const old = GuardedList.at(old_branches, index);
+                const old = old_branches[index];
                 const new = &branches[index];
                 new.* = .{
                     .value = old.value,
@@ -767,11 +1158,18 @@ pub fn BodyCloner(comptime Rewriter: type) type {
         }
 
         fn cloneStrMatchSet(self: *Self, s: anytype) Allocator.Error!CFStmtId {
-            const old_arms = self.store.getStrMatchArms(s.arms);
+            // Cloning an arm can append nested string-match arms. Snapshot the
+            // source descriptors so those appends cannot invalidate the input.
+            const old_arms = try GuardedList.dupe(
+                self.store.allocator,
+                LIR.StrMatchArm,
+                self.store.getStrMatchArms(s.arms),
+            );
+            defer self.store.allocator.free(old_arms);
             const arms = try self.store.allocator.alloc(LIR.StrMatchArm, old_arms.len);
             defer self.store.allocator.free(arms);
             for (0..old_arms.len) |index| {
-                const old = GuardedList.at(old_arms, index);
+                const old = old_arms[index];
                 const new = &arms[index];
                 new.* = .{
                     .prefix = old.prefix,
@@ -886,5 +1284,209 @@ pub fn BodyCloner(comptime Rewriter: type) type {
             try self.new_locals.append(self.store.allocator, local);
             return local;
         }
+
+        fn mapInlineScope(self: *Self, old: LIR.InlineScopeId) Allocator.Error!LIR.InlineScopeId {
+            if (self.inline_scope_outer == LIR.InlineScopeId.none) return old;
+            if (old == LIR.InlineScopeId.none) return self.inline_scope_outer;
+
+            const index = @intFromEnum(old);
+            if (index >= self.inline_scope_map.len) unreachable;
+            if (self.inline_scope_map[index]) |existing| return existing;
+
+            const source = self.store.inlineScope(old);
+            const mapped = try self.store.addInlineScope(.{
+                .source_symbol = source.source_symbol,
+                .source_name = source.source_name,
+                .source_loc = source.source_loc,
+                .call_site = source.call_site,
+                .parent = try self.mapInlineScope(source.parent),
+            });
+            self.inline_scope_map[index] = mapped;
+            return mapped;
+        }
+
+        fn mapJoinPoint(self: *Self, old: LIR.JoinPointId) Allocator.Error!LIR.JoinPointId {
+            switch (self.join_remap) {
+                .none => return old,
+                .all => {},
+                .declared => if (!self.declared_joins.contains(old)) return old,
+            }
+            const entry = try self.join_map.getOrPut(old);
+            if (!entry.found_existing) {
+                if (self.next_join_point == std.math.maxInt(u32)) @panic("join-point id space exhausted");
+                entry.value_ptr.* = @enumFromInt(self.next_join_point);
+                self.next_join_point += 1;
+            }
+            return entry.value_ptr.*;
+        }
     };
+}
+
+fn nextJoinPointRaw(store: *const LirStore) u32 {
+    var next: u32 = 0;
+    for (store.getCFStmts()) |stmt| {
+        if (stmt != .join) continue;
+        const raw = @intFromEnum(stmt.join.id);
+        if (raw == std.math.maxInt(u32)) @panic("join-point id space exhausted");
+        next = @max(next, raw + 1);
+    }
+    return next;
+}
+
+const TestRetRewriter = struct {
+    pub fn cloneRet(_: *TestRetRewriter, cloner: anytype, value: LocalId) Allocator.Error!CFStmtId {
+        return try cloner.store.addCFStmt(.{ .ret = .{ .value = try cloner.mapLocal(value) } });
+    }
+};
+
+test "subtree clone bridges renamed parameters before an external join" {
+    const testing = std.testing;
+    var store = LirStore.init(testing.allocator);
+    defer store.deinit();
+
+    const shared_param = try store.addLocal(.{ .layout_idx = .u64 });
+    const external_id: LIR.JoinPointId = @enumFromInt(1);
+    const internal_id: LIR.JoinPointId = @enumFromInt(2);
+
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = shared_param } });
+    const jump_external = try store.addCFStmt(.{ .jump = .{ .target = external_id } });
+    const jump_internal = try store.addCFStmt(.{ .jump = .{ .target = internal_id } });
+    const internal_stmt = try store.addCFStmt(.{ .join = .{
+        .id = internal_id,
+        .params = try store.addLocalSpan(&.{shared_param}),
+        .body = jump_external,
+        .remainder = jump_internal,
+    } });
+    const external_stmt = try store.addCFStmt(.{ .join = .{
+        .id = external_id,
+        .params = try store.addLocalSpan(&.{shared_param}),
+        .body = ret,
+        .remainder = internal_stmt,
+    } });
+
+    var join_params = JoinParamIndex.init(testing.allocator);
+    defer join_params.deinit();
+    try join_params.indexReachable(&store, external_stmt);
+    var cloner = try BodyCloner(TestRetRewriter).initWithFreshDeclaredJoins(&store, .{}, internal_stmt, &join_params);
+    defer cloner.deinit();
+    const cloned_stmt = try cloner.cloneStmt(internal_stmt);
+    const cloned = store.getCFStmt(cloned_stmt).join;
+    const cloned_param = GuardedList.at(store.getLocalSpan(cloned.params), 0);
+
+    try testing.expect(cloned.id != internal_id);
+    try testing.expect(cloned_param != shared_param);
+    try testing.expectEqual(cloned.id, store.getCFStmt(cloned.remainder).jump.target);
+
+    const bridge = store.getCFStmt(cloned.body).set_local;
+    try testing.expectEqual(shared_param, bridge.target);
+    try testing.expectEqual(cloned_param, bridge.value);
+    try testing.expectEqual(LIR.SetLocalWriteMode.initialize_join_param, bridge.mode);
+    try testing.expectEqual(external_id, store.getCFStmt(bridge.next).jump.target);
+}
+
+test "chainIsSingleUse rejects an extra read of any link" {
+    // The soundness guard both fusion passes depend on: a chain link read more
+    // than once means the fusion would orphan a still-live local. Each case
+    // below is one shape that must be refused, and one that must be allowed.
+    const gpa = std.testing.allocator;
+    var store = LirStore.init(gpa);
+    defer store.deinit();
+
+    const a = try store.addLocal(.{ .layout_idx = .str });
+    const b = try store.addLocal(.{ .layout_idx = .str });
+    const unit = try store.addLocal(.{ .layout_idx = .zst });
+
+    const ret = try store.addCFStmt(.{ .ret = .{ .value = b } });
+    const alias = try store.addCFStmt(.{ .assign_ref = .{
+        .target = b,
+        .op = .{ .local = a },
+        .next = ret,
+    } });
+
+    // `a` is read once (by the alias) and `b` once (by the return).
+    try std.testing.expect(try chainIsSingleUse(&store, alias, &.{ a, b }));
+
+    // A second read of the head link refuses the chain.
+    const extra_head = try store.addCFStmt(.{ .assign_ref = .{
+        .target = unit,
+        .op = .{ .local = a },
+        .next = alias,
+    } });
+    try std.testing.expect(!try chainIsSingleUse(&store, extra_head, &.{ a, b }));
+
+    // A second read of the tail link refuses it just the same.
+    const extra_tail = try store.addCFStmt(.{ .assign_ref = .{
+        .target = unit,
+        .op = .{ .local = b },
+        .next = alias,
+    } });
+    try std.testing.expect(!try chainIsSingleUse(&store, extra_tail, &.{ a, b }));
+
+    // A local with no reads at all is not "exactly one" either.
+    const unread = try store.addLocal(.{ .layout_idx = .str });
+    try std.testing.expect(!try chainIsSingleUse(&store, alias, &.{unread}));
+}
+
+test "rewritableProcBody refuses procs whose body is not the compiler's to clone" {
+    const gpa = std.testing.allocator;
+    var store = LirStore.init(gpa);
+    defer store.deinit();
+
+    const unit = try store.addLocal(.{ .layout_idx = .zst });
+    const body = try store.addCFStmt(.{ .ret = .{ .value = unit } });
+
+    const roc_proc = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(&.{}),
+        .frame_locals = try store.addLocalSpan(&.{unit}),
+        .body = body,
+        .ret_layout = .zst,
+        .abi = .roc,
+    });
+    try std.testing.expectEqual(body, rewritableProcBody(&store, roc_proc).?);
+
+    const bodyless = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(&.{}),
+        .frame_locals = try store.addLocalSpan(&.{}),
+        .body = null,
+        .ret_layout = .zst,
+        .abi = .roc,
+    });
+    try std.testing.expect(rewritableProcBody(&store, bodyless) == null);
+
+    const erased = try store.addProcSpec(.{
+        .name = store.freshSyntheticSymbol(),
+        .args = try store.addLocalSpan(&.{}),
+        .frame_locals = try store.addLocalSpan(&.{unit}),
+        .body = body,
+        .ret_layout = .zst,
+        .abi = .erased_callable,
+    });
+    try std.testing.expect(rewritableProcBody(&store, erased) == null);
+}
+
+test "call-result fusion machinery has one definition" {
+    // `return_slot` and `str_append` are the same pass with different consumer
+    // matches. The walk, the liveness guard, and the variant clone live here so
+    // a fix to any of them cannot land on one pass and miss the other.
+    const sources = [_][]const u8{
+        @embedFile("return_slot.zig"),
+        @embedFile("str_append.zig"),
+        @embedFile("box_reuse.zig"),
+    };
+    const shared = [_][]const u8{
+        "fn chainIsSingleUse(",
+        "fn cloneCallVariant(",
+        "fn rewritableProcBody(",
+    };
+    for (sources) |source| {
+        for (shared) |decl| {
+            try std.testing.expect(std.mem.find(u8, source, decl) == null);
+        }
+    }
+    const own = @embedFile("body_clone.zig");
+    for (shared) |decl| {
+        try std.testing.expect(std.mem.find(u8, own, decl) != null);
+    }
 }

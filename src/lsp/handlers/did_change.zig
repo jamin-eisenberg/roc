@@ -7,7 +7,7 @@ const DocumentStore = @import("../document_store.zig").DocumentStore;
 /// Handler for `textDocument/didChange` notifications (supports incremental edits).
 pub fn handler(comptime ServerType: type) type {
     return struct {
-        pub fn call(self: *ServerType, params_value: ?std.json.Value) Allocator.Error!void {
+        pub fn call(self: *ServerType, params_value: ?std.json.Value) (Allocator.Error || error{WriteFailed})!void {
             const params = params_value orelse return;
             if (std.meta.activeTag(params) != .object) return;
             const obj = params.object;
@@ -46,7 +46,7 @@ pub fn handler(comptime ServerType: type) type {
                 var change = DocumentStore.ContentChange{ .text = text };
                 if (change_obj.get("range")) |range_value| {
                     change.range = parseRange(range_value) catch |err| {
-                        std.log.warn("invalid range for {s}: {s}", .{ uri, @errorName(err) });
+                        std.log.debug("invalid range for {s}: {s}", .{ uri, @errorName(err) });
                         return;
                     };
                 }
@@ -81,7 +81,7 @@ pub fn handler(comptime ServerType: type) type {
                 };
             }
 
-            self.onDocumentChanged(uri);
+            try self.onDocumentChanged(uri);
         }
 
         fn parseRange(value: std.json.Value) error{InvalidRange}!DocumentStore.Range {

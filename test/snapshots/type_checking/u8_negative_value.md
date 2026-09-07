@@ -64,7 +64,7 @@ NO CHANGE
 ~~~clojure
 (inferred-types
 	(defs
-		(patt (type "Error")))
+		(patt (type "U8")))
 	(expressions
-		(expr (type "Error"))))
+		(expr (type "U8"))))
 ~~~

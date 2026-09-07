@@ -28,27 +28,47 @@ use_it = {
 }
 ~~~
 # EXPECTED
-MISSING METHOD - static_dispatch_where_forced_numeric_issue_9657.md:12:9:12:24
+TYPE MISMATCH - static_dispatch_where_forced_numeric_issue_9657.md:19:17:19:25
+TYPE MISMATCH - static_dispatch_where_forced_numeric_issue_9657.md:19:17:19:25
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity runtime_error)
-		(title "Missing Method")
-		(region (start 12 9) (end 12 24))
-		(headline
-			(reflow "This is trying to dispatch a method named")
-			(reflow " ")
-			(annotated code "encode")
-			(reflow " ")
-			(reflow "on an unresolved type variable, but unresolved type variables have no methods."))
-		(document
-			(source-region (file "static_dispatch_where_forced_numeric_issue_9657.md") (start 12 9) (end 12 24) (annotation error) (line-text "        output.encode()"))
-			(line-break)
-			(annotated emphasis "Hint:")
-			(reflow " ")
-			(reflow "You can replace this static dispatch call with an ordinary function call, or force the type variable to become more concrete—for example, by adding a type annotation that narrows its type to something that actually has methods."))))
-~~~
+── ✗ type mismatch ──── static_dispatch_where_forced_numeric_issue_9657.md:19:17
+
+The encode method on Dec has an incompatible type.
+
+transform = make_map(|n| n + 1)
+            ^^^^^^^^
+
+The method encode has the type:
+
+    Dec, fmt -> Try(encoded, err)
+      where [fmt.encode_dec : fmt, Dec -> Try(encoded, err)]
+
+But I need it to have the type:
+
+    b -> I64 where [b.decode : I64 -> b, b.encode : b -> I64, b.plus : b, Dec
+    -> b]
+
+Hint: This function expects 1 argument but got 2.
+
+── ✗ type mismatch ──── static_dispatch_where_forced_numeric_issue_9657.md:19:17
+
+The decode method on Dec has an incompatible type.
+
+transform = make_map(|n| n + 1)
+            ^^^^^^^^
+
+The method decode has the type:
+
+    src, fmt -> (Try(Dec, err), src)
+      where [fmt.decode_dec : fmt, src -> (Try(Dec, err), src)]
+
+But I need it to have the type:
+
+    I64 -> b where [b.decode : I64 -> b, b.encode : b -> I64, b.plus : b, Dec
+    -> b]
+
+Hint: This function expects 1 argument but got 2.
+
 # TOKENS
 ~~~zig
 LowerIdent,OpColon,OpenRound,LowerIdent,OpArrow,LowerIdent,CloseRound,OpArrow,OpenRound,UpperIdent,OpArrow,UpperIdent,CloseRound,KwWhere,OpenSquare,LowerIdent,NoSpaceDotLowerIdent,OpColon,UpperIdent,OpArrow,LowerIdent,Comma,LowerIdent,NoSpaceDotLowerIdent,OpColon,LowerIdent,OpArrow,UpperIdent,CloseSquare,
@@ -208,7 +228,11 @@ use_it = {
 											(p-assign (ident "f")))
 										(e-lookup-local
 											(p-assign (ident "value")))))
-								(e-runtime-error (tag "erroneous_value_expr"))))))
+								(e-dispatch-call (method "encode") (constraint-fn-var 311)
+									(receiver
+										(e-lookup-local
+											(p-assign (ident "output"))))
+									(args))))))
 				(e-lookup-local
 					(p-assign (ident "wrapped")))))
 		(annotation
@@ -235,19 +259,18 @@ use_it = {
 		(e-block
 			(s-let
 				(p-assign (ident "transform"))
-				(e-call (constraint-fn-var 331)
-					(e-lookup-local
-						(p-assign (ident "make_map")))
+				(e-call (constraint-fn-var 333)
+					(e-runtime-error (tag "erroneous_value_expr"))
 					(e-lambda
 						(args
 							(p-assign (ident "n")))
-						(e-dispatch-call (method "plus") (constraint-fn-var 329)
+						(e-dispatch-call (method "plus") (constraint-fn-var 331)
 							(receiver
 								(e-lookup-local
 									(p-assign (ident "n"))))
 							(args
 								(e-num (value "1")))))))
-			(e-call (constraint-fn-var 339)
+			(e-call (constraint-fn-var 341)
 				(e-lookup-local
 					(p-assign (ident "transform")))
 				(e-num (value "41"))))))

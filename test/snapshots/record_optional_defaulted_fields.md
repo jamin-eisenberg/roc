@@ -5,13 +5,13 @@ type=snippet
 ~~~
 # SOURCE
 ~~~roc
-Config : { host : Str, port ?: U16, retries : U8 ?? 3 }
+Config := { host : Str, port ?: U16, retries : U8 ?? 3 }
 
 get_port : Config -> Try(U16, [MissingField])
 get_port = |c| c.?port
 
 mk_config : Str -> Config
-mk_config = |host| { host: host }
+mk_config = |host| Config.{ host: host }
 
 bad_direct_access : Config -> U16
 bad_direct_access = |c| c.port
@@ -44,11 +44,11 @@ TYPE MISMATCH - record_optional_defaulted_fields.md:10:26:10:31
 ~~~
 # TOKENS
 ~~~zig
-UpperIdent,OpColon,OpenCurly,LowerIdent,OpColon,UpperIdent,Comma,LowerIdent,OpQuestion,OpColon,UpperIdent,Comma,LowerIdent,OpColon,UpperIdent,OpDoubleQuestion,Int,CloseCurly,
+UpperIdent,OpColonEqual,OpenCurly,LowerIdent,OpColon,UpperIdent,Comma,LowerIdent,OpQuestion,OpColon,UpperIdent,Comma,LowerIdent,OpColon,UpperIdent,OpDoubleQuestion,Int,CloseCurly,
 LowerIdent,OpColon,UpperIdent,OpArrow,UpperIdent,NoSpaceOpenRound,UpperIdent,Comma,OpenSquare,UpperIdent,CloseSquare,CloseRound,
 LowerIdent,OpAssign,OpBar,LowerIdent,OpBar,LowerIdent,NoSpaceDotQuestionLowerIdent,
 LowerIdent,OpColon,UpperIdent,OpArrow,UpperIdent,
-LowerIdent,OpAssign,OpBar,LowerIdent,OpBar,OpenCurly,LowerIdent,OpColon,LowerIdent,CloseCurly,
+LowerIdent,OpAssign,OpBar,LowerIdent,OpBar,UpperIdent,Dot,OpenCurly,LowerIdent,OpColon,LowerIdent,CloseCurly,
 LowerIdent,OpColon,UpperIdent,OpArrow,UpperIdent,
 LowerIdent,OpAssign,OpBar,LowerIdent,OpBar,LowerIdent,NoSpaceDotLowerIdent,
 EndOfFile,
@@ -97,9 +97,11 @@ EndOfFile,
 			(e-lambda
 				(args
 					(p-ident (raw "host")))
-				(e-record
-					(field (field "host")
-						(e-ident (raw "host"))))))
+				(e-nominal-record
+					(mapper (e-tag (raw "Config")))
+					(backing (e-record
+							(field (field "host")
+								(e-ident (raw "host"))))))))
 		(s-type-anno (name "bad_direct_access")
 			(ty-fn
 				(ty (name "Config"))
@@ -144,11 +146,12 @@ NO CHANGE
 		(e-lambda
 			(args
 				(p-assign (ident "host")))
-			(e-record
-				(fields
-					(field (name "host")
-						(e-lookup-local
-							(p-assign (ident "host")))))))
+			(e-nominal (nominal "Config")
+				(e-record
+					(fields
+						(field (name "host")
+							(e-lookup-local
+								(p-assign (ident "host"))))))))
 		(annotation
 			(ty-fn (effectful false)
 				(ty-lookup (name "Str") (builtin))
@@ -160,7 +163,7 @@ NO CHANGE
 			(ty-fn (effectful false)
 				(ty-lookup (name "Config") (local))
 				(ty-lookup (name "U16") (builtin)))))
-	(s-alias-decl
+	(s-nominal-decl
 		(ty-header (name "Config"))
 		(ty-record
 			(field (field "host")
@@ -178,7 +181,7 @@ NO CHANGE
 		(patt (type "Str -> Config"))
 		(patt (type "Config -> U16")))
 	(type_decls
-		(alias (type "Config")
+		(nominal (type "Config")
 			(ty-header (name "Config"))))
 	(expressions
 		(expr (type "Config -> Try(U16, [MissingField])"))

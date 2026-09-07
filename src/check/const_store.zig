@@ -243,7 +243,25 @@ pub const ConstFnNestedEvidence = union(enum(u8)) {
 /// Exact checked callable relation attached to a stored target edge.
 pub const ConstFnCallableInstantiation = struct {
     view: names.CheckedModuleDigest,
+    /// Stable checked identity of `callable_ty`. The raw checked id remains
+    /// replay payload and may differ between equivalent fresh instantiations.
+    callable_key: names.CanonicalTypeKey,
     callable_ty: checked_ids.CheckedTypeId,
+};
+
+/// Exact checked structural edge retained by a stored function. Codec
+/// derivations need the generated-contract identity when their runtime
+/// function is restored after compile-time evaluation.
+pub const ConstFnStructuralEvidence = struct {
+    derivation: static_dispatch.StructuralDerivation,
+    checked: ?struct {
+        view: names.CheckedModuleDigest,
+        dispatcher_key: names.CanonicalTypeKey,
+        dispatcher_ty: checked_ids.CheckedTypeId,
+        callable_key: names.CanonicalTypeKey,
+        callable_ty: checked_ids.CheckedTypeId,
+        generated_codec_derivation: ?static_dispatch.GeneratedCodecDerivationId,
+    } = null,
 };
 
 /// Dispatch evidence selected for a stored compile-time function value. Target
@@ -253,10 +271,18 @@ pub const ConstFnEvidence = union(enum(u8)) {
     target: struct {
         view: names.CheckedModuleDigest,
         method: static_dispatch.MethodTarget,
+        /// Stable checked identity of `method.callable_ty`.
+        method_callable_key: names.CanonicalTypeKey,
         instantiation: ?ConstFnCallableInstantiation,
         nested: ConstFnNestedEvidence,
     },
-    structural: static_dispatch.StructuralDerivation,
+    structural: ConstFnStructuralEvidence,
+    /// A callable-reachable requirement that must be resolved from the
+    /// concrete function type when this stored function is restored.
+    from_callable: struct {
+        index: u32,
+        independent_callable: bool = false,
+    },
     unreachable_value,
     checked_error,
 };
@@ -307,8 +333,21 @@ pub const FnDef = union(enum) {
     local_template: names.ProcTemplate,
     imported_template: names.ProcTemplate,
     nested: struct {
+        /// Checked template whose lowering recorded this stored function: the
+        /// site's owning template for a template-owned site, or—when
+        /// `default_root` is set—the template whose body materialized the
+        /// defaulted-field expression (the lexical context the evidence
+        /// frames were recorded against).
         owner: names.ProcTemplate,
         site: names.ProcSiteId,
+        /// Set iff `site` is a DEFAULT-ROOT site: a lambda/closure inside a
+        /// defaulted-field expression (design.md "Defaulted Fields"). The
+        /// payload is the declaring module's 32-byte content identity;
+        /// `site` indexes THAT module's `nested_proc_sites` table, and the
+        /// site's owner there is `.default_root` (it belongs to no checked
+        /// procedure template). Null for template-owned sites, where `owner`
+        /// itself names the site's owning template.
+        default_root: ?names.ModuleContentIdentity = null,
         context_fn_key: names.TypeDigest,
         local_proc_context_digest: ?names.TypeDigest = null,
     },
@@ -858,7 +897,7 @@ pub const ConstStore = struct {
                         .from_callable => {},
                     }
                 },
-                .structural, .unreachable_value, .checked_error => {},
+                .structural, .from_callable, .unreachable_value, .checked_error => {},
             }
         }
         return cursor;
@@ -868,6 +907,7 @@ pub const ConstStore = struct {
         const evidence = [_]ConstFnEvidence{.{ .target = .{
             .view = .{},
             .method = undefined,
+            .method_callable_key = .{},
             .instantiation = null,
             .nested = .from_callable,
         } }};
@@ -1191,6 +1231,10 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
     target_view.bytes[0] = 0xA1;
     var instantiation_view: names.CheckedModuleDigest = .{};
     instantiation_view.bytes[0] = 0xB2;
+    var method_callable_key: names.CanonicalTypeKey = .{};
+    method_callable_key.bytes[0] = 0xC3;
+    var instantiation_callable_key: names.CanonicalTypeKey = .{};
+    instantiation_callable_key.bytes[0] = 0xD4;
     const evidence = [_]ConstFnEvidence{
         .{ .target = .{
             .view = target_view,
@@ -1204,15 +1248,21 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
                 } },
                 .callable_ty = @enumFromInt(6),
             },
-            .instantiation = .{ .view = instantiation_view, .callable_ty = @enumFromInt(7) },
+            .method_callable_key = method_callable_key,
+            .instantiation = .{
+                .view = instantiation_view,
+                .callable_key = instantiation_callable_key,
+                .callable_ty = @enumFromInt(7),
+            },
             .nested = .{ .resolved = .{ .count = 1, .subtree_len = 1 } },
         } },
-        .{ .structural = .equality },
+        .{ .structural = .{ .derivation = .equality } },
         .checked_error,
+        .{ .from_callable = .{ .index = 2, .independent_callable = true } },
     };
     const evidence_frames = [_]ConstFnEvidenceFrame{
         ConstFnEvidenceFrame.init(.root, null, 0, 1),
-        ConstFnEvidenceFrame.init(.{ .generalized = 9 }, 0, 2, 1),
+        ConstFnEvidenceFrame.init(.{ .generalized = 9 }, 0, 2, 2),
     };
     const fn_id = try store.appendFn(.{
         // Distinct non-zero ids: this test asserts captures round-trip; the fn_def
@@ -1272,14 +1322,17 @@ test "ConstStore: build, serialize/relocate, and read back values, fns, strings"
     try std.testing.expectEqual(@as(u32, 5), @intFromEnum(loaded_target.method.def_idx));
     try std.testing.expectEqual(evidence[0].target.method.kind, loaded_target.method.kind);
     try std.testing.expectEqual(@as(checked_ids.CheckedTypeId, @enumFromInt(6)), loaded_target.method.callable_ty);
+    try std.testing.expectEqual(method_callable_key, loaded_target.method_callable_key);
     const loaded_instantiation = loaded_target.instantiation.?;
     try std.testing.expectEqualSlices(u8, &instantiation_view.bytes, &loaded_instantiation.view.bytes);
+    try std.testing.expectEqual(instantiation_callable_key, loaded_instantiation.callable_key);
     try std.testing.expectEqual(@as(checked_ids.CheckedTypeId, @enumFromInt(7)), loaded_instantiation.callable_ty);
     const loaded_nested = loaded_target.nested.resolved;
     try std.testing.expectEqual(@as(u32, 1), loaded_nested.count);
     try std.testing.expectEqual(@as(u32, 1), loaded_nested.subtree_len);
-    try std.testing.expectEqual(ConstFnEvidence{ .structural = .equality }, loaded_fn.evidence[1]);
+    try std.testing.expectEqual(ConstFnEvidence{ .structural = .{ .derivation = .equality } }, loaded_fn.evidence[1]);
     try std.testing.expectEqual(ConstFnEvidence.checked_error, loaded_fn.evidence[2]);
+    try std.testing.expectEqual(ConstFnEvidence{ .from_callable = .{ .index = 2, .independent_callable = true } }, loaded_fn.evidence[3]);
     try std.testing.expectEqualSlices(ConstFnEvidenceFrame, &evidence_frames, loaded_fn.evidence_frames);
     try std.testing.expectEqual(@as(?u32, 1), loaded_fn.evidence_frame_head);
     try std.testing.expectEqual(ConstFnEvidenceScope{ .generalized = 9 }, loaded_fn.evidence_frames[1].scope());

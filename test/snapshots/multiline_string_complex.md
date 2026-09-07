@@ -54,82 +54,35 @@ x = {
 }
 ~~~
 # EXPECTED
-MISSING METHOD - multiline_string_complex.md:40:5:40:8
+TYPE MISMATCH - multiline_string_complex.md:40:6:40:8
 TYPE MISMATCH - multiline_string_complex.md:37:3:37:4
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity runtime_error)
-		(title "Missing Method")
-		(region (start 40 5) (end 40 8))
-		(headline
-			(reflow "This")
-			(reflow " ")
-			(annotated code "not")
-			(reflow " ")
-			(reflow "method is being called on a value whose type doesn't have that method."))
-		(document
-			(source-region (file "multiline_string_complex.md") (start 40 5) (end 40 8) (annotation error) (line-text "\te: !\\\\"))
-			(line-break)
-			(reflow "The value's type, which does not have a method named ")
-			(annotated code "not")
-			(reflow ",")
-			(reflow " ")
-			(reflow "is:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "Str")
-			(annotation-end)
-			(line-break)
-			(line-break)
-			(annotated emphasis "Hint:")
-			(reflow " ")
-			(reflow "For this to work, the type would need to have a method named")
-			(reflow " ")
-			(annotated code "not")
-			(reflow " ")
-			(reflow "associated with it in the type's declaration.")))
-	(report
-		(severity runtime_error)
-		(title "Type Mismatch")
-		(region (start 37 3) (end 37 4))
-		(headline
-			(reflow "The")
-			(reflow " ")
-			(annotated code "minus")
-			(reflow " ")
-			(reflow "method on")
-			(reflow " ")
-			(annotated code "Dec")
-			(reflow " ")
-			(reflow "has an incompatible type."))
-		(document
-			(source-region (file "multiline_string_complex.md") (start 37 3) (end 37 4) (annotation error) (line-text "\t\t0 - \\\\"))
-			(line-break)
-			(reflow "The method")
-			(reflow " ")
-			(annotated code "minus")
-			(reflow " ")
-			(reflow "has the type:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "Dec, Dec -> Dec")
-			(annotation-end)
-			(line-break)
-			(line-break)
-			(reflow "But I need it to have the type:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "Dec, Str -> Dec")
-			(annotation-end))))
-~~~
+── ✗ type mismatch ──────────────────────────── multiline_string_complex.md:40:6
+
+This string literal is being used where a non-string type is needed.
+
+e: !\\
+    ^^
+
+The type was determined to be:
+
+    Bool
+
+── ✗ type mismatch ──────────────────────────── multiline_string_complex.md:37:3
+
+The minus method on Dec has an incompatible type.
+
+0 - \\
+^
+
+The method minus has the type:
+
+    Dec, Dec -> Dec
+
+But I need it to have the type:
+
+    Dec, Str -> Dec
+
 # TOKENS
 ~~~zig
 KwPackage,
@@ -264,7 +217,7 @@ NO CHANGE
 				(p-assign (ident "#interp_0"))
 				(e-lookup-local
 					(p-assign (ident "value1"))))
-			(e-interpolation (constraint-fn-var 288) (dispatcher-var 15)
+			(e-interpolation (constraint-fn-var 289) (dispatcher-var 15)
 				(first
 					(e-literal (string "This is a string
 With multiple lines
@@ -280,7 +233,7 @@ With multiple lines
 				(p-assign (ident "#interp_1"))
 				(e-lookup-local
 					(p-assign (ident "value2"))))
-			(e-interpolation (constraint-fn-var 306) (dispatcher-var 25)
+			(e-interpolation (constraint-fn-var 307) (dispatcher-var 25)
 				(first
 					(e-literal (string "This is a string
 With multiple lines
@@ -309,9 +262,15 @@ With multiple lines
 							(e-string
 								(e-literal (string "multiline"))))))
 				(field (name "d")
-					(e-runtime-error (tag "erroneous_value_expr")))
+					(e-dispatch-call (method "minus") (constraint-fn-var 358)
+						(receiver
+							(e-runtime-error (tag "erroneous_value_expr")))
+						(args
+							(e-string))))
 				(field (name "e")
-					(e-runtime-error (tag "erroneous_value_expr"))))))
+					(e-call (constraint-fn-var 373)
+						(e-lookup-associated-resolved (source "Bool.not") (builtin) (target-node "17379") (target-def "17379"))
+						(e-runtime-error (tag "erroneous_value_expr")))))))
 	(d-let
 		(p-assign (ident "x"))
 		(e-block
@@ -327,13 +286,13 @@ With multiple lines
 		(patt (type "Str"))
 		(patt (type "Str"))
 		(patt (type "Str"))
-		(patt (type "{ a: Str, b: (Str, Str), c: List(Str), d: Dec, e: Str }"))
+		(patt (type "{ a: Str, b: (Str, Str), c: List(Str), d: Dec, e: Bool }"))
 		(patt (type "Str")))
 	(expressions
 		(expr (type "Str"))
 		(expr (type "Str"))
 		(expr (type "Str"))
 		(expr (type "Str"))
-		(expr (type "{ a: Str, b: (Str, Str), c: List(Str), d: Dec, e: Str }"))
+		(expr (type "{ a: Str, b: (Str, Str), c: List(Str), d: Dec, e: Bool }"))
 		(expr (type "Str"))))
 ~~~

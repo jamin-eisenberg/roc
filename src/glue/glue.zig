@@ -786,18 +786,6 @@ fn buildGlueDylib(
     opt: GlueOpt,
     std_io: std.Io,
 ) GlueError![:0]const u8 {
-    var codegen = llvm_compile.MonoLlvmCodeGen.init(
-        gpa,
-        &lowered.lir_result.store,
-        lowered.lir_result.boxy_erased_arg_desc_offsets.items,
-        lowered.lir_result.boxy_erased_arg_desc_params.items,
-    );
-    codegen.layout_store = &lowered.lir_result.layouts;
-    codegen.plugin_stamp_bytes = std.mem.asBytes(&stamp);
-    codegen.plugin_stamp_alignment = @alignOf(GluePluginStampV1);
-    codegen.emit_debug_info = opt == .dev;
-    defer codegen.deinit();
-
     const proc = lowered.lir_result.store.getProcSpec(glue_proc);
     const entrypoints = [_]llvm_compile.MonoLlvmCodeGen.Entrypoint{.{
         .symbol_name = builtins.shim_symbols.roc_make_glue,
@@ -806,11 +794,26 @@ fn buildGlueDylib(
         .ret_layout = proc.ret_layout,
         .abi = .plugin,
     }};
-    var bitcode = codegen.generateEntrypointModule("roc_glue_plugin", entrypoints[0..]) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        error.CompilationFailed,
-        error.UnsupportedLowLevel,
-        => return error.CompilationFailed,
+    var bitcode = generate: {
+        var codegen = llvm_compile.MonoLlvmCodeGen.init(
+            gpa,
+            &lowered.lir_result.store,
+            lowered.lir_result.boxy_erased_arg_desc_offsets.items,
+            lowered.lir_result.boxy_erased_arg_desc_params.items,
+            lowered.lir_result.boxy_worker_procs.items,
+        );
+        codegen.layout_store = &lowered.lir_result.layouts;
+        codegen.plugin_stamp_bytes = std.mem.asBytes(&stamp);
+        codegen.plugin_stamp_alignment = @alignOf(GluePluginStampV1);
+        codegen.emit_debug_info = opt == .dev;
+        defer codegen.deinit();
+
+        break :generate codegen.generateEntrypointModule("roc_glue_plugin", entrypoints[0..]) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.CompilationFailed,
+            error.UnsupportedLowLevel,
+            => return error.CompilationFailed,
+        };
     };
     defer bitcode.deinit();
 
@@ -3653,7 +3656,7 @@ const GlueRocValueWriter = struct {
         return switch (list_layout.tag) {
             .list => list_layout.getIdx(),
             .list_of_zst => .zst,
-            .scalar, .box, .box_of_zst, .struct_, .closure, .erased_callable, .zst, .tag_union, .ptr => glueInvariant("glue expected list layout, got {s}", .{@tagName(list_layout.tag)}),
+            .scalar, .box, .box_of_zst, .erased_box, .struct_, .closure, .erased_callable, .zst, .tag_union, .ptr => glueInvariant("glue expected list layout, got {s}", .{@tagName(list_layout.tag)}),
         };
     }
 

@@ -8,25 +8,29 @@ type=snippet
 f=||{var c:[]}
 ~~~
 # EXPECTED
-UNUSED VARIABLE - fmt_var_in_record_field.md:1:6:1:14
+VAR NAME MISSING `$` - fmt_var_in_record_field.md:1:10:1:11
+UNUSED VARIABLE - fmt_var_in_record_field.md:1:10:1:11
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity warning)
-		(title "Unused Variable")
-		(region (start 1 6) (end 1 14))
-		(headline
-			(reflow "Variable ")
-			(annotated symbol-unqualified "c")
-			(reflow " is defined here and then never used:"))
-		(document
-			(reflow "If you don't need this variable, prefix it with an underscore like ")
-			(annotated symbol-unqualified "_c")
-			(reflow " to suppress this warning.")
-			(line-break)
-			(source-region (file "fmt_var_in_record_field.md") (start 1 6) (end 1 14) (annotation error) (line-text "f=||{var c:[]}")))))
-~~~
+── ● var name missing `$` ────────────────────── fmt_var_in_record_field.md:1:10
+
+The mutable binding c is declared with var but its name does not start with $.
+
+f=||{var c:[]}
+         ^
+
+Rename this binding and all of its uses to $c. The name is only a convention;
+mutability comes from the var declaration.
+
+── ● unused variable ─────────────────────────── fmt_var_in_record_field.md:1:10
+
+Variable c is defined here and then never used:
+
+f=||{var c:[]}
+         ^
+
+If you don't need this variable, prefix it with an underscore like _c to
+suppress this warning.
+
 # TOKENS
 ~~~zig
 LowerIdent,OpAssign,OpBar,OpBar,OpenCurly,KwVar,LowerIdent,OpColon,OpenSquare,CloseSquare,CloseCurly,
@@ -62,7 +66,7 @@ f = || {
 			(args)
 			(e-block
 				(s-var-uninitialized
-					(p-assign (ident "c")))
+					(p-var-assign (ident "c")))
 				(e-empty_record)))))
 ~~~
 # TYPES

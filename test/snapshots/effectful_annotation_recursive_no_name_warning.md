@@ -258,7 +258,7 @@ main! = |_| {
 		(e-lambda
 			(args
 				(p-assign (ident "n")))
-			(e-call (constraint-fn-var 413)
+			(e-call (constraint-fn-var 416)
 				(e-lookup-local
 					(p-assign (ident "recurse")))
 				(e-lookup-local
@@ -271,7 +271,7 @@ main! = |_| {
 			(e-block
 				(s-let
 					(p-underscore)
-					(e-call (constraint-fn-var 421)
+					(e-call (constraint-fn-var 427)
 						(e-lookup-local
 							(p-assign (ident "caller")))
 						(e-num (value "0"))))

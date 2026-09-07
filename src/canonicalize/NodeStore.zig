@@ -105,7 +105,6 @@ const ExprNodeTag = enum {
     expr_dbg,
     expr_expect_err,
     expr_unary_minus,
-    expr_unary_not,
     expr_static_dispatch,
     expr_apply,
     expr_record_update,
@@ -137,6 +136,7 @@ const WhereNodeTag = enum { where_method, where_method_effectful, where_alias, w
 
 const PatternNodeTag = enum {
     pattern_identifier,
+    pattern_var_identifier,
     pattern_as,
     pattern_applied_tag,
     pattern_nominal,
@@ -206,6 +206,7 @@ const DiagnosticNodeTag = enum {
     diag_if_expr_without_else,
     diag_var_across_function_boundary,
     diag_shadowing_warning,
+    diag_binding_name_does_not_match_mutability,
     diag_type_redeclared,
     diag_undeclared_type,
     diag_type_alias_but_needed_nominal,
@@ -222,6 +223,7 @@ const DiagnosticNodeTag = enum {
     diag_type_from_missing_module,
     diag_module_not_imported,
     diag_nested_type_not_found,
+    diag_internal_builtin_type,
     diag_nested_value_not_found,
     diag_record_builder_map2_not_found,
     diag_too_many_exports,
@@ -233,7 +235,7 @@ const DiagnosticNodeTag = enum {
     diag_open_ext_not_allowed_in_type_decl,
     diag_unnamed_field_not_allowed_in_structural_record,
     diag_optional_field_cannot_have_default,
-    diag_record_default_not_literal,
+    diag_record_default_reference_cycle,
     diag_type_module_missing_matching_type,
     diag_type_module_has_alias_not_nominal,
     diag_default_app_missing_main,
@@ -262,11 +264,14 @@ const DiagnosticNodeTag = enum {
     diag_underscore_in_type_declaration,
     diag_break_outside_loop,
     diag_infinite_loop_never_exits,
+    diag_trailing_try_suffix,
     diag_return_outside_fn,
     diag_mutually_recursive_type_aliases,
     diag_deprecated_number_suffix,
     diag_range_op_chained,
     diag_unnamed_field_cannot_have_default,
+    diag_default_not_allowed_in_structural_record,
+    diag_default_not_allowed_on_local_type_decl,
 };
 
 gpa: Allocator,
@@ -315,8 +320,8 @@ pub const LiteralDispatchPlan = extern struct {
     node_idx: u32,
     target_var: u32,
     fn_var: u32,
-    kind: u32,
-    resolution: u32,
+    kind_and_resolution: u32,
+    pattern_failure_expr: u32,
 
     pub const Kind = enum(u32) {
         numeral,
@@ -331,14 +336,34 @@ pub const LiteralDispatchPlan = extern struct {
         checked_error,
     };
 
+    const resolution_shift = 1;
+
+    fn packKindAndResolution(kind: Kind, resolution: Resolution) u32 {
+        return @intFromEnum(kind) | (@intFromEnum(resolution) << resolution_shift);
+    }
+
     pub fn dispatchKind(self: LiteralDispatchPlan) Kind {
-        return @enumFromInt(self.kind);
+        return @enumFromInt(self.kind_and_resolution & 1);
     }
 
     pub fn dispatchResolution(self: LiteralDispatchPlan) Resolution {
-        return @enumFromInt(self.resolution);
+        return @enumFromInt(self.kind_and_resolution >> resolution_shift);
+    }
+
+    pub fn patternFailureExpr(self: LiteralDispatchPlan) ?u32 {
+        return if (self.pattern_failure_expr == std.math.maxInt(u32)) null else self.pattern_failure_expr;
+    }
+
+    fn setResolution(self: *LiteralDispatchPlan, resolution: Resolution) void {
+        self.kind_and_resolution = packKindAndResolution(self.dispatchKind(), resolution);
     }
 };
+
+comptime {
+    if (@sizeOf(LiteralDispatchPlan) != 5 * @sizeOf(u32)) {
+        @compileError("LiteralDispatchPlan must remain five words");
+    }
+}
 
 /// Canonical and checked data owned by a compiler-created interpolation expression.
 /// Optional type variables use zero for null and otherwise store `@intFromEnum(var) + 1`.
@@ -481,6 +506,7 @@ const Scratch = struct {
     statements: base.Scratch(CIR.Statement.Idx),
     exprs: base.Scratch(CIR.Expr.Idx),
     record_fields: base.Scratch(CIR.RecordField.Idx),
+    record_unset_fields: base.Scratch(CIR.UnsetField.Idx),
     match_branches: base.Scratch(CIR.Expr.Match.Branch.Idx),
     match_branch_patterns: base.Scratch(CIR.Expr.Match.BranchPattern.Idx),
     if_branches: base.Scratch(CIR.Expr.IfBranch.Idx),
@@ -504,6 +530,8 @@ const Scratch = struct {
         errdefer exprs.deinit();
         var record_fields = try base.Scratch(CIR.RecordField.Idx).init(gpa);
         errdefer record_fields.deinit();
+        var record_unset_fields = try base.Scratch(CIR.UnsetField.Idx).init(gpa);
+        errdefer record_unset_fields.deinit();
         var match_branches = try base.Scratch(CIR.Expr.Match.Branch.Idx).init(gpa);
         errdefer match_branches.deinit();
         var match_branch_patterns = try base.Scratch(CIR.Expr.Match.BranchPattern.Idx).init(gpa);
@@ -533,6 +561,7 @@ const Scratch = struct {
             .statements = statements,
             .exprs = exprs,
             .record_fields = record_fields,
+            .record_unset_fields = record_unset_fields,
             .match_branches = match_branches,
             .match_branch_patterns = match_branch_patterns,
             .if_branches = if_branches,
@@ -554,6 +583,7 @@ const Scratch = struct {
         self.statements.deinit();
         self.exprs.deinit();
         self.record_fields.deinit();
+        self.record_unset_fields.deinit();
         self.match_branches.deinit();
         self.match_branch_patterns.deinit();
         self.if_branches.deinit();
@@ -741,15 +771,15 @@ pub fn relocate(store: *NodeStore, offset: isize) void {
 /// when adding/removing variants from ModuleEnv unions. Update these when modifying the unions.
 ///
 /// Count of the diagnostic nodes in the ModuleEnv
-pub const MODULEENV_DIAGNOSTIC_NODE_COUNT = 92;
+pub const MODULEENV_DIAGNOSTIC_NODE_COUNT = 97;
 /// Count of the expression nodes in the ModuleEnv
-pub const MODULEENV_EXPR_NODE_COUNT = 59;
+pub const MODULEENV_EXPR_NODE_COUNT = 58;
 /// Count of the statement nodes in the ModuleEnv
 pub const MODULEENV_STATEMENT_NODE_COUNT = 21;
 /// Count of the type annotation nodes in the ModuleEnv
 pub const MODULEENV_TYPE_ANNO_NODE_COUNT = 12;
 /// Count of the pattern nodes in the ModuleEnv
-pub const MODULEENV_PATTERN_NODE_COUNT = 18;
+pub const MODULEENV_PATTERN_NODE_COUNT = 19;
 
 comptime {
     // Check the number of CIR.Diagnostic nodes
@@ -785,6 +815,14 @@ comptime {
 pub fn getRegionAt(store: *const NodeStore, node_idx: Node.Idx) Region {
     const idx: Region.Idx = @enumFromInt(@intFromEnum(node_idx));
     return store.regions.get(idx).*;
+}
+
+/// Move a node to another source region. A forward-reference placeholder is
+/// created at the first use of a name and becomes that name's binder once the
+/// declaration is reached, at which point it belongs at the declaration.
+pub fn setRegionAt(store: *NodeStore, node_idx: Node.Idx, region: Region) void {
+    const idx: Region.Idx = @enumFromInt(@intFromEnum(node_idx));
+    store.regions.set(idx, region);
 }
 
 fn literalDispatchKindForTag(tag: Node.Tag) ?LiteralDispatchPlan.Kind {
@@ -924,6 +962,7 @@ pub fn recordLiteralDispatchPlan(
     kind: LiteralDispatchPlan.Kind,
     target_var: types.Var,
     fn_var: types.Var,
+    pattern_failure_expr: ?u32,
 ) Allocator.Error!void {
     const node = store.nodes.get(node_idx);
     std.debug.assert(literalDispatchKindForTag(node.tag) == kind);
@@ -932,12 +971,12 @@ pub fn recordLiteralDispatchPlan(
         .node_idx = @intFromEnum(node_idx),
         .target_var = @intFromEnum(target_var),
         .fn_var = @intFromEnum(fn_var),
-        .kind = @intFromEnum(kind),
-        .resolution = @intFromEnum(LiteralDispatchPlan.Resolution.unresolved),
+        .kind_and_resolution = LiteralDispatchPlan.packKindAndResolution(kind, .unresolved),
+        .pattern_failure_expr = pattern_failure_expr orelse std.math.maxInt(u32),
     };
     const plan_plus_one = literalDispatchPlanPlusOne(node);
     if (plan_plus_one != 0) {
-        plan.resolution = store.literal_dispatch_plans.get(@enumFromInt(plan_plus_one - 1)).resolution;
+        plan.setResolution(store.literal_dispatch_plans.get(@enumFromInt(plan_plus_one - 1)).dispatchResolution());
         store.literal_dispatch_plans.set(@enumFromInt(plan_plus_one - 1), plan);
         return;
     }
@@ -967,7 +1006,7 @@ pub fn finalizeLiteralDispatchResolution(
             .{ @intFromEnum(node_idx), @tagName(previous), @tagName(resolution) },
         );
     }
-    plan.resolution = @intFromEnum(resolution);
+    plan.setResolution(resolution);
     store.literal_dispatch_plans.set(@enumFromInt(plan_plus_one - 1), plan);
 }
 
@@ -995,17 +1034,18 @@ pub fn literalDispatchPlans(store: *const NodeStore) []const LiteralDispatchPlan
     return store.literal_dispatch_plans.items.items;
 }
 
-/// Retire the literal plan owned by `node_idx`, if any. Error recovery calls
-/// this for every expression discarded with a replaced subtree, so no plan can
-/// outlive the source node that would execute it.
-pub fn retireLiteralDispatchPlan(store: *NodeStore, node_idx: Node.Idx) void {
+/// Retire and return the literal plan owned by `node_idx`, if any. Error
+/// recovery calls this for every expression discarded with a replaced subtree,
+/// so no live plan can outlive the source node that would execute it.
+pub fn retireLiteralDispatchPlan(store: *NodeStore, node_idx: Node.Idx) ?LiteralDispatchPlan {
     const node = store.nodes.get(node_idx);
     const plan_plus_one = literalDispatchPlanPlusOne(node);
-    if (plan_plus_one == 0) return;
+    if (plan_plus_one == 0) return null;
 
     const plan_index: usize = plan_plus_one - 1;
     const plans = &store.literal_dispatch_plans.items;
     std.debug.assert(plans.items[plan_index].node_idx == @intFromEnum(node_idx));
+    const retired = plans.items[plan_index];
     const last_index = plans.items.len - 1;
     setLiteralDispatchPlanPlusOne(store, node_idx, 0);
     if (plan_index != last_index) {
@@ -1014,6 +1054,7 @@ pub fn retireLiteralDispatchPlan(store: *NodeStore, node_idx: Node.Idx) void {
         setLiteralDispatchPlanPlusOne(store, @enumFromInt(moved.node_idx), @intCast(plan_index + 1));
     }
     _ = plans.pop();
+    return retired;
 }
 
 /// Helper function to get a region by pattern index
@@ -1071,9 +1112,9 @@ fn addMethodCallData(store: *NodeStore, args: CIR.Expr.Span, method_name_region:
 }
 
 // Bidirectional u32 encoding for `CIR.Expr.SurfaceOrigin` in `MethodCallData`.
-// Binop ops are offset past the three unit tags so every `Binop.Op` value has
+// Binop ops are offset past the two unit tags so every `Binop.Op` value has
 // a distinct slot.
-const surface_origin_binop_offset: u32 = 3;
+const surface_origin_binop_offset: u32 = 2;
 comptime {
     // The binop range starts after the unit (payload-less) tags; keep the offset
     // in sync so a new unit variant can't collide with a `Binop.Op` slot.
@@ -1089,7 +1130,6 @@ pub fn encodeSurfaceOrigin(origin: CIR.Expr.SurfaceOrigin) u32 {
     return switch (origin) {
         .method_call => 0,
         .unary_minus => 1,
-        .unary_not => 2,
         .binop => |op| surface_origin_binop_offset + @as(u32, @intFromEnum(op)),
     };
 }
@@ -1099,7 +1139,6 @@ pub fn decodeSurfaceOrigin(encoded: u32) CIR.Expr.SurfaceOrigin {
     return switch (encoded) {
         0 => .method_call,
         1 => .unary_minus,
-        2 => .unary_not,
         else => .{ .binop = @enumFromInt(encoded - surface_origin_binop_offset) },
     };
 }
@@ -1615,10 +1654,12 @@ pub fn getExpr(store: *const NodeStore, expr: CIR.Expr.Idx) CIR.Expr {
             // Retrieve fields span and ext from span_with_node_data
             const fields_ext = store.span_with_node_data.items.items[p.fields_ext_idx];
             const ext = if (fields_ext.node == 0) null else @as(CIR.Expr.Idx, @enumFromInt(fields_ext.node));
+            const unsets = store.span2_data.items.items[p.unsets_span2_idx];
 
             return CIR.Expr{
                 .e_record = .{
                     .fields = .{ .span = .{ .start = fields_ext.start, .len = fields_ext.len } },
+                    .unsets = .{ .span = .{ .start = unsets.start, .len = unsets.len } },
                     .ext = ext,
                 },
             };
@@ -1674,12 +1715,6 @@ pub fn getExpr(store: *const NodeStore, expr: CIR.Expr.Idx) CIR.Expr {
         .expr_unary_minus => {
             const p = payload.expr_unary;
             return CIR.Expr{ .e_unary_minus = .{
-                .expr = @enumFromInt(p.expr),
-            } };
-        },
-        .expr_unary_not => {
-            const p = payload.expr_unary;
-            return CIR.Expr{ .e_unary_not = .{
                 .expr = @enumFromInt(p.expr),
             } };
         },
@@ -2145,7 +2180,22 @@ pub fn replaceExprWithRuntimeError(
     diagnostic_idx: CIR.Diagnostic.Idx,
 ) void {
     const node_idx: Node.Idx = @enumFromInt(@intFromEnum(expr_idx));
-    store.retireLiteralDispatchPlan(node_idx);
+    _ = store.retireLiteralDispatchPlan(node_idx);
+    var node = Node.init(.malformed);
+    node.setPayload(.{ .diag_single_value = .{
+        .value = @intFromEnum(diagnostic_idx),
+    } });
+    store.nodes.set(node_idx, node);
+}
+
+/// Replaces an existing statement with an in-place runtime error node after
+/// checking has rejected the statement and recorded its diagnostic.
+pub fn replaceStatementWithRuntimeError(
+    store: *NodeStore,
+    stmt_idx: CIR.Statement.Idx,
+    diagnostic_idx: CIR.Diagnostic.Idx,
+) void {
+    const node_idx: Node.Idx = @enumFromInt(@intFromEnum(stmt_idx));
     var node = Node.init(.malformed);
     node.setPayload(.{ .diag_single_value = .{
         .value = @intFromEnum(diagnostic_idx),
@@ -2298,6 +2348,14 @@ pub fn getPattern(store: *const NodeStore, pattern_idx: CIR.Pattern.Idx) CIR.Pat
             const p = payload.pattern_identifier;
             return CIR.Pattern{
                 .assign = .{
+                    .ident = @bitCast(p.ident),
+                },
+            };
+        },
+        .pattern_var_identifier => {
+            const p = payload.pattern_var_identifier;
+            return CIR.Pattern{
+                .var_assign = .{
                     .ident = @bitCast(p.ident),
                 },
             };
@@ -2645,17 +2703,23 @@ pub fn getAnnotation(store: *const NodeStore, annotation: CIR.Annotation.Idx) CI
     const p = payload.annotation;
     const anno: CIR.TypeAnno.Idx = @enumFromInt(p.anno);
 
-    const where_clause = if (p.has_where)
+    const where_clause = if (p.flags.has_where)
         store.loadWhereClauseSpan(p.where_span2_idx)
     else
         null;
 
+    const name_region: ?base.Region = if (p.flags.has_name_region) blk: {
+        const span = store.span2_data.items.items[p.name_region_span2_idx];
+        break :blk base.Region.from_raw_offsets(span.start, span.start + span.len);
+    } else null;
+
     return CIR.Annotation{
         .anno = anno,
         .where = where_clause,
-        .mentions_type_var = p.mentions_type_var,
-        .introduces_type_var = p.introduces_type_var,
-        .contains_underscore = p.contains_underscore,
+        .name_region = name_region,
+        .mentions_type_var = p.flags.mentions_type_var,
+        .introduces_type_var = p.flags.introduces_type_var,
+        .contains_underscore = p.flags.contains_underscore,
     };
 }
 
@@ -3329,9 +3393,12 @@ pub fn addExpr(store: *NodeStore, expr: CIR.Expr, region: base.Region) Allocator
                 .len = e.fields.span.len,
                 .node = ext_value,
             });
+            const unsets_span2_idx: u32 = @intCast(store.span2_data.len());
+            _ = try store.span2_data.append(store.gpa, .{ .start = e.unsets.span.start, .len = e.unsets.span.len });
 
             node.setPayload(.{ .expr_record = .{
                 .fields_ext_idx = fields_ext_idx,
+                .unsets_span2_idx = unsets_span2_idx,
             } });
         },
         .e_empty_record => {
@@ -3387,12 +3454,6 @@ pub fn addExpr(store: *NodeStore, expr: CIR.Expr, region: base.Region) Allocator
                 .expr = @intFromEnum(e.expr),
             } });
         },
-        .e_unary_not => |e| {
-            node.tag = .expr_unary_not;
-            node.setPayload(.{ .expr_unary = .{
-                .expr = @intFromEnum(e.expr),
-            } });
-        },
         .e_block => |e| {
             node.tag = .expr_block;
             node.setPayload(.{ .expr_block = .{
@@ -3433,6 +3494,21 @@ pub fn addRecordField(store: *NodeStore, recordField: CIR.RecordField, region: b
     node.setPayload(.{ .record_field = .{
         .name = @bitCast(recordField.name),
         .expr = @intFromEnum(recordField.value),
+    } });
+
+    const nid = try store.nodes.append(store.gpa, node);
+    _ = try store.regions.append(store.gpa, region);
+    return @enumFromInt(@intFromEnum(nid));
+}
+
+/// Adds an unset record field (`name: _`) to the store.
+///
+/// IMPORTANT: You should not use this function directly! Instead, use it's
+/// corresponding function in `ModuleEnv`.
+pub fn addUnsetField(store: *NodeStore, unset_field: CIR.UnsetField, region: base.Region) Allocator.Error!CIR.UnsetField.Idx {
+    var node = Node.init(.record_unset_field);
+    node.setPayload(.{ .record_unset_field = .{
+        .name = @bitCast(unset_field.name),
     } });
 
     const nid = try store.nodes.append(store.gpa, node);
@@ -3578,6 +3654,12 @@ pub fn addPattern(store: *NodeStore, pattern: CIR.Pattern, region: base.Region) 
         .assign => |p| {
             node.tag = .pattern_identifier;
             node.setPayload(.{ .pattern_identifier = .{
+                .ident = @bitCast(p.ident),
+            } });
+        },
+        .var_assign => |p| {
+            node.tag = .pattern_var_identifier;
+            node.setPayload(.{ .pattern_var_identifier = .{
                 .ident = @bitCast(p.ident),
             } });
         },
@@ -3941,6 +4023,26 @@ pub fn addAnnoRecordField(store: *NodeStore, annoRecordField: CIR.TypeAnno.Recor
     return @enumFromInt(@intFromEnum(nid));
 }
 
+/// Drop the `??` default from a defaulted annotation record field, degrading
+/// it to a plain required field in place. The default-cycle pass uses this as
+/// its recovery so check and lowering never see a cyclic default (design.md
+/// "Defaulted Fields"); the default expression node stays in the store (it
+/// was canonicalized and diagnosed) but nothing references it.
+pub fn dropAnnoRecordFieldDefault(store: *NodeStore, field_idx: CIR.TypeAnno.RecordField.Idx) void {
+    const node_idx: Node.Idx = @enumFromInt(@intFromEnum(field_idx));
+    var node = store.nodes.get(node_idx);
+    std.debug.assert(node.tag == .ty_record_field_defaulted);
+    const payload = node.getPayload().ty_record_field_defaulted;
+    node = Node.init(.ty_record_field);
+    node.setPayload(.{ .ty_record_field = .{
+        .name = payload.name,
+        .ty = payload.ty,
+        .is_optional = false,
+        .is_unnamed = false,
+    } });
+    store.nodes.set(node_idx, node);
+}
+
 /// Adds an annotation to the store.
 ///
 /// IMPORTANT: You should not use this function directly! Instead, use it's
@@ -3954,26 +4056,32 @@ pub fn addAnnotation(store: *NodeStore, annotation: CIR.Annotation, region: base
     const introduces_type_var = store.typeAnnoHasTypeVar(annotation.anno, .introduced_only);
     const contains_underscore = store.annotationContainsUnderscore(annotation.anno, annotation.where);
 
-    if (annotation.where) |where_clause| {
-        const where_span2_idx = try store.storeWhereClauseSpan(where_clause);
-        node.setPayload(.{ .annotation = .{
-            .anno = @intFromEnum(annotation.anno),
-            .where_span2_idx = where_span2_idx,
-            .has_where = true,
+    const where_span2_idx: u32 = if (annotation.where) |where_clause|
+        try store.storeWhereClauseSpan(where_clause)
+    else
+        0;
+
+    const name_region_span2_idx: u32 = if (annotation.name_region) |name_region| blk: {
+        const idx: u32 = @intCast(store.span2_data.len());
+        _ = try store.span2_data.append(store.gpa, .{
+            .start = name_region.start.offset,
+            .len = name_region.end.offset - name_region.start.offset,
+        });
+        break :blk idx;
+    } else 0;
+
+    node.setPayload(.{ .annotation = .{
+        .anno = @intFromEnum(annotation.anno),
+        .where_span2_idx = where_span2_idx,
+        .name_region_span2_idx = name_region_span2_idx,
+        .flags = .{
+            .has_where = annotation.where != null,
             .mentions_type_var = mentions_type_var,
             .introduces_type_var = introduces_type_var,
             .contains_underscore = contains_underscore,
-        } });
-    } else {
-        node.setPayload(.{ .annotation = .{
-            .anno = @intFromEnum(annotation.anno),
-            .where_span2_idx = 0,
-            .has_where = false,
-            .mentions_type_var = mentions_type_var,
-            .introduces_type_var = introduces_type_var,
-            .contains_underscore = contains_underscore,
-        } });
-    }
+            .has_name_region = annotation.name_region != null,
+        },
+    } });
 
     const nid = try store.nodes.append(store.gpa, node);
     _ = try store.regions.append(store.gpa, region);
@@ -4210,6 +4318,15 @@ pub fn getRecordField(store: *const NodeStore, idx: CIR.RecordField.Idx) CIR.Rec
     return CIR.RecordField{
         .name = @bitCast(payload.record_field.name),
         .value = @enumFromInt(payload.record_field.expr),
+    };
+}
+
+/// Retrieves an unset record field from the store.
+pub fn getUnsetField(store: *const NodeStore, idx: CIR.UnsetField.Idx) CIR.UnsetField {
+    const node = store.nodes.get(@enumFromInt(@intFromEnum(idx)));
+    const payload = node.getPayload();
+    return CIR.UnsetField{
+        .name = @bitCast(payload.record_unset_field.name),
     };
 }
 
@@ -4498,6 +4615,11 @@ pub fn annoRecordFieldSpanFrom(store: *NodeStore, start: u32) Allocator.Error!CI
 /// Returns a span from the scratch record fields starting at the given index.
 pub fn recordFieldSpanFrom(store: *NodeStore, start: u32) Allocator.Error!CIR.RecordField.Span {
     return try store.spanFrom("record_fields", CIR.RecordField.Span, start);
+}
+
+/// Returns a span from the scratch unset record fields starting at the given index.
+pub fn unsetFieldSpanFrom(store: *NodeStore, start: u32) Allocator.Error!CIR.UnsetField.Span {
+    return try store.spanFrom("record_unset_fields", CIR.UnsetField.Span, start);
 }
 
 /// Returns a span from the scratch where clauses starting at the given index,
@@ -4862,6 +4984,11 @@ pub fn sliceRecordFields(store: *const NodeStore, span: CIR.RecordField.Span) []
     return store.sliceFromSpan(CIR.RecordField.Idx, span.span);
 }
 
+/// Returns a slice of unset record fields from the store.
+pub fn sliceUnsetFields(store: *const NodeStore, span: CIR.UnsetField.Span) []CIR.UnsetField.Idx {
+    return store.sliceFromSpan(CIR.UnsetField.Idx, span.span);
+}
+
 /// Retrieve a slice of IfBranch Idx's from a span
 pub fn sliceIfBranches(store: *const NodeStore, span: CIR.Expr.IfBranch.Span) []CIR.Expr.IfBranch.Idx {
     return store.sliceFromSpan(CIR.Expr.IfBranch.Idx, span.span);
@@ -5186,8 +5313,16 @@ pub fn addDiagnosticUnregistered(store: *NodeStore, reason: CIR.Diagnostic) Allo
             node.tag = .diag_unnamed_field_cannot_have_default;
             region = r.region;
         },
-        .record_default_not_literal => |r| {
-            node.tag = .diag_record_default_not_literal;
+        .default_not_allowed_in_structural_record => |r| {
+            node.tag = .diag_default_not_allowed_in_structural_record;
+            region = r.region;
+        },
+        .default_not_allowed_on_local_type_decl => |r| {
+            node.tag = .diag_default_not_allowed_on_local_type_decl;
+            region = r.region;
+        },
+        .record_default_reference_cycle => |r| {
+            node.tag = .diag_record_default_reference_cycle;
             region = r.region;
             node.setPayload(.{ .diag_single_ident = .{ .ident = @bitCast(r.field_name) } });
         },
@@ -5252,6 +5387,14 @@ pub fn addDiagnosticUnregistered(store: *NodeStore, reason: CIR.Diagnostic) Allo
             node.tag = .diag_shadowing_warning;
             region = r.region;
             node.setPayload(.{ .diag_ident_with_region = .{ .ident = @bitCast(r.ident), .region_start = r.original_region.start.offset, .region_end = r.original_region.end.offset } });
+        },
+        .binding_name_does_not_match_mutability => |r| {
+            node.tag = .diag_binding_name_does_not_match_mutability;
+            region = r.region;
+            node.setPayload(.{ .diag_two_idents = .{
+                .ident1 = @bitCast(r.ident),
+                .ident2 = @intFromEnum(r.mutability),
+            } });
         },
         .type_redeclared => |r| {
             node.tag = .diag_type_redeclared;
@@ -5341,6 +5484,15 @@ pub fn addDiagnosticUnregistered(store: *NodeStore, reason: CIR.Diagnostic) Allo
             node.tag = .diag_nested_type_not_found;
             region = r.region;
             node.setPayload(.{ .diag_two_idents = .{ .ident1 = @bitCast(r.parent_name), .ident2 = @bitCast(r.nested_name) } });
+        },
+        .internal_builtin_type => |r| {
+            node.tag = .diag_internal_builtin_type;
+            region = r.region;
+            node.setPayload(.{ .diag_internal_builtin_type = .{
+                .parent_name = @bitCast(r.parent_name),
+                .nested_name = @bitCast(r.nested_name),
+                .kind = @intFromEnum(r.kind),
+            } });
         },
         .nested_value_not_found => |r| {
             node.tag = .diag_nested_value_not_found;
@@ -5440,6 +5592,10 @@ pub fn addDiagnosticUnregistered(store: *NodeStore, reason: CIR.Diagnostic) Allo
         },
         .infinite_loop_never_exits => |r| {
             node.tag = .diag_infinite_loop_never_exits;
+            region = r.region;
+        },
+        .trailing_try_suffix => |r| {
+            node.tag = .diag_trailing_try_suffix;
             region = r.region;
         },
         .return_outside_fn => |r| {
@@ -5637,6 +5793,14 @@ pub fn getDiagnostic(store: *const NodeStore, diagnostic: CIR.Diagnostic.Idx) CI
                 },
             } };
         },
+        .diag_binding_name_does_not_match_mutability => {
+            const p = payload.diag_two_idents;
+            return CIR.Diagnostic{ .binding_name_does_not_match_mutability = .{
+                .ident = @bitCast(p.ident1),
+                .mutability = @enumFromInt(p.ident2),
+                .region = store.getRegionAt(node_idx),
+            } };
+        },
         .diag_type_redeclared => {
             const p = payload.diag_ident_with_region;
             return CIR.Diagnostic{ .type_redeclared = .{
@@ -5732,6 +5896,15 @@ pub fn getDiagnostic(store: *const NodeStore, diagnostic: CIR.Diagnostic.Idx) CI
                 .region = store.getRegionAt(node_idx),
             } };
         },
+        .diag_internal_builtin_type => {
+            const p = payload.diag_internal_builtin_type;
+            return CIR.Diagnostic{ .internal_builtin_type = .{
+                .parent_name = @as(base.Ident.Idx, @bitCast(p.parent_name)),
+                .nested_name = @as(base.Ident.Idx, @bitCast(p.nested_name)),
+                .kind = @enumFromInt(p.kind),
+                .region = store.getRegionAt(node_idx),
+            } };
+        },
         .diag_nested_value_not_found => {
             const p = payload.diag_two_idents;
             return CIR.Diagnostic{ .nested_value_not_found = .{
@@ -5777,7 +5950,13 @@ pub fn getDiagnostic(store: *const NodeStore, diagnostic: CIR.Diagnostic.Idx) CI
         .diag_unnamed_field_cannot_have_default => return CIR.Diagnostic{ .unnamed_field_cannot_have_default = .{
             .region = store.getRegionAt(node_idx),
         } },
-        .diag_record_default_not_literal => return CIR.Diagnostic{ .record_default_not_literal = .{
+        .diag_default_not_allowed_in_structural_record => return CIR.Diagnostic{ .default_not_allowed_in_structural_record = .{
+            .region = store.getRegionAt(node_idx),
+        } },
+        .diag_default_not_allowed_on_local_type_decl => return CIR.Diagnostic{ .default_not_allowed_on_local_type_decl = .{
+            .region = store.getRegionAt(node_idx),
+        } },
+        .diag_record_default_reference_cycle => return CIR.Diagnostic{ .record_default_reference_cycle = .{
             .field_name = @bitCast(payload.diag_single_ident.ident),
             .region = store.getRegionAt(node_idx),
         } },
@@ -5957,6 +6136,9 @@ pub fn getDiagnostic(store: *const NodeStore, diagnostic: CIR.Diagnostic.Idx) CI
             .region = store.getRegionAt(node_idx),
         } },
         .diag_infinite_loop_never_exits => return CIR.Diagnostic{ .infinite_loop_never_exits = .{
+            .region = store.getRegionAt(node_idx),
+        } },
+        .diag_trailing_try_suffix => return CIR.Diagnostic{ .trailing_try_suffix = .{
             .region = store.getRegionAt(node_idx),
         } },
         .diag_return_outside_fn => {
@@ -6273,7 +6455,7 @@ test "NodeStore basic CompactWriter roundtrip" {
         },
     });
     const node1_idx = try original.nodes.append(gpa, node1);
-    try original.recordLiteralDispatchPlan(node1_idx, .numeral, @enumFromInt(7), @enumFromInt(9));
+    try original.recordLiteralDispatchPlan(node1_idx, .numeral, @enumFromInt(7), @enumFromInt(9), 11);
     original.finalizeLiteralDispatchResolution(node1_idx, .builtin_direct);
 
     // Add a region
@@ -6325,6 +6507,7 @@ test "NodeStore basic CompactWriter roundtrip" {
     try testing.expectEqual(@as(u32, 7), literal_plan.target_var);
     try testing.expectEqual(@as(u32, 9), literal_plan.fn_var);
     try testing.expectEqual(LiteralDispatchPlan.Resolution.builtin_direct, literal_plan.dispatchResolution());
+    try testing.expectEqual(@as(?u32, 11), literal_plan.patternFailureExpr());
 
     // Verify regions
     try testing.expectEqual(@as(usize, 1), deserialized.regions.len());
@@ -6354,12 +6537,14 @@ test "literal dispatch plans are retired with their owning nodes" {
         .quote,
         @enumFromInt(1),
         @enumFromInt(2),
+        null,
     );
     try store.recordLiteralDispatchPlan(
         @enumFromInt(@intFromEnum(numeral_expr)),
         .numeral,
         @enumFromInt(3),
         @enumFromInt(4),
+        17,
     );
     try testing.expectEqual(@as(usize, 2), store.literalDispatchPlans().len);
 
@@ -6373,6 +6558,7 @@ test "literal dispatch plans are retired with their owning nodes" {
 
     const numeral_plan = store.literalDispatchPlanForNode(@enumFromInt(@intFromEnum(numeral_expr))).?;
     try testing.expectEqual(LiteralDispatchPlan.Kind.numeral, numeral_plan.dispatchKind());
+    try testing.expectEqual(@as(?u32, 17), numeral_plan.patternFailureExpr());
     try testing.expectEqual(@as(u32, 3), numeral_plan.target_var);
     try testing.expectEqual(@as(u32, 4), numeral_plan.fn_var);
 

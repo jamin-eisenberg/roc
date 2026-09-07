@@ -711,6 +711,16 @@ pub const SchemeUseRecord = extern struct {
         /// The edge shares the definition's vars, so its record has no copy
         /// pairs but still names the exact scheme root used by checking.
         shared_value_use,
+        /// A fully concrete recursive dispatch reuses an ancestor's selected
+        /// method instance. `slot_data` identifies this constraint, and
+        /// `scheme_root` names the reused instance; no fresh pairs are minted.
+        /// Its requirements are determined by the target's callable paths.
+        recursive_dispatch_target,
+        /// Producer-authored provenance for a reference to a definition in an
+        /// on-stack recursive binding group. This record carries no evidence
+        /// or substitution of its own; an accompanying value/shared use owns
+        /// those facts when the referenced scheme has quantified variables.
+        recursive_reference,
     };
 };
 
@@ -733,12 +743,14 @@ pub const GeneratedCodecDerivation = extern struct {
     source_constraint_fn_var: u32,
     source_runtime_fn_var: u32,
     source_shape_var: u32,
+    source_body_shape_var: u32,
     source_encoding_var: u32,
     source_state_var: u32,
     source_error_var: u32,
     constraint_fn_var: u32,
     runtime_fn_var: u32,
     shape_var: u32,
+    body_shape_var: u32,
     encoding_var: u32,
     state_var: u32,
     error_var: u32,
@@ -756,6 +768,9 @@ pub const GeneratedCodecDerivation = extern struct {
 /// One exact method callable used inside a checked generated codec.
 pub const GeneratedCodecCall = extern struct {
     method_ident: u32,
+    /// Nonzero when checking proved this call as an available specialization
+    /// capability rather than an unconditional generated-body edge.
+    conditional: u32,
     dispatcher_var: u32,
     callable_var: u32,
     /// Exact generated callable relation whose dispatch-target record owns the
@@ -849,6 +864,22 @@ pub const BindingScheme = extern struct {
     pub const SafeList = collections.SafeList(@This());
 };
 
+/// One generated-codec dispatch relation that remains part of a binding's
+/// scheme across checked-module boundaries. `scheme_root` preserves alias
+/// identity when a cached checked environment is rechecked, and
+/// `constraint_index` names the exact `StaticDispatchConstraint` in this
+/// environment's serialized `TypeStore`; import copying therefore preserves
+/// the complete callable graph and metadata without reconstructing either from
+/// the receiver's final shape.
+pub const BindingSchemeCodecRequirement = extern struct {
+    node_idx: u32,
+    scheme_root: u32,
+    receiver_var: u32,
+    constraint_index: u32,
+
+    pub const SafeList = collections.SafeList(@This());
+};
+
 gpa: std.mem.Allocator,
 
 common: CommonEnv,
@@ -904,8 +935,10 @@ external_decls: CIR.ExternalDecl.SafeList,
 imports: CIR.Import.Store,
 /// Source-relative file imports read while canonicalizing this module.
 file_dependencies: FileDependency.SafeList,
-/// The module's name as a string
-/// This is needed for import resolution to match import names to modules
+/// The module's source-visible final path segment, such as `Foo` for the
+/// logical module path `Folder/Foo`.
+/// Used for type-module main types and associated-name construction; logical
+/// import paths remain in coordinator state.
 module_name: []const u8,
 /// The module's bare name as an interned identifier (e.g., "Color").
 /// Used for display, type module validation, and method name construction.
@@ -986,6 +1019,9 @@ scheme_use_pairs: SchemeUsePair.SafeList,
 /// Exact source bindings that checking generalized into rank-1 type schemes.
 /// Sorted by source node for allocation-free cross-module lookup.
 binding_schemes: BindingScheme.SafeList,
+/// Generated-codec relations carried by those schemes. Sorted by source node;
+/// multiple requirements for one binding occupy one contiguous run.
+binding_scheme_codec_requirements: BindingSchemeCodecRequirement.SafeList,
 /// Generated codec derivations validated by checking and consumed by checked
 /// artifact publication.
 generated_codec_derivations: GeneratedCodecDerivation.SafeList,
@@ -1086,10 +1122,19 @@ pub const FileDependencyState = enum(u8) {
 pub const FileDependency = extern struct {
     relative_path: StringLiteral.Idx,
     state: FileDependencyState,
-    _padding: [3]u8,
+    _padding: [3]u8 = .{ 0, 0, 0 },
     content_hash: [32]u8,
+    start_offset: u32,
+    end_offset: u32,
 
     pub const SafeList = collections.SafeList(@This());
+
+    pub fn region(self: @This()) Region {
+        return .{
+            .start = .{ .offset = self.start_offset },
+            .end = .{ .offset = self.end_offset },
+        };
+    }
 };
 
 /// Relocate all pointers in the ModuleEnv by the given offset.
@@ -1115,6 +1160,7 @@ pub fn relocate(self: *Self, offset: isize) void {
     self.provided_low_level_defs.relocate(offset);
     self.for_loop_dispatch_plans.relocate(offset);
     self.binding_schemes.relocate(offset);
+    self.binding_scheme_codec_requirements.relocate(offset);
     self.rejected_static_dispatches.relocate(offset);
     self.record_omitted_defaults.relocate(offset);
 
@@ -1216,6 +1262,7 @@ pub fn init(gpa: std.mem.Allocator, source: []const u8) std.mem.Allocator.Error!
         .scheme_uses = try SchemeUseRecord.SafeList.initCapacity(gpa, 8),
         .scheme_use_pairs = try SchemeUsePair.SafeList.initCapacity(gpa, 8),
         .binding_schemes = try BindingScheme.SafeList.initCapacity(gpa, 8),
+        .binding_scheme_codec_requirements = try BindingSchemeCodecRequirement.SafeList.initCapacity(gpa, 4),
         .generated_codec_derivations = try GeneratedCodecDerivation.SafeList.initCapacity(gpa, 4),
         .generated_codec_calls = try GeneratedCodecCall.SafeList.initCapacity(gpa, 16),
         .rejected_static_dispatches = try RejectedStaticDispatch.SafeList.initCapacity(gpa, 4),
@@ -1247,6 +1294,7 @@ pub fn deinit(self: *Self) void {
     self.scheme_uses.deinit(self.gpa);
     self.scheme_use_pairs.deinit(self.gpa);
     self.binding_schemes.deinit(self.gpa);
+    self.binding_scheme_codec_requirements.deinit(self.gpa);
     self.generated_codec_derivations.deinit(self.gpa);
     self.generated_codec_calls.deinit(self.gpa);
     self.rejected_static_dispatches.deinit(self.gpa);
@@ -1350,6 +1398,7 @@ pub fn deinitCachedModule(self: *Self) void {
     self.scheme_uses.deinit(self.gpa);
     self.scheme_use_pairs.deinit(self.gpa);
     self.binding_schemes.deinit(self.gpa);
+    self.binding_scheme_codec_requirements.deinit(self.gpa);
     self.generated_codec_derivations.deinit(self.gpa);
     self.generated_codec_calls.deinit(self.gpa);
     self.rejected_static_dispatches.deinit(self.gpa);
@@ -1367,13 +1416,15 @@ pub fn deinitCachedModule(self: *Self) void {
 }
 
 /// Record a relative file dependency before its final read state is known.
-pub fn recordFileDependency(self: *Self, relative_path: []const u8) Allocator.Error!FileDependency.SafeList.Idx {
+pub fn recordFileDependency(self: *Self, relative_path: []const u8, start_offset: u32, end_offset: u32) Allocator.Error!FileDependency.SafeList.Idx {
     const path_idx = try self.insertString(relative_path);
     return try self.file_dependencies.append(self.gpa, .{
         .relative_path = path_idx,
         .state = .pending,
         ._padding = .{ 0, 0, 0 },
         .content_hash = [_]u8{0} ** 32,
+        .start_offset = start_offset,
+        .end_offset = end_offset,
     });
 }
 
@@ -1834,19 +1885,17 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
         .underscore_in_type_declaration => |data| blk: {
             const region_info = self.calcRegionInfo(data.region);
 
-            const headline = try std.fmt.allocPrint(allocator, "Underscores are not allowed in type {s} declarations.", .{data.declared.label()});
-            defer allocator.free(headline);
-            var report = try Report.init(allocator, "Underscore In Type Alias", headline, .runtime_error);
+            var report = try Report.init(allocator, data.declared.underscoreReportTitle(), data.declared.underscoreHeadline(), .runtime_error);
 
             // Add source context with location
             const owned_filename = try report.addOwnedString(filename);
             try report.addSourceContext(region_info, owned_filename, self.getSourceAll(), self.getLineStartsAll());
 
             try report.document.addLineBreak();
-            const explanation = try std.fmt.allocPrint(allocator, "Underscores in type annotations mean \"I don't care about this type\", which doesn't make sense when declaring a type. If you need a placeholder type variable, use a named type variable like `a` instead.", .{});
-            defer allocator.free(explanation);
-            const owned_explanation = try report.addOwnedString(explanation);
-            try report.document.addReflowingText(owned_explanation);
+            switch (data.declared) {
+                .alias, .where_alias => try report.document.addReflowingText("Underscores in type annotations mean \"I don't care about this type\", which doesn't make sense when declaring a type. If you need a placeholder type variable, use a named type variable like `a` instead."),
+                .nominal, .@"opaque" => try report.document.addReflowingText("A bare underscore in a type annotation means \"I don't care about this type\", so it does not declare a type parameter. If this parameter is intentionally phantom, give it an underscore-prefixed name like `_a` instead."),
+            }
 
             break :blk report;
         },
@@ -2388,6 +2437,66 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
+        .binding_name_does_not_match_mutability => |data| blk: {
+            const ident_name = self.getIdent(data.ident);
+            const region_info = self.calcRegionInfo(data.region);
+            const title = switch (data.mutability) {
+                .mutable => "Var Name Missing `$`",
+                .immutable => "Dollar Prefix Without `var`",
+            };
+            var report = try Report.init(allocator, title, "", .warning);
+            const owned_ident = try report.addOwnedString(ident_name);
+
+            switch (data.mutability) {
+                .mutable => {
+                    try report.headline.addReflowingText("The mutable binding ");
+                    try report.headline.addUnqualifiedSymbol(owned_ident);
+                    try report.headline.addReflowingText(" is declared with ");
+                    try report.headline.addKeyword("var");
+                    try report.headline.addReflowingText(" but its name does not start with ");
+                    try report.headline.addInlineCode("$");
+                    try report.headline.addReflowingText(".");
+
+                    const suggested = try std.fmt.allocPrint(allocator, "${s}", .{ident_name});
+                    defer allocator.free(suggested);
+                    const owned_suggested = try report.addOwnedString(suggested);
+                    try report.document.addReflowingText("Rename this binding and all of its uses to ");
+                    try report.document.addUnqualifiedSymbol(owned_suggested);
+                    try report.document.addReflowingText(". The name is only a convention; mutability comes from the ");
+                    try report.document.addKeyword("var");
+                    try report.document.addReflowingText(" declaration.");
+                },
+                .immutable => {
+                    try report.headline.addReflowingText("The immutable binding ");
+                    try report.headline.addUnqualifiedSymbol(owned_ident);
+                    try report.headline.addReflowingText(" starts with ");
+                    try report.headline.addInlineCode("$");
+                    try report.headline.addReflowingText(" but is not declared with ");
+                    try report.headline.addKeyword("var");
+                    try report.headline.addReflowingText(".");
+
+                    const suggested = if (ident_name.len > 0) ident_name[1..] else ident_name;
+                    const owned_suggested = try report.addOwnedString(suggested);
+                    try report.document.addReflowingText("Either rename this binding and all of its uses to ");
+                    try report.document.addUnqualifiedSymbol(owned_suggested);
+                    try report.document.addReflowingText(", or declare it with ");
+                    try report.document.addKeyword("var");
+                    try report.document.addReflowingText(" if it should be mutable.");
+                },
+            }
+
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+            const owned_filename = try report.addOwnedString(filename);
+            try report.document.addSourceRegion(
+                region_info,
+                .warning_highlight,
+                owned_filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+            break :blk report;
+        },
         .empty_tuple => |data| blk: {
             const region_info = self.calcRegionInfo(data.region);
 
@@ -2777,6 +2886,39 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
+        .internal_builtin_type => |data| blk: {
+            const region_info = self.calcRegionInfo(data.region);
+
+            const parent_bytes = self.getIdent(data.parent_name);
+            const nested_bytes = self.getIdent(data.nested_name);
+
+            var report = try Report.init(allocator, "Internal Builtin Type", "", .runtime_error);
+            const parent_name = try report.addOwnedString(parent_bytes);
+            const nested_name = try report.addOwnedString(nested_bytes);
+
+            try report.headline.addInlineCode(nested_name);
+            try report.headline.addReflowingText(" is internal to ");
+            try report.headline.addInlineCode(parent_name);
+            try report.headline.addReflowingText(", so it can't be named here.");
+
+            const owned_filename = try report.addOwnedString(filename);
+            try report.document.addSourceRegion(
+                region_info,
+                .error_highlight,
+                owned_filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+
+            try report.document.addReflowingText("It describes how a builtin format tracks its own state while encoding or parsing, which is why it has no spelling in Roc code. To require that a type can be encoded or parsed, name the constraint instead, as in ");
+            try report.document.addInlineCode(switch (data.kind) {
+                .json => "where [a.Json.Encodable([])]",
+                .http_header => "where [a.Encoding.HttpHeader.Parseable([])]",
+            });
+            try report.document.addReflowingText(".");
+
+            break :blk report;
+        },
         .nested_value_not_found => |data| blk: {
             const region_info = self.calcRegionInfo(data.region);
 
@@ -2888,6 +3030,11 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
                 self.getSourceAll(),
                 self.getLineStartsAll(),
             );
+            try report.document.addLineBreak();
+            try report.document.addAnnotated("Hint:", .emphasized);
+            try report.document.addReflowingText(" ");
+            try report.document.addInlineCode("where");
+            try report.document.addReflowingText(" clauses can only go on function type annotations.");
 
             break :blk report;
         },
@@ -2938,15 +3085,15 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
-        .record_default_not_literal => |data| blk: {
+        .record_default_reference_cycle => |data| blk: {
             const field_name = self.getIdent(data.field_name);
             const region_info = self.calcRegionInfo(data.region);
 
-            var report = try Report.init(allocator, "Default Value Must Be A Literal", "", .runtime_error);
+            var report = try Report.init(allocator, "Default Value Cycle", "", .runtime_error);
             const owned_field_name = try report.addOwnedString(field_name);
             try report.headline.addReflowingText("The default value for the ");
             try report.headline.addRecordField(owned_field_name);
-            try report.headline.addReflowingText(" field is not a literal.");
+            try report.headline.addReflowingText(" field depends on itself.");
 
             const owned_filename = try report.addOwnedString(filename);
             try report.document.addSourceRegion(
@@ -2960,7 +3107,7 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
             try report.document.addLineBreak();
             try report.document.addReflowingText("A field default (");
             try report.document.addInlineCode("??");
-            try report.document.addReflowingText(") is materialized by the compiler at every construction site that omits the field, so it must be a literal: a number, an interpolation-free string, a tag, or a list, record, or tuple built only from literals. Anything that refers to another value could form an evaluation cycle the compiler will not chase.");
+            try report.document.addReflowingText(") is materialized at every construction site that omits the field. This default reaches itself again—through values it references, or through constructions that omit the field and would materialize it—so there is no value to start from. Break the cycle by supplying the field at one of the constructions involved, or by removing the self-dependent reference from the default.");
 
             break :blk report;
         },
@@ -3009,6 +3156,56 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
                 self.getSourceAll(),
                 self.getLineStartsAll(),
             );
+
+            break :blk report;
+        },
+        .default_not_allowed_in_structural_record => |data| blk: {
+            const region_info = self.calcRegionInfo(data.region);
+
+            var report = try Report.init(allocator, "Default Not Allowed In Structural Record", "", .runtime_error);
+            try report.headline.addReflowingText("Field defaults (");
+            try report.headline.addInlineCode("??");
+            try report.headline.addReflowingText(") are only allowed on the fields of a nominal record type declaration's backing record, not in structural record types (type aliases, inline annotations, or nested records).");
+
+            const owned_filename = try report.addOwnedString(filename);
+            try report.document.addSourceRegion(
+                region_info,
+                .error_highlight,
+                owned_filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+            try report.document.addAnnotated("Hint:", .emphasized);
+            try report.document.addReflowingText(" A default belongs to one named type, so declare a nominal type (with ");
+            try report.document.addInlineCode(":=");
+            try report.document.addReflowingText(") whose backing record carries the default, and use that type here.");
+
+            break :blk report;
+        },
+        .default_not_allowed_on_local_type_decl => |data| blk: {
+            const region_info = self.calcRegionInfo(data.region);
+
+            var report = try Report.init(allocator, "Default Not Allowed On Local Type Declaration", "", .runtime_error);
+            try report.headline.addReflowingText("Field defaults (");
+            try report.headline.addInlineCode("??");
+            try report.headline.addReflowingText(") are only allowed on nominal type declarations at the top level of a module, not on type declarations inside a function or block.");
+
+            const owned_filename = try report.addOwnedString(filename);
+            try report.document.addSourceRegion(
+                region_info,
+                .error_highlight,
+                owned_filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+            try report.document.addAnnotated("Hint:", .emphasized);
+            try report.document.addReflowingText(" A default is materialized at every construction site that omits the field, so it cannot depend on the locals of one function. Move the type declaration to the module top level, or remove the default.");
 
             break :blk report;
         },
@@ -3494,6 +3691,98 @@ pub fn diagnosticToReport(self: *Self, diagnostic: CIR.Diagnostic, allocator: st
 
             break :blk report;
         },
+        .trailing_try_suffix => |data| blk: {
+            const region_info = self.calcRegionInfo(data.region);
+
+            var report = try Report.init(allocator, "Trailing `?`", "", .warning);
+            try report.headline.addReflowingText("It's usually a mistake to use a postfix ");
+            try report.headline.addAnnotated("?", .inline_code);
+            try report.headline.addReflowingText(" on values being returned implicitly at the end of a function like this:");
+
+            try report.document.addSourceRegion(
+                region_info,
+                .warning_highlight,
+                filename,
+                self.getSourceAll(),
+                self.getLineStartsAll(),
+            );
+            try report.document.addLineBreak();
+
+            try report.document.addReflowingText("This is because ");
+            try report.document.addAnnotated("?", .inline_code);
+            try report.document.addReflowingText(" is syntax sugar for doing a ");
+            try report.document.addAnnotated("match", .inline_code);
+            try report.document.addReflowingText(" on a ");
+            try report.document.addAnnotated("Try", .inline_code);
+            try report.document.addReflowingText(" value like this:");
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+            try report.document.startAnnotation(.code_block);
+            try report.document.addIndent(1);
+            try report.document.addKeyword("match");
+            try report.document.addText(" ");
+            try report.document.addUnqualifiedSymbol("value_before_question_mark");
+            try report.document.addText(" {");
+            try report.document.addLineBreak();
+            try report.document.addIndent(2);
+            try report.document.addTagName("Ok");
+            try report.document.addText("(");
+            try report.document.addUnqualifiedSymbol("ok_payload");
+            try report.document.addText(") ");
+            try report.document.addBinaryOperator("=>");
+            try report.document.addText(" ");
+            try report.document.addUnqualifiedSymbol("ok_payload");
+            try report.document.addLineBreak();
+            try report.document.addIndent(2);
+            try report.document.addTagName("Err");
+            try report.document.addText("(");
+            try report.document.addUnqualifiedSymbol("err_payload");
+            try report.document.addText(") ");
+            try report.document.addBinaryOperator("=>");
+            try report.document.addText(" ");
+            try report.document.addKeyword("return");
+            try report.document.addText(" ");
+            try report.document.addTagName("Err");
+            try report.document.addText("(");
+            try report.document.addUnqualifiedSymbol("err_payload");
+            try report.document.addText(")");
+            try report.document.addLineBreak();
+            try report.document.addIndent(1);
+            try report.document.addText("}");
+            try report.document.endAnnotation();
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+
+            try report.document.addReflowingText("When you use ");
+            try report.document.addAnnotated("?", .inline_code);
+            try report.document.addReflowingText(" on the value at the end of a function, it changes \"implicitly return this ");
+            try report.document.addAnnotated("Try", .inline_code);
+            try report.document.addReflowingText(" value\" to \"return this ");
+            try report.document.addAnnotated("Try", .inline_code);
+            try report.document.addReflowingText(" value if it's an ");
+            try report.document.addAnnotated("Err", .inline_code);
+            try report.document.addReflowingText(", but if it's ");
+            try report.document.addAnnotated("Ok", .inline_code);
+            try report.document.addReflowingText(", unwrap its ");
+            try report.document.addAnnotated("Ok", .inline_code);
+            try report.document.addReflowingText(" payload and return that instead\" - which can only possibly type-check when returning ");
+            try report.document.addAnnotated("Try(Try(..., ...), ...)", .inline_code);
+            try report.document.addReflowingText(", which is so unusual that using ");
+            try report.document.addAnnotated("?", .inline_code);
+            try report.document.addReflowingText(" here is almost always a mistake in practice.");
+            try report.document.addLineBreak();
+            try report.document.addLineBreak();
+
+            try report.document.addReflowingText("Usually removing the ");
+            try report.document.addAnnotated("?", .inline_code);
+            try report.document.addReflowingText(" here is what makes the most sense, but if you really want this behavior, make it clear by using an explicit ");
+            try report.document.addAnnotated("match", .inline_code);
+            try report.document.addReflowingText(" instead of the ");
+            try report.document.addAnnotated("?", .inline_code);
+            try report.document.addReflowingText(" syntax sugar.");
+
+            break :blk report;
+        },
         .return_outside_fn => |data| blk: {
             const region_info = self.calcRegionInfo(data.region);
 
@@ -3742,6 +4031,7 @@ pub const Serialized = extern struct {
     scheme_uses: SchemeUseRecord.SafeList.Serialized,
     scheme_use_pairs: SchemeUsePair.SafeList.Serialized,
     binding_schemes: BindingScheme.SafeList.Serialized,
+    binding_scheme_codec_requirements: BindingSchemeCodecRequirement.SafeList.Serialized,
     generated_codec_derivations: GeneratedCodecDerivation.SafeList.Serialized,
     generated_codec_calls: GeneratedCodecCall.SafeList.Serialized,
     rejected_static_dispatches: RejectedStaticDispatch.SafeList.Serialized,
@@ -3857,6 +4147,7 @@ pub const Serialized = extern struct {
         try self.scheme_uses.serialize(&env.scheme_uses, allocator, writer);
         try self.scheme_use_pairs.serialize(&env.scheme_use_pairs, allocator, writer);
         try self.binding_schemes.serialize(&env.binding_schemes, allocator, writer);
+        try self.binding_scheme_codec_requirements.serialize(&env.binding_scheme_codec_requirements, allocator, writer);
         try self.generated_codec_derivations.serialize(&env.generated_codec_derivations, allocator, writer);
         try self.generated_codec_calls.serialize(&env.generated_codec_calls, allocator, writer);
         try self.rejected_static_dispatches.serialize(&env.rejected_static_dispatches, allocator, writer);
@@ -3874,7 +4165,7 @@ pub const Serialized = extern struct {
         base_addr: usize,
         gpa: std.mem.Allocator,
         source: []const u8,
-        module_name: []const u8,
+        module_basename: []const u8,
     ) std.mem.Allocator.Error!*Self {
         // Allocate a fresh ModuleEnv on the heap
         const env = try gpa.create(Self);
@@ -3903,7 +4194,7 @@ pub const Serialized = extern struct {
             .external_decls = self.external_decls.deserializeInto(base_addr),
             .imports = try self.imports.deserializeInto(base_addr, gpa),
             .file_dependencies = self.file_dependencies.deserializeInto(base_addr),
-            .module_name = module_name,
+            .module_name = module_basename,
             .display_module_name_idx = @bitCast(self.display_module_name_idx_reserved),
             .qualified_module_ident = @bitCast(self.qualified_module_ident_reserved),
             .module_identities = self.module_identities.deserialize(base_addr),
@@ -3927,11 +4218,14 @@ pub const Serialized = extern struct {
             .scheme_uses = self.scheme_uses.deserializeInto(base_addr),
             .scheme_use_pairs = self.scheme_use_pairs.deserializeInto(base_addr),
             .binding_schemes = self.binding_schemes.deserializeInto(base_addr),
+            .binding_scheme_codec_requirements = self.binding_scheme_codec_requirements.deserializeInto(base_addr),
             .generated_codec_derivations = self.generated_codec_derivations.deserializeInto(base_addr),
             .generated_codec_calls = self.generated_codec_calls.deserializeInto(base_addr),
             .rejected_static_dispatches = self.rejected_static_dispatches.deserializeInto(base_addr),
             .record_omitted_defaults = self.record_omitted_defaults.deserializeInto(base_addr),
         };
+
+        env.debugAssertModuleBasename();
 
         return env;
     }
@@ -3944,13 +4238,13 @@ pub const Serialized = extern struct {
         base_addr: usize,
         gpa: std.mem.Allocator,
         source: []const u8,
-        module_name: []const u8,
+        module_basename: []const u8,
     ) error{CorruptSerializedModuleEnv}!Self {
         if (self.imports.imports.len != 0) return error.CorruptSerializedModuleEnv;
         if (self.imports.import_idents.len != 0) return error.CorruptSerializedModuleEnv;
         if (self.imports.resolved_modules.len != 0) return error.CorruptSerializedModuleEnv;
 
-        return Self{
+        const env = Self{
             .gpa = gpa,
             .common = self.common.deserializeInto(base_addr, source),
             .types = self.types.deserializeInto(base_addr, gpa),
@@ -3973,7 +4267,7 @@ pub const Serialized = extern struct {
             .external_decls = self.external_decls.deserializeInto(base_addr),
             .imports = CIR.Import.Store.init(),
             .file_dependencies = self.file_dependencies.deserializeInto(base_addr),
-            .module_name = module_name,
+            .module_name = module_basename,
             .display_module_name_idx = @bitCast(self.display_module_name_idx_reserved),
             .qualified_module_ident = @bitCast(self.qualified_module_ident_reserved),
             .module_identities = self.module_identities.deserialize(base_addr),
@@ -3997,11 +4291,15 @@ pub const Serialized = extern struct {
             .scheme_uses = self.scheme_uses.deserializeInto(base_addr),
             .scheme_use_pairs = self.scheme_use_pairs.deserializeInto(base_addr),
             .binding_schemes = self.binding_schemes.deserializeInto(base_addr),
+            .binding_scheme_codec_requirements = self.binding_scheme_codec_requirements.deserializeInto(base_addr),
             .generated_codec_derivations = self.generated_codec_derivations.deserializeInto(base_addr),
             .generated_codec_calls = self.generated_codec_calls.deserializeInto(base_addr),
             .rejected_static_dispatches = self.rejected_static_dispatches.deserializeInto(base_addr),
             .record_omitted_defaults = self.record_omitted_defaults.deserializeInto(base_addr),
         };
+
+        env.debugAssertModuleBasename();
+        return env;
     }
 
     /// Deserialize with mutable type store and node store for cache modules.
@@ -4013,7 +4311,7 @@ pub const Serialized = extern struct {
         base_addr: usize,
         gpa: std.mem.Allocator,
         source: []const u8,
-        module_name: []const u8,
+        module_basename: []const u8,
     ) std.mem.Allocator.Error!*Self {
         // Allocate a fresh ModuleEnv on the heap
         const env = try gpa.create(Self);
@@ -4043,7 +4341,7 @@ pub const Serialized = extern struct {
             .external_decls = self.external_decls.deserializeInto(base_addr),
             .imports = try self.imports.deserializeInto(base_addr, gpa),
             .file_dependencies = self.file_dependencies.deserializeInto(base_addr),
-            .module_name = module_name,
+            .module_name = module_basename,
             .display_module_name_idx = @bitCast(self.display_module_name_idx_reserved),
             .qualified_module_ident = @bitCast(self.qualified_module_ident_reserved),
             .module_identities = self.module_identities.deserialize(base_addr),
@@ -4069,15 +4367,32 @@ pub const Serialized = extern struct {
             .scheme_uses = try self.scheme_uses.deserializeWithCopy(base_addr, gpa),
             .scheme_use_pairs = try self.scheme_use_pairs.deserializeWithCopy(base_addr, gpa),
             .binding_schemes = try self.binding_schemes.deserializeWithCopy(base_addr, gpa),
+            .binding_scheme_codec_requirements = try self.binding_scheme_codec_requirements.deserializeWithCopy(base_addr, gpa),
             .generated_codec_derivations = try self.generated_codec_derivations.deserializeWithCopy(base_addr, gpa),
             .generated_codec_calls = try self.generated_codec_calls.deserializeWithCopy(base_addr, gpa),
             .rejected_static_dispatches = try self.rejected_static_dispatches.deserializeWithCopy(base_addr, gpa),
             .record_omitted_defaults = try self.record_omitted_defaults.deserializeWithCopy(base_addr, gpa),
         };
 
+        env.debugAssertModuleBasename();
+
         return env;
     }
 };
+
+/// Assert that the runtime-only module basename agrees with its serialized
+/// identifier. The basename is supplied by the cache consumer because its
+/// slice is not relocatable; it must never be replaced with a logical path.
+fn debugAssertModuleBasename(self: *const Self) void {
+    if (comptime builtin.mode == .Debug) {
+        std.debug.assert(!self.display_module_name_idx.isNone());
+        std.debug.assert(std.mem.eql(
+            u8,
+            self.module_name,
+            self.getIdent(self.display_module_name_idx),
+        ));
+    }
+}
 
 /// Convert a type into a node index
 pub fn nodeIdxFrom(idx: anytype) Node.Idx {
@@ -4195,6 +4510,23 @@ fn sortedNodeSlot(comptime T: type, entries: []const T, raw_node: u32) usize {
     return low;
 }
 
+/// First index whose `node_idx` is greater than `raw_node` in a node-sorted
+/// table. This is the end of the contiguous run returned for multi-entry
+/// source-node metadata.
+fn sortedNodeEndSlot(comptime T: type, entries: []const T, raw_node: u32) usize {
+    var low: usize = 0;
+    var high: usize = entries.len;
+    while (low < high) {
+        const mid = low + (high - low) / 2;
+        if (entries[mid].node_idx <= raw_node) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
 /// Insert or replace `entry` in a node-sorted SafeList. Appends are O(1) when
 /// entries arrive in increasing node order (the common case—recording
 /// follows node allocation); out-of-order inserts shift the tail.
@@ -4245,6 +4577,61 @@ pub fn nodeIsBindingScheme(self: *const Self, node_idx: Node.Idx) bool {
     ) != null;
 }
 
+/// Record one exact generated-codec relation owned by a source binding scheme.
+/// Duplicate aliases are harmless but duplicate relations for the same alias
+/// would create redundant imported work, so exact entries are coalesced here.
+pub fn recordBindingSchemeCodecRequirement(
+    self: *Self,
+    node_idx: Node.Idx,
+    scheme_root: TypeVar,
+    receiver_var: TypeVar,
+    constraint_index: u32,
+) std.mem.Allocator.Error!void {
+    const entry = BindingSchemeCodecRequirement{
+        .node_idx = @intFromEnum(node_idx),
+        .scheme_root = @intFromEnum(scheme_root),
+        .receiver_var = @intFromEnum(receiver_var),
+        .constraint_index = constraint_index,
+    };
+    const entries = self.binding_scheme_codec_requirements.items.items;
+    const start = sortedNodeSlot(BindingSchemeCodecRequirement, entries, entry.node_idx);
+    const end = sortedNodeEndSlot(BindingSchemeCodecRequirement, entries, entry.node_idx);
+    for (entries[start..end]) |existing| {
+        if (existing.scheme_root == entry.scheme_root and
+            existing.receiver_var == entry.receiver_var and
+            existing.constraint_index == entry.constraint_index)
+        {
+            return;
+        }
+    }
+
+    if (end == entries.len) {
+        _ = try self.binding_scheme_codec_requirements.append(self.gpa, entry);
+        return;
+    }
+    _ = try self.binding_scheme_codec_requirements.append(self.gpa, entry);
+    const grown = self.binding_scheme_codec_requirements.items.items;
+    std.mem.copyBackwards(
+        BindingSchemeCodecRequirement,
+        grown[end + 1 ..],
+        grown[end .. grown.len - 1],
+    );
+    grown[end] = entry;
+}
+
+/// Return all generated-codec relations belonging to `node_idx`. The borrowed
+/// slice is allocation-free and remains valid until the table is mutated.
+pub fn bindingSchemeCodecRequirementsForNode(
+    self: *const Self,
+    node_idx: Node.Idx,
+) []const BindingSchemeCodecRequirement {
+    const entries = self.binding_scheme_codec_requirements.items.items;
+    const raw_node = @intFromEnum(node_idx);
+    const start = sortedNodeSlot(BindingSchemeCodecRequirement, entries, raw_node);
+    const end = sortedNodeEndSlot(BindingSchemeCodecRequirement, entries, raw_node);
+    return entries[start..end];
+}
+
 /// Return the digits before the decimal point for a recorded numeral.
 pub fn numeralDigitsBefore(self: *const Self, literal: NumeralLiteral) []const u8 {
     return self.numeral_digit_bytes.items.items[literal.digits_start..][0..literal.before_len];
@@ -4279,8 +4666,15 @@ pub fn recordNumeralDispatchPlan(
     node_idx: Node.Idx,
     target_var: TypeVar,
     fn_var: TypeVar,
+    pattern_failure_expr: ?CIR.Expr.Idx,
 ) std.mem.Allocator.Error!void {
-    try self.store.recordLiteralDispatchPlan(node_idx, .numeral, target_var, fn_var);
+    try self.store.recordLiteralDispatchPlan(
+        node_idx,
+        .numeral,
+        target_var,
+        fn_var,
+        if (pattern_failure_expr) |expr_idx| @intFromEnum(expr_idx) else null,
+    );
 }
 
 /// Return the checked `from_numeral` function for a numeric expression.
@@ -4304,8 +4698,15 @@ pub fn recordQuoteDispatchPlan(
     node_idx: Node.Idx,
     target_var: TypeVar,
     fn_var: TypeVar,
+    pattern_failure_expr: ?CIR.Expr.Idx,
 ) std.mem.Allocator.Error!void {
-    try self.store.recordLiteralDispatchPlan(node_idx, .quote, target_var, fn_var);
+    try self.store.recordLiteralDispatchPlan(
+        node_idx,
+        .quote,
+        target_var,
+        fn_var,
+        if (pattern_failure_expr) |expr_idx| @intFromEnum(expr_idx) else null,
+    );
 }
 
 /// Record a constrained-scheme use for static-dispatch evidence.
@@ -4341,12 +4742,14 @@ pub fn recordGeneratedCodecDerivation(
     source_constraint_fn_var: TypeVar,
     source_runtime_fn_var: TypeVar,
     source_shape_var: TypeVar,
+    source_body_shape_var: TypeVar,
     source_encoding_var: TypeVar,
     source_state_var: TypeVar,
     source_error_var: TypeVar,
     constraint_fn_var: TypeVar,
     runtime_fn_var: TypeVar,
     shape_var: TypeVar,
+    body_shape_var: TypeVar,
     encoding_var: TypeVar,
     state_var: TypeVar,
     error_var: TypeVar,
@@ -4375,12 +4778,14 @@ pub fn recordGeneratedCodecDerivation(
         .source_constraint_fn_var = @intFromEnum(source_constraint_fn_var),
         .source_runtime_fn_var = @intFromEnum(source_runtime_fn_var),
         .source_shape_var = @intFromEnum(source_shape_var),
+        .source_body_shape_var = @intFromEnum(source_body_shape_var),
         .source_encoding_var = @intFromEnum(source_encoding_var),
         .source_state_var = @intFromEnum(source_state_var),
         .source_error_var = @intFromEnum(source_error_var),
         .constraint_fn_var = @intFromEnum(constraint_fn_var),
         .runtime_fn_var = @intFromEnum(runtime_fn_var),
         .shape_var = @intFromEnum(shape_var),
+        .body_shape_var = @intFromEnum(body_shape_var),
         .encoding_var = @intFromEnum(encoding_var),
         .state_var = @intFromEnum(state_var),
         .error_var = @intFromEnum(error_var),
@@ -4606,6 +5011,14 @@ pub fn addRecordField(self: *Self, expr: CIR.RecordField, region: Region) std.me
     return expr_idx;
 }
 
+/// Add a new unset record field (`name: _`) to the node store.
+/// This function asserts that the nodes and regions are in sync.
+pub fn addUnsetField(self: *Self, unset_field: CIR.UnsetField, region: Region) std.mem.Allocator.Error!CIR.UnsetField.Idx {
+    const unset_idx = try self.store.addUnsetField(unset_field, region);
+    self.debugAssertArraysInSync();
+    return unset_idx;
+}
+
 /// Add a new record destructuring to the node store.
 /// This function asserts that the nodes and regions are in sync.
 pub fn addRecordDestruct(self: *Self, expr: CIR.Pattern.RecordDestruct, region: Region) std.mem.Allocator.Error!CIR.Pattern.RecordDestruct.Idx {
@@ -4738,6 +5151,17 @@ pub fn sliceExternalDecls(self: *const Self, span: CIR.ExternalDecl.Span) []cons
 /// Retrieves the text of an identifier by its index
 pub fn getIdentText(self: *const Self, idx: Ident.Idx) []const u8 {
     return self.getIdent(idx);
+}
+
+/// The coordinator-assigned package-qualified module identifier (e.g.
+/// `pf.Utils`), unique across the build's packages. Module identity
+/// comparisons in diagnostics must use this rather than the bare module
+/// name, which can collide between packages. Environments constructed
+/// outside the coordinator (unit tests) have no qualified ident; they are
+/// single-module worlds, so the bare name is their qualified name.
+pub fn qualifiedModuleName(self: *const Self) []const u8 {
+    if (self.qualified_module_ident.isNone()) return self.module_name;
+    return self.getIdent(self.qualified_module_ident);
 }
 
 /// Builds a mapping from platform for-clause alias ident indices to the

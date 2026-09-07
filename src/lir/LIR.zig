@@ -146,6 +146,17 @@ pub const ComptimeSiteId = enum(u32) {
     _,
 };
 
+/// Dense identifier of one source `expect` observed by `roc test`.
+pub const ExpectSiteId = enum(u32) {
+    _,
+};
+
+/// Source metadata for one `expect` observation counter.
+pub const ExpectSite = struct {
+    loc: base.SourceLoc,
+    region: base.Region,
+};
+
 pub const CheckedExhaustivenessSiteId = check.CheckedModule.CheckedExhaustivenessSiteId;
 
 /// Source control-flow construct observed during compile-time finalization.
@@ -521,6 +532,19 @@ pub const LiteralValue = union(enum) {
     proc_ref: LirProcSpecId,
 };
 
+/// How a reference read interacts with its source's stored ownership unit.
+/// Decided by ARC take solving after the borrow modes are final, baked into
+/// each emitted statement, and consumed by the debug certifier, which never
+/// re-infers it: an unstamped read either pays its own retain or stays a
+/// borrow, and only a stamped read may consume the container's stored unit.
+pub const TakeKind = enum(u8) {
+    /// Ordinary read.
+    none,
+    /// Field take: the read consumes the dying container's stored unit for
+    /// this field, and this emission pays no retain.
+    take,
+};
+
 /// Reference-producing operation lowered by `assign_ref`.
 pub const RefOp = union(enum) {
     local: LocalId,
@@ -683,6 +707,7 @@ pub const CFStmt = union(enum) {
     assign_ref: struct {
         target: LocalId,
         op: RefOp,
+        take_kind: TakeKind = .none,
         /// Semantic struct-field indices whose stored ownership units are
         /// absent from a same-layout representation-shell alias. ARC writes
         /// this exact path state; evaluators must not inspect those stale
@@ -940,6 +965,9 @@ pub const CFStmt = union(enum) {
     },
     expect: struct {
         condition: LocalId,
+        /// Present only in test-plan LIR. Other lowering modes retain the
+        /// ordinary host notification behavior for a failed inline expect.
+        site: ?ExpectSiteId = null,
         next: CFStmtId,
     },
     /// The Err arm of a `?` operator used directly inside a top-level expect.
@@ -1048,9 +1076,14 @@ pub const CFStmt = union(enum) {
     join: struct {
         id: JoinPointId,
         params: LocalSpan,
-        /// Join params whose initial value is the compiler-only
-        /// uninitialized marker. ARC must not blindly release these outside
-        /// explicit initialized-payload switches.
+        /// Outer ownership units explicitly transferred to the shared body.
+        /// They have no runtime ABI and need no assignments; ARC keeps them
+        /// across every jump and emits their release once in the body.
+        retained: LocalSpan = .empty(),
+        /// Join-environment locals whose initial value is the compiler-only
+        /// uninitialized marker. This includes rebound parameters and
+        /// pass-through retained locals. ARC must release them only under
+        /// their explicit initialization condition.
         maybe_uninitialized_params: LocalSpan = .empty(),
         /// Conditions parallel to `maybe_uninitialized_params`. Entry `i`
         /// proves whether `maybe_uninitialized_params[i]` is initialized.
@@ -1084,6 +1117,10 @@ pub fn erasedCallReuseFieldsMatch(assign: anytype) bool {
 pub const LirProcSpec = struct {
     name: Symbol,
     args: LocalSpan,
+    /// Producer-authored provenance for a function normalized from an
+    /// iterator pipeline. Dev-only structural fusion consumes this bit; it
+    /// must never infer the scope from symbols or LIR body shape.
+    iterator_fusion_scope: bool = false,
     /// Hidden erased-callable ownership input. Every erased-callable ABI proc
     /// records its final argument here, regardless of whether its result can
     /// reuse the allocation. Its local has erased-callable layout so ARC always

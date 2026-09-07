@@ -151,7 +151,35 @@ pub const Constants = struct {
     /// 64: Compile-time root selection rejects values containing callables.
     /// 65: A hosted entry written without a module resolves to the platform
     ///     module's own declaration.
-    pub const CACHE_VERSION = 65;
+    /// 66: Record expressions carry a span of unset (`name: _`) fields.
+    /// 67: Checked record expressions carry their unset field labels.
+    /// 68: `??` defaults restricted to nominal backing records (new diagnostic).
+    /// 69: Defaults are any pure expression; the not-literal diagnostic became
+    ///     the CAN default-cycle diagnostic.
+    /// 70: Serialized canonicalization diagnostics retain the explicit codec
+    ///     family for internal builtin types.
+    /// 71: Annotation node payload packs its boolean flags into one byte and
+    ///     records the source region of the annotated name.
+    /// 72: Checked binding schemes serialize generated-codec relations that
+    ///     downstream specializations must revalidate.
+    /// 73: Generated codec contracts retain structural body shapes and mark
+    ///     specialization-conditional method capabilities.
+    /// 74: Canonicalization warns on a `?` applied to a function's return
+    ///     value (new diagnostic).
+    /// 75: Checked dispatch data drops symbolic constraint-callable evidence
+    ///     and records recursive resolved references explicitly.
+    /// 76: Scheme uses record their substitution; schemes record their
+    ///     quantified variables and each evidence parameter its slot.
+    /// 77: Evidence parameters record their constraint callable type.
+    /// 78: Procedure templates record their root evidence.
+    /// 79: Recursive-reference provenance is separate from shared scheme uses.
+    /// 80: CIR has an explicit mutable-binder pattern and binding-name warning
+    ///     diagnostic node tags.
+    /// 81: Stored functions retain callable-path dispatch evidence across
+    ///     reusable compile-time values.
+    /// 82: Literal dispatch plans retain their enclosing pattern-failure
+    ///     expression without increasing the serialized plan size.
+    pub const CACHE_VERSION = 82;
 };
 
 /// Configuration for the Roc cache system.

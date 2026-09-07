@@ -383,6 +383,7 @@ test "NodeStore round trip - Expressions" {
     try expressions.append(gpa, CIR.Expr{
         .e_record = .{
             .fields = CIR.RecordField.Span{ .span = rand_span() },
+            .unsets = CIR.UnsetField.Span{ .span = rand_span() },
             .ext = null,
         },
     });
@@ -438,9 +439,6 @@ test "NodeStore round trip - Expressions" {
     });
     try expressions.append(gpa, CIR.Expr{
         .e_unary_minus = CIR.Expr.UnaryMinus.init(rand_idx(CIR.Expr.Idx)),
-    });
-    try expressions.append(gpa, CIR.Expr{
-        .e_unary_not = CIR.Expr.UnaryNot.init(rand_idx(CIR.Expr.Idx)),
     });
     try expressions.append(gpa, CIR.Expr{
         .e_field_access = .{
@@ -933,7 +931,19 @@ test "NodeStore round trip - Diagnostics" {
     });
 
     try diagnostics.append(gpa, CIR.Diagnostic{
-        .record_default_not_literal = .{
+        .default_not_allowed_in_structural_record = .{
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .default_not_allowed_on_local_type_decl = .{
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .record_default_reference_cycle = .{
             .field_name = rand_ident_idx(),
             .region = rand_region(),
         },
@@ -1222,6 +1232,15 @@ test "NodeStore round trip - Diagnostics" {
     });
 
     try diagnostics.append(gpa, CIR.Diagnostic{
+        .internal_builtin_type = .{
+            .parent_name = rand_ident_idx(),
+            .nested_name = rand_ident_idx(),
+            .kind = .http_header,
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
         .nested_value_not_found = .{
             .parent_name = rand_ident_idx(),
             .nested_name = rand_ident_idx(),
@@ -1259,6 +1278,12 @@ test "NodeStore round trip - Diagnostics" {
 
     try diagnostics.append(gpa, CIR.Diagnostic{
         .infinite_loop_never_exits = .{
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .trailing_try_suffix = .{
             .region = rand_region(),
         },
     });
@@ -1317,6 +1342,21 @@ test "NodeStore round trip - Diagnostics" {
 
     try diagnostics.append(gpa, CIR.Diagnostic{
         .range_op_chained = .{
+            .region = rand_region(),
+        },
+    });
+
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .binding_name_does_not_match_mutability = .{
+            .ident = rand_ident_idx(),
+            .mutability = .mutable,
+            .region = rand_region(),
+        },
+    });
+    try diagnostics.append(gpa, CIR.Diagnostic{
+        .binding_name_does_not_match_mutability = .{
+            .ident = rand_ident_idx(),
+            .mutability = .immutable,
             .region = rand_region(),
         },
     });
@@ -1523,6 +1563,11 @@ test "NodeStore round trip - Pattern" {
         },
     });
     try patterns.append(gpa, CIR.Pattern{
+        .var_assign = .{
+            .ident = rand_ident_idx(),
+        },
+    });
+    try patterns.append(gpa, CIR.Pattern{
         .as = .{
             .pattern = rand_idx(CIR.Pattern.Idx),
             .ident = rand_ident_idx(),
@@ -1645,7 +1690,7 @@ test "NodeStore round trip - Pattern" {
 test "SurfaceOrigin encode/decode round-trips" {
     const SurfaceOrigin = CIR.Expr.SurfaceOrigin;
     // Every unit form.
-    const unit_origins = [_]SurfaceOrigin{ .method_call, .unary_minus, .unary_not };
+    const unit_origins = [_]SurfaceOrigin{ .method_call, .unary_minus };
     for (unit_origins) |origin| {
         try testing.expectEqual(
             origin,

@@ -20,38 +20,26 @@ main = {
 # EXPECTED
 RECURSIVE DISPATCH - nested_try_interpolation_recursive_dispatch.md:8:11:8:47
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity runtime_error)
-		(title "Recursive Dispatch")
-		(region (start 8 11) (end 8 47))
-		(headline
-			(reflow "This")
-			(reflow " ")
-			(annotated code "from_interpolation")
-			(reflow " ")
-			(reflow "dispatch would have to call itself to satisfy its own type."))
-		(document
-			(source-region (file "nested_try_interpolation_recursive_dispatch.md") (start 8 11) (end 8 47) (annotation error) (line-text "    url : Try(Try(Url, [InvalidUrl]), [Outer])"))
-			(line-break)
-			(reflow "The dispatcher type is:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "Try(Url, [InvalidUrl])")
-			(annotation-end)
-			(line-break)
-			(line-break)
-			(annotated emphasis "Hint:")
-			(reflow " ")
-			(reflow "Use a more specific result type, or add an associated function whose")
-			(reflow " ")
-			(annotated code "from_interpolation")
-			(reflow " ")
-			(reflow "implementation does not require the same dispatch on the same type."))))
-~~~
+── ✗ recursive dispatch ──── nested_try_interpolation_recursive_dispatch.md:8:11
+
+The type requirements for from_interpolation cannot be resolved.
+
+url : Try(Try(Url, [InvalidUrl]), [Outer])
+      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The method is being selected for this type:
+
+    Try(Url, [InvalidUrl])
+
+Using from_interpolation for this type requires the same method again, before
+all of its type requirements have been determined.
+
+Recursive function calls are allowed. This error is about a cycle in the type
+requirements, before the function can run.
+
+Hint: Check the argument, result, and additional method requirements of
+from_interpolation to find which requirement leads back to this call.
+
 # TOKENS
 ~~~zig
 UpperIdent,OpColonEqual,OpenSquare,UpperIdent,NoSpaceOpenRound,UpperIdent,CloseRound,CloseSquare,Dot,OpenCurly,
@@ -180,7 +168,7 @@ main = {
 					(e-nominal (nominal "Url")
 						(e-tag (name "Url")
 							(args
-								(e-dispatch-call (method "fold") (constraint-fn-var 314)
+								(e-dispatch-call (method "fold") (constraint-fn-var 322)
 									(receiver
 										(e-lookup-local
 											(p-assign (ident "rest"))))
@@ -194,9 +182,9 @@ main = {
 													(patterns
 														(p-assign (ident "interpolated"))
 														(p-assign (ident "segment")))))
-											(e-dispatch-call (method "concat") (constraint-fn-var 312)
+											(e-dispatch-call (method "concat") (constraint-fn-var 338)
 												(receiver
-													(e-dispatch-call (method "concat") (constraint-fn-var 310)
+													(e-dispatch-call (method "concat") (constraint-fn-var 336)
 														(receiver
 															(e-lookup-local
 																(p-assign (ident "acc"))))

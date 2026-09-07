@@ -27,102 +27,63 @@ result = multi_arg_fn(
 UNUSED VARIABLE - lambda_multi_arg_mismatch.md:3:25:3:27
 UNUSED VARIABLE - lambda_multi_arg_mismatch.md:3:33:3:35
 UNUSED VARIABLE - lambda_multi_arg_mismatch.md:3:41:3:43
-MISSING METHOD - lambda_multi_arg_mismatch.md:13:5:13:9
+MISSING METHOD - lambda_multi_arg_mismatch.md:9:5:9:7
 MISSING METHOD - lambda_multi_arg_mismatch.md:11:5:11:12
 # PROBLEMS
-~~~clojure
-(reports
-	(report
-		(severity warning)
-		(title "Unused Variable")
-		(region (start 3 25) (end 3 27))
-		(headline
-			(reflow "Variable ")
-			(annotated symbol-unqualified "x3")
-			(reflow " is defined here and then never used:"))
-		(document
-			(reflow "If you don't need this variable, prefix it with an underscore like ")
-			(annotated symbol-unqualified "_x3")
-			(reflow " to suppress this warning.")
-			(line-break)
-			(source-region (file "lambda_multi_arg_mismatch.md") (start 3 25) (end 3 27) (annotation error) (line-text "multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| "))))
-	(report
-		(severity warning)
-		(title "Unused Variable")
-		(region (start 3 33) (end 3 35))
-		(headline
-			(reflow "Variable ")
-			(annotated symbol-unqualified "x5")
-			(reflow " is defined here and then never used:"))
-		(document
-			(reflow "If you don't need this variable, prefix it with an underscore like ")
-			(annotated symbol-unqualified "_x5")
-			(reflow " to suppress this warning.")
-			(line-break)
-			(source-region (file "lambda_multi_arg_mismatch.md") (start 3 33) (end 3 35) (annotation error) (line-text "multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| "))))
-	(report
-		(severity warning)
-		(title "Unused Variable")
-		(region (start 3 41) (end 3 43))
-		(headline
-			(reflow "Variable ")
-			(annotated symbol-unqualified "x7")
-			(reflow " is defined here and then never used:"))
-		(document
-			(reflow "If you don't need this variable, prefix it with an underscore like ")
-			(annotated symbol-unqualified "_x7")
-			(reflow " to suppress this warning.")
-			(line-break)
-			(source-region (file "lambda_multi_arg_mismatch.md") (start 3 41) (end 3 43) (annotation error) (line-text "multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| "))))
-	(report
-		(severity runtime_error)
-		(title "Missing Method")
-		(region (start 13 5) (end 13 9))
-		(headline
-			(reflow "This")
-			(reflow " ")
-			(annotated code "from_numeral")
-			(reflow " ")
-			(reflow "method is being called on a value whose type doesn't have that method."))
-		(document
-			(source-region (file "lambda_multi_arg_mismatch.md") (start 13 5) (end 13 9) (annotation error) (line-text "    3.14,      # x5: F64 (should be 'a' = U64) - MISMATCH"))
-			(line-break)
-			(reflow "The value's type, which does not have a method named ")
-			(annotated code "from_numeral")
-			(reflow ",")
-			(reflow " ")
-			(reflow "is:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "[True, ..]")
-			(annotation-end)))
-	(report
-		(severity runtime_error)
-		(title "Missing Method")
-		(region (start 11 5) (end 11 12))
-		(headline
-			(reflow "This")
-			(reflow " ")
-			(annotated code "from_quote")
-			(reflow " ")
-			(reflow "method is being called on a value whose type doesn't have that method."))
-		(document
-			(source-region (file "lambda_multi_arg_mismatch.md") (start 11 5) (end 11 12) (annotation error) (line-text "    \"world\",   # x3: Str (should be 'a' = U64) - MISMATCH  "))
-			(line-break)
-			(reflow "The value's type, which does not have a method named ")
-			(annotated code "from_quote")
-			(reflow ",")
-			(reflow " ")
-			(reflow "is:")
-			(line-break)
-			(line-break)
-			(annotation-start code-block)
-			(indent 1)
-			(text "[True, ..]")
-			(annotation-end))))
-~~~
+── ● unused variable ───────────────────────── lambda_multi_arg_mismatch.md:3:25
+
+Variable x3 is defined here and then never used:
+
+multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| 
+                        ^^
+
+If you don't need this variable, prefix it with an underscore like _x3 to
+suppress this warning.
+
+── ● unused variable ───────────────────────── lambda_multi_arg_mismatch.md:3:33
+
+Variable x5 is defined here and then never used:
+
+multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| 
+                                ^^
+
+If you don't need this variable, prefix it with an underscore like _x5 to
+suppress this warning.
+
+── ● unused variable ───────────────────────── lambda_multi_arg_mismatch.md:3:41
+
+Variable x7 is defined here and then never used:
+
+multi_arg_fn = |x1, x2, x3, x4, x5, x6, x7, x8| 
+                                        ^^
+
+If you don't need this variable, prefix it with an underscore like _x7 to
+suppress this warning.
+
+── ✗ missing method ─────────────────────────── lambda_multi_arg_mismatch.md:9:5
+
+This from_numeral method is being called on a value whose type doesn't have
+that method.
+
+42,        # x1: U64 (type 'a')
+^^
+
+The value's type, which does not have a method named from_numeral, is:
+
+    [True, ..]
+
+── ✗ missing method ────────────────────────── lambda_multi_arg_mismatch.md:11:5
+
+This from_quote method is being called on a value whose type doesn't have that
+method.
+
+"world",   # x3: Str (should be 'a' = U64) - MISMATCH  
+^^^^^^^
+
+The value's type, which does not have a method named from_quote, is:
+
+    [True, ..]
+
 # TOKENS
 ~~~zig
 LowerIdent,OpColon,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,OpArrow,OpenRound,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,Comma,LowerIdent,CloseRound,
@@ -262,7 +223,7 @@ result = multi_arg_fn(
 					(ty-rigid-var-lookup (ty-rigid-var (name "e")))))))
 	(d-let
 		(p-assign (ident "result"))
-		(e-call (constraint-fn-var 335)
+		(e-call (constraint-fn-var 338)
 			(e-lookup-local
 				(p-assign (ident "multi_arg_fn")))
 			(e-runtime-error (tag "erroneous_value_expr"))
@@ -270,7 +231,7 @@ result = multi_arg_fn(
 				(e-literal (string "hello")))
 			(e-runtime-error (tag "erroneous_value_expr"))
 			(e-dec-small (numerator "15") (denominator-power-of-ten "1") (value "1.5"))
-			(e-dec-small (numerator "314") (denominator-power-of-ten "2") (value "3.14"))
+			(e-runtime-error (tag "erroneous_value_expr"))
 			(e-list
 				(elems
 					(e-num (value "1"))

@@ -398,7 +398,8 @@ Exactly what information goes in which headers will be discussed below.
 
 ## Package Modules
 
-Packages are collections of types that can depend on other packages.
+Packages are collections of modules that can depend on other packages and on
+one platform.
 
 A _package module_ provides types to be shared with packages, applications and platforms. The module header specifies which types are exposed, and also includes package aliases for importing other packages:
 
@@ -409,6 +410,28 @@ package [
     Decoder,
 ] { json: "..." }
 ```
+
+A platform-specific package marks its platform dependency with the same
+`platform` keyword used by an application:
+
+```roc
+package [FxHttp] {
+    pf: platform "https://example.com/platform/1.0.0/content-hash.tar.zst",
+    json: "https://example.com/json/2.0.0/content-hash.tar.zst",
+}
+
+import pf.Http
+```
+
+The package can use the platform's complete exposed API, including its types,
+functions, and hosted effects. It does not provide implementations for the
+platform's `requires` section; the application remains responsible for those.
+
+When an application uses a platform-specific package, every platform
+declaration in the dependency graph must identify exactly the same platform.
+For URL dependencies this includes the declared version and content hash;
+ordinary compatible-version upgrades do not apply to platform selection.
+Local declarations must resolve to the same platform root file.
 
 ### Package Shorthands
 
@@ -482,12 +505,14 @@ targets : {
     inputs_dir: "targets/",
     x64linux: { inputs: ["crt1.o", "host.o", app] },
     arm64mac: { inputs: ["host.o", app] },
-    wasm32: { inputs: ["host.wasm", app], output: Shared },
+    wasm32: { inputs: ["host.wasm", app], output: Shared, exports: ["run"] },
 }
 ```
 
 - `inputs_dir`: The directory containing target-specific files within a package `.tar.zst` bundle.
 - Each target entry lists its link `inputs` and an optional `output` kind.
+- Linked WebAssembly targets must list their final host-visible functions in
+  `exports`. Use `exports: []` to export no functions explicitly.
 
 The `output` field declares the artifact kind the target produces:
 
@@ -531,6 +556,10 @@ app [main!] {
     json: "../json/main.roc"
 }
 ```
+
+Packages used by the app may also declare a platform. Those declarations must
+exactly match the app's selected platform. The app is still the only module
+that supplies the values required by the platform.
 
 ### Pinning a Roc version
 
@@ -599,6 +628,26 @@ main! = |_args| echo!("Hello, World!")
 The `main!` function the Echo Platform receives will get command-line arguments, if applicable,
 as a `List(Str)`. (In WebAssembly, these won't be _command-line_ arguments, but rather arbitrary
 arguments from the outside world.)
+
+An application that needs package dependencies can still use the Echo Platform, by writing an
+`app` header that names no platform:
+
+```roc
+app [main!] {
+    unicode: "https://github.com/roc-lang/unicode/releases/download/4.0.0/3DGC3M4b2pxaRLg4i8cmxWkm2E2WbCPCLntQzf2mkbUV.tar.zst",
+}
+
+import unicode.Grapheme
+
+main! = |_| {
+    echo!(Grapheme.owned("café") |> Str.inspect)
+    Ok({})
+}
+```
+
+Such an application gets the Echo Platform and its unqualified `echo!` exactly as a headerless
+one does; the header is there only to declare the packages it imports from. Writing the header
+without any packages (`app [main!] {}`) is the same thing as writing no header at all.
 
 The Echo Platform is intentionally limited to this one effectful function because that's all
 that is needed to teach a wide variety of beginner Roc concepts—expressions, defining and calling functions,

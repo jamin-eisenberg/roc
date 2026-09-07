@@ -216,6 +216,11 @@ const Stream = enum {
 const OutputNeedle = struct {
     stream: Stream,
     text: []const u8,
+    /// Set for prose that the report renderer word-wraps. The wrap point moves
+    /// with the length of the absolute paths a report embeds, so a phrase that
+    /// sits on one line locally can straddle a newline on another machine. When
+    /// set, each space in `text` matches any run of whitespace in the output.
+    wrapped: bool = false,
 };
 
 const OutputOccurrence = struct {
@@ -381,7 +386,9 @@ const CustomCase = enum {
     default_platform_build_x64openbsd_rejected,
     default_platform_build_wasm32,
     default_platform_wasm32_archive_reproducible,
-    issue_10733_wasm_boxy_dev_cache,
+    issue_10733_wasm_boxy_dev_sealed_object,
+    issue_10827_private_compiler_support,
+    issue_11134_wasm_post_llvm_pipeline,
     macos_output_basename_reproducible,
     default_platform_crash_x64musl,
     default_platform_crash_arm64musl,
@@ -422,11 +429,13 @@ const CustomCase = enum {
     verbose_and_non_verbose_failure_format_match,
     build_warning,
     issue_9392_deterministic_no_cache,
+    issue_10987_optimized_affine_cipher,
     issue_10022_deep_tail_recursion,
     issue_10015_url_random_test_size,
     docs_main_platform_url_package,
     build_issue_9435_hosted_nominal_return,
     bundle_complex_package,
+    bundle_entrypoint_subdirectory,
     install_run_roundtrip,
     install_hash_mismatch,
     install_glue_roundtrip,
@@ -452,6 +461,8 @@ const CustomCase = enum {
     glue_try_box_model_unknown_payload,
     glue_unresolved_by_value_errors,
     glue_c_tests,
+    roc_test_skips_url_dependency_expects,
+    roc_test_caches_local_dependency_expects,
 };
 
 const Skip = union(enum) {
@@ -822,7 +833,16 @@ const all_syntax_expected_stderr =
     \\
 ;
 
+const issue_11130_expected_stdout = "first\nsecond\nold:0\nnew:0\nold\nold\nunused\n";
+const issue_11130_speed_expected_stdout = if (builtin.os.tag == .windows)
+    "first\r\nsecond\r\nold:0\r\nnew:0\r\nold\r\nold\r\nunused\r\n"
+else
+    issue_11130_expected_stdout;
+
 const echo_cases = [_]CliCase{
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = issue_11130_expected_stdout } } },
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = issue_11130_expected_stdout } } },
+    .{ .id = 0, .suite = .echo, .name = "issue 11130: record versions and eager effects (speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/echo/issue_11130_record_versions.roc", .stdout_exact = issue_11130_speed_expected_stdout } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: hello (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/hello.roc", .stdout_exact = "Hello, World!" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: hello (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/hello.roc", .stdout_exact = "Hello, World!" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: consecutive raw writes (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/multi.roc", .stdout_exact = "Hello, World!" } } },
@@ -838,6 +858,16 @@ const echo_cases = [_]CliCase{
     .{ .id = 0, .suite = .echo, .name = "echo platform: list concat with refcounted elements issue 9316 (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/issue_9316.roc", .stdout_exact = "[\"BAZ\", \"DUCK\", \"XYZ\", \"ABC\"]" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: cmd-test OOM repro compiles and runs (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/repro_oom_cmd_test.roc", .stdout_exact = "" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: cmd-test OOM repro compiles and runs (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/repro_oom_cmd_test.roc", .stdout_exact = "" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: crash reports its message and exits (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/crash.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Roc application crashed with this message:" }, .{ .stream = .stderr, .text = "boom" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack memory" }, .{ .stream = .stderr, .text = "SIGSEGV" } } } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: crash reports its message and exits (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/crash.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Roc application crashed with this message:" }, .{ .stream = .stderr, .text = "boom" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack memory" }, .{ .stream = .stderr, .text = "SIGSEGV" } } } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: recursion that overflows the stack reports it and exits (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/echo/stack_overflow.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "overflowed its stack memory" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "Segmentation fault" } } } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: recursion that overflows the stack reports it and exits (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/echo/stack_overflow.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "overflowed its stack memory" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "Segmentation fault" } } } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: app header with no platform (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/platformless_app.roc", .stdout_exact = "Hello, World!" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: app header with no platform (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/platformless_app.roc", .stdout_exact = "Hello, World!" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: app header with no platform depends on a package (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/platformless_app_with_package.roc", .stdout_exact = "Hello, World!" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: app header with no platform depends on a package (dev backend)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/platformless_app_with_package.roc", .stdout_exact = "Hello, World!" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: roc check accepts an app header with no platform", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/echo/platformless_app_with_package.roc", .exit = .success } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: roc test runs an app header with no platform", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/echo/platformless_app_with_package.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: no main is not a default app (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/no_main.roc", .exit = .failure } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: no main is not a default app (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--opt=dev"}, .roc_file = "test/echo/no_main.roc", .exit = .failure } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: all_syntax_test.roc prints expected output (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/echo/all_syntax_test.roc", .stdout_exact = all_syntax_expected_stdout, .stderr_exact = all_syntax_expected_stderr } } },
@@ -850,6 +880,10 @@ const echo_cases = [_]CliCase{
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy open-union argument descriptor describes the value (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/boxy_open_union_arg.roc", .stdout_exact = "other color\nred\ngreen\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy Dec-defaulted numeric literals use the scaled encoding (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/boxy_dec_literals.roc", .stdout_exact = "10.0\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy record destructure after erased round-trip uses field layouts (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/boxy_record_destructure.roc", .stdout_exact = "Bob 25 99\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: top-level destructure binds callable and forward-referenced names (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/top_level_destructure.roc", .stdout_exact = "Hello, Ada!\nHello, Grace!\n42.0\nhey!!\no/ Linus\nsame 3.0\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: top-level destructure binds callable and forward-referenced names (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--specialize=no"}, .roc_file = "test/echo/top_level_destructure.roc", .stdout_exact = "Hello, Ada!\nHello, Grace!\n42.0\nhey!!\no/ Linus\nsame 3.0\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: names bound by another module's top-level destructures import like plain names (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/top_level_destructure_import.roc", .exit = .{ .code = 2 }, .stdout_exact = "Hi, Ada!\n42.0\nHi, Bo!\n" } } },
+    .{ .id = 0, .suite = .echo, .name = "echo platform: names bound by another module's top-level destructures import like plain names (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--specialize=no"}, .roc_file = "test/echo/top_level_destructure_import.roc", .exit = .{ .code = 2 }, .stdout_exact = "Hi, Ada!\n42.0\nHi, Bo!\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy list keeps reserved capacity across erased boundary (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/boxy_list_capacity.roc", .stdout_exact = "1.0,2.0,3.0,4.0,5.0\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy list keeps reserved capacity across erased boundary (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{"--specialize=no"}, .roc_file = "test/echo/boxy_list_capacity.roc", .stdout_exact = "1.0,2.0,3.0,4.0,5.0\n" } } },
     .{ .id = 0, .suite = .echo, .name = "echo platform: boxy dynamic tag with ZST payload materializes to concrete union (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--specialize=no" }, .roc_file = "test/echo/boxy_zst_tag_materialize.roc", .stdout_exact = "some unit\nnone\n" } } },
@@ -954,6 +988,14 @@ const invalid_llvm_debug_info_needles = [_]OutputNeedle{
 };
 
 const subcommand_cases = [_]CliCase{
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality captures local values (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityLocal.roc", .contains = &.{.{ .stream = .stdout, .text = "All (4) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality captures local values (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityLocal.roc", .contains = &.{.{ .stream = .stdout, .text = "All (4) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality handles mutual recursion (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityMutual.roc", .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality handles mutual recursion (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityMutual.roc", .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "All (20) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "All (20) tests passed" }} } } },
     // One descriptor template descends through the same generic nominal at more
     // than one argument set: a backing shape is written once against its
     // declaration's formals and reached once per instantiation, so each descent
@@ -985,6 +1027,8 @@ const subcommand_cases = [_]CliCase{
     // that resolve to one source module must contribute one type-check
     // environment, not one per import name.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10705: platform exposes two nested types from one module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10705_two_nested_platform_exposes/platform/main.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "exposed but not defined" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10704: erroneous checked type in declaration reports without postcheck panic", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_10704_erroneous_checked_type_statement.roc", .exit = .not_panic, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "reassignment type error under a platform target reports without postcheck panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/reassign_type_error_platform_root/app.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10705: app imports two nested types from one platform module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10705_two_nested_platform_exposes/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "module not found" }, .{ .stream = .stderr, .text = "type not exposed" }, .{ .stream = .stderr, .text = "duplicate module name" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10728: value cycle through from_numeral is a circular value definition", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10728_from_numeral_value_cycle.roc", .exit = .{ .code = 1 }, .contains = &.{.{ .stream = .stderr, .text = "circular value definition" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check reports the body error of an unannotated associated method that is dispatched on", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/DispatchOnUnannotatedErrorBodyMethod.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "does not exist" }, .{ .stream = .stderr, .text = "Bool.true" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "publication could not resolve a checked dispatch target" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1016,6 +1060,9 @@ const subcommand_cases = [_]CliCase{
     // its target through an import, so no entry can reach the root and the
     // declaration is always missing from the section.
     .{ .id = 0, .suite = .subcommands, .name = "platform root hosted declaration reports without panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--target=x64musl" }, .roc_file = "test/hosted-section-errors/platform_root_hosted_declaration/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "helper" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "did not say why" }, .{ .stream = .stderr, .text = "invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "package platform target must use the platform marker", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_dependency/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid package dependency" }, .{ .stream = .stderr, .text = "Mark this dependency with the `platform` keyword.", .wrapped = true } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "package effect boundary: a package cannot gain builtin privileges by shipping a Builtin module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/builtin_module/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "reference has no value" }, .{ .stream = .stderr, .text = "declaration has no value" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "package header accepts an exact platform dependency", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_keyword_dependency/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
     // A platform's own hosted declaration is named in its hosted section without
     // a module, since the platform cannot import itself.
     .{ .id = 0, .suite = .subcommands, .name = "platform root hosted declaration binds through an unqualified hosted entry", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/hosted-section-errors/platform_root_hosted_entry/platform/main.roc", .not_contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1023,6 +1070,11 @@ const subcommand_cases = [_]CliCase{
     // pointing at an implemented function should explain that implementation.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10423: hosted entry reports implemented function as not hosted", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/hosted-section-errors/issue_10423_hosted_implementation/main.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "Pages.list" }, .{ .stream = .stderr, .text = "has an implementation" } }, .not_contains = &.{.{ .stream = .stderr, .text = "no exposed module declares a hosted function with that name" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check accepts a valid hosted section", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/fx/platform/main.roc", .not_contains = &.{.{ .stream = .stderr, .text = "invalid hosted section" }} } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10850: a platform root
+    // that declares its provided entrypoint twice reports the duplicate through
+    // checking's diagnostics instead of publishing a hosted procedure whose def
+    // has no checked template.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10850: duplicate platform entrypoint declaration reports without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10850_duplicate_platform_entrypoint_annotation.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "duplicate definition" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "hosted procedure def has no checked template" }, .{ .stream = .stderr, .text = "checked artifact invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // A hosted declaration the platform header never bound has no linker symbol,
     // so building one reports the invalid hosted section instead of lowering a
     // host boundary that cannot link.
@@ -1036,11 +1088,16 @@ const subcommand_cases = [_]CliCase{
     // Repro for https://github.com/roc-lang/roc/issues/10520: callable payloads
     // inside a concrete recursive parameterized nominal check cleanly.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10520: recursive nominal callable payloads check cleanly", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10520_recursive_nominal_tag_callable_check.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc check reports one diagnostic for a recursive record default", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/recursive_record_default.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "recursive default value" }, .{ .stream = .stderr, .text = "1 error and 0 warnings" } }, .occurrences = &.{.{ .stream = .stderr, .text = "recursive default value", .count = 1 }}, .not_contains = &.{ .{ .stream = .stderr, .text = "COMPILE TIME CRASH" }, .{ .stream = .stderr, .text = "overflowed its stack" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc check reports only cycle diagnostics for mutually recursive record defaults", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/mutually_recursive_record_defaults.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "recursive default value" }, .{ .stream = .stderr, .text = "2 errors and 0 warnings" } }, .occurrences = &.{.{ .stream = .stderr, .text = "recursive default value", .count = 2 }}, .not_contains = &.{ .{ .stream = .stderr, .text = "COMPILE TIME CRASH" }, .{ .stream = .stderr, .text = "overflowed its stack" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check reports one cycle diagnostic for a recursive record default", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/recursive_record_default.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "default value cycle" }, .{ .stream = .stderr, .text = "2 errors and 0 warnings" } }, .occurrences = &.{.{ .stream = .stderr, .text = "default value cycle", .count = 1 }}, .not_contains = &.{ .{ .stream = .stderr, .text = "COMPILE TIME CRASH" }, .{ .stream = .stderr, .text = "overflowed its stack" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check reports one cycle diagnostic for mutually recursive record defaults", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/mutually_recursive_record_defaults.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "default value cycle" }, .{ .stream = .stderr, .text = "2 errors and 0 warnings" } }, .occurrences = &.{.{ .stream = .stderr, .text = "default value cycle", .count = 1 }}, .not_contains = &.{ .{ .stream = .stderr, .text = "COMPILE TIME CRASH" }, .{ .stream = .stderr, .text = "overflowed its stack" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10560: complete checked
     // interface relations must reach a generated iterator before Lambda Solved.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10560: generated iterator preserves nested named callable types", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10560_generated_iterator_evidence.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" } } } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10999: a numeric method
+    // requirement reached only through a constraint-callable argument is
+    // published pathless and defaults to `Dec`, then conflicts with Monotype's
+    // concrete `U64` specialization of the same dispatch callable.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10999: pathless constraint-callable numeric requirement does not reach Monotype as Dec", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue10999PathlessDefault.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "instantiation unified two different primitive types" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10788: a nominal
     // constructor that re-wraps an already-nominal record update is rejected by
     // the backing relation, and that rejection must not travel into Monotype as
@@ -1058,6 +1115,9 @@ const subcommand_cases = [_]CliCase{
     // and once per reference, so no reference reaches post-check lowering as a
     // procedure use whose request node is not function-shaped.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10809: referencing a declaration with no value reports every reference", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10809_annotation_only_value_reference.roc", .exit = .failure, .occurrences = &.{.{ .stream = .stderr, .text = "there is no value here to use", .count = 4 }}, .contains = &.{.{ .stream = .stderr, .text = "4 errors and 3 warnings" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation function read had a non-function node" }, .{ .stream = .stderr, .text = "instantiation unified a primitive type with a non-primitive type" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10868: malformed conditional dispatch reports diagnostics without panicking", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10868_constraint_dispatch_callable.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "name not in scope" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "constraint-resolved dispatch callable was not the scheme-pristine constraint fn type" }, .{ .stream = .stderr, .text = "checked artifact invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10864: numeral literal on a nominal whose from_numeral annotation is undeclared reports without panicking", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10864_from_numeral_undeclared_annotation/Foo.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "undeclared type" }, .{ .stream = .stderr, .text = "I68" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "checked from_numeral expression reached Monotype without a dispatch plan" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10816: annotation-only function tuple argument does not reach Monotype", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10816_tuple_non_tuple_instantiation.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "declaration has no value" }, .{ .stream = .stderr, .text = "reference has no value" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation unified a tuple with a non-tuple type" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10809: the associated
     // form of the same fact, read both as a qualified value and through method
     // dispatch, which resolve the declaration by different paths.
@@ -1066,10 +1126,32 @@ const subcommand_cases = [_]CliCase{
     // reports the reference the same way, so a declaration another module never
     // gave a value cannot cross the module boundary as a callable.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10809: importing a declaration with no value reports the reference", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10809_annotation_only_import/Main.roc", .exit = .failure, .occurrences = &.{.{ .stream = .stderr, .text = "there is no value here to use", .count = 1 }}, .contains = &.{.{ .stream = .stderr, .text = "1 error and 1 warning" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation function read had a non-function node" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10824: rank-1 platform
+    // inference must retain the complete generated encoder contract after its row closes.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10824: inferred platform model with custom codec checks cleanly", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10824_generated_codec_contract/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "checked generated codec contract was missing its subject method call" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10871: platform model record update keeps its open row", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10871_platform_model_record_update/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation widened a closed record" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10956: the extension
+    // variable of an open record annotation can also carry a where-clause
+    // method requirement, so publishing that function type must keep the
+    // constrained row open instead of assigning its contextual row default.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10956: constrained open record row publishes without a default", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10956_open_record_ext_where_clause.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "checked row default was assigned to a constrained type variable" }, .{ .stream = .stderr, .text = "checked artifact invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10832: the list element
+    // contains an erased Box allocation even though its unresolved closure
+    // layout is otherwise non-refcounted, so list allocation and drop must use
+    // the same refcounted-element prefix.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10832: list drop preserves the allocation prefix for a nested erased Box", .backend = .dev, .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_10832_nested_erased_box_list.roc", .exit = .success, .stdout_exact = "small\n", .not_contains = &.{ .{ .stream = .stderr, .text = "deallocated unknown pointer" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10303: mutually
     // recursive function-containing values must finish Monotype lowering.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10303: mutually recursive function values check cleanly", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10303_recursive_function_values.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10303: delayed recursive Parser values test cleanly", .timeout_ms = 10_000, .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_9889_roc_parser/Issue10303Sgf.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10912: optimized imported SGF grammar parses an empty game tree", .backend = .speed, .timeout_ms = 600_000, .body = .{ .command = .{ .args = &.{ "test", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/issue_9889_roc_parser/Issue10912OptimizedSgf.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stdout, .text = "failed" }, .{ .stream = .stderr, .text = "rewritten fn gained a capture its source did not declare" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10977: a structural
+    // parser obligation must be checked after later uses finish lifting nested
+    // values to nominal types.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10977: decoded structural tag lifted to nominal reports missing parser_for", .body = .{ .command = .{ .args = &.{ "build", "--no-cache" }, .roc_file = "test/postcheck/issue_10977_decoded_structural_tag_lifted_to_nominal/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "parser_for" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "checked method registry is missing custom parser_for target" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // The codec relation is part of Parse.parse_fuzz's scheme and must survive
+    // its checked-module boundary before the app applies Bar's nominal lift.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10977: imported decoder scheme preserves parser_for requirement", .body = .{ .command = .{ .args = &.{ "build", "--no-cache" }, .roc_file = "test/postcheck/issue_10977_decoded_structural_tag_lifted_to_nominal/app_imported_parse.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "parser_for" }, .{ .stream = .stderr, .text = "Foo(Str)" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "checked method registry is missing custom parser_for target" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10162: compiler-derived
     // codec method markers in a platform module remain structural methods.
     .{ .id = 0, .suite = .subcommands, .name = "issue 10162: platform derived codec methods are not hosted functions", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10162_platform_derived_codec/platform/main.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "effectful function name" } } } } },
@@ -1085,7 +1167,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 9826: roc check rejects open rows in provides signatures", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_9826_open_host_boundary/provides/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "host boundary requires closed rows" }, .{ .stream = .stderr, .text = "open record or tag-union rows" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects nested optional fields in hosted signatures", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/optional_field_host_boundary/hosted/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "host boundary forbids optional fields" }, .{ .stream = .stderr, .text = "`?:` record fields." } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects nested optional fields in provides signatures", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/optional_field_host_boundary/provides/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "host boundary forbids optional fields" }, .{ .stream = .stderr, .text = "`?:` record fields." } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects host result widened by a defaulted field", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/optional_field_host_boundary/absorbed_default/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects a defaulted nominal record at a structural host requirement", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/optional_field_host_boundary/absorbed_default/app.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check succeeds on valid file", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/simple_success.roc", .not_contains = &.{ .{ .stream = .stderr, .text = "Failed to check" }, .{ .stream = .stderr, .text = "error" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10175: file-imported Str split during compile-time condition does not double free", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10175_file_import_str_uaf.roc", .exit = .{ .code = 2 }, .contains = &.{.{ .stream = .stderr, .text = "unconditional condition" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "Use-after-free" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10204: imported interpolation metadata defaults to Str without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10204_imported_interpolation_metadata/Main.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "builtin Str interpolation constraint had no metadata" }, .{ .stream = .stderr, .text = "type checker invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1102,12 +1184,14 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 10424: record graph constructor child checks without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10424_record_graph_constructor_child.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "record graph constructor child differed" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10416: annotated list record mismatch reports without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10416_annotated_list_record_mismatch.roc", .exit = .failure, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10483: top-level destructure binder is published", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10483_top_level_destructure.roc", .exit = .{ .code = 2 }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "function destructured from a computed value used at two types is a type mismatch, not a postcheck panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/top_level_destructure_use_type_mismatch.roc", .exit = .{ .code = 1 }, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10413: instantiation widening a closed tag union checks without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10413_instantiation_widened_closed_tag.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "instantiation widened a closed tag union" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10398: empty tag union unification checks without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10398_empty_tag_union_incompatible.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "instantiation unified an empty tag union" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10397: erroneous checked type instantiation checks without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10397_erroneous_checked_type_monotype.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10646: roc build reports undefined record-update override without postcheck panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--opt=dev" }, .roc_file = "test/cli/issue_10646_record_update_undefined_call.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "name not in scope" }, .{ .stream = .stderr, .text = "missing_function" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10699: roc test reports a missing record field without postcheck panic", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10699_missing_field_access.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "type mismatch" }, .{ .stream = .stderr, .text = "gamma" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10689: roc build reports a mismatched open error union without postcheck panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--opt=dev" }, .roc_file = "test/cli/issue_10689_open_error_union_annotation_mismatch.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "type mismatch" }, .{ .stream = .stderr, .text = "Try(Str, [Missing, ..])" }, .{ .stream = .stderr, .text = "Try(Str, [Bad, ..])" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation unified a tag union with a non-tag-union type" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11098: roc build reports an invalid numeral in an inferred lambda without panicking", .backend = .dev, .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--opt=dev" }, .roc_file = "test/cli/issue_11098_invalid_lambda_numeral.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "invalid number" }, .{ .stream = .stderr, .text = "U8" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10402: erroneous checked type in expression statement runs without panic", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_10402_erroneous_checked_type_uninhabited_statement.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "erroneous checked type reached Monotype instantiation" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10411: mismatched Try error payload reports without postcheck panic", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_10411_try_error_payload_mismatch.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "type mismatch" }, .{ .stream = .stderr, .text = "ErrTag(Str)" }, .{ .stream = .stderr, .text = "ErrTag(U64)" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "instantiation unified two different primitive types" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10396: primitive/non-primitive unification checks without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_10396_primitive_non_primitive_unification.roc", .exit = .failure, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "instantiation unified a primitive type" } } } } },
@@ -1147,6 +1231,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "I128/U128 to Dec conversion runs on interpreter", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/Int128ToDecTry.roc", .exit = .success } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10022: deep tail recursion with a List runs on LLVM speed backend", .backend = .speed, .body = .{ .custom = .issue_10022_deep_tail_recursion } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10529: open Try ? chain builds in dev within the perf guard", .backend = .dev, .timeout_ms = 30_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue10529OpenTryChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11072: hooks chain interns its interchangeable closure layouts once and builds in dev within the perf guard", .backend = .dev, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue11072HooksChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "spec-constr re-cloning keeps the inline scope chain bounded", .backend = .speed, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/SpecConstrInlineScopeRebaseGrowth.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack memory" }, .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10015: macOS roc test imported package expect passes on LLVM size backend", .backend = .size, .body = .{ .custom = .issue_10015_url_random_test_size } },
     // Repro for https://github.com/roc-lang/roc/issues/10620: optimized
@@ -1157,10 +1242,18 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 9897: nested callback capture count matches target", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/Issue9897NestedCaptureCount.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "function reference capture count differs from its target" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test finalizes nested closure captures by identity", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/CaptureOrderFinalization.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10698: closure captures a while-loop var through its loop parameter", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue10698WhileVarCapture.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (2) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10693: Boxy list concat uses the erased closure element descriptor", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/Issue10693ClosureTuplesInList.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10716: opaque backing relift in nested function preserves nominal identity", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue10716OpaqueBackingRelift.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10730: expects inside associated blocks run as tests", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue10730AssociatedBlockExpects.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (5) tests passed" }}, .not_contains = &.{ .{ .stream = .stdout, .text = "failed" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10730: a failing expect inside an associated block fails roc test", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue10730AssociatedBlockExpectFails.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Ran 2 tests" }, .{ .stream = .stderr, .text = "1 passed" }, .{ .stream = .stderr, .text = "1 failed" }, .{ .stream = .stderr, .text = "Issue10730AssociatedBlockExpectFails.roc:5:2" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11091: expects inside a function body are reported and counted as tests", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue11091InlineExpectsAreTests.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Ran 3 tests" }, .{ .stream = .stderr, .text = "0 passed" }, .{ .stream = .stderr, .text = "3 failed" }, .{ .stream = .stderr, .text = "Issue11091InlineExpectsAreTests.roc:10:" }, .{ .stream = .stderr, .text = "Issue11091InlineExpectsAreTests.roc:11:" }, .{ .stream = .stderr, .text = "Issue11091InlineExpectsAreTests.roc:15:" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11091: repeated inline expects aggregate by source site", .body = .{ .command = .{ .args = &.{ "test", "--verbose", "--no-cache" }, .roc_file = "test/cli/Issue11091RepeatedInlineExpects.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Ran 3 tests" }, .{ .stream = .stderr, .text = "1 passed" }, .{ .stream = .stderr, .text = "2 failed" }, .{ .stream = .stderr, .text = "Issue11091RepeatedInlineExpects.roc:2:" }, .{ .stream = .stderr, .text = "This test ran 2 times: 1 passed, 1 failed" }, .{ .stream = .stdout, .text = "Issue11091RepeatedInlineExpects.roc:3" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "Expect failed: expect failed" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11091: an expect nested in a test root is counted once", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue11091NestedInlineExpect.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Ran 2 tests" }, .{ .stream = .stderr, .text = "1 passed" }, .{ .stream = .stderr, .text = "1 failed" }, .{ .stream = .stderr, .text = "Issue11091NestedInlineExpect.roc:2:" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "Ran 3 tests" }, .{ .stream = .stderr, .text = "Expect failed: expect failed" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11091: imported inline expects report and aggregate by declaring source", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_11091_imported_inline_expect/Main.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stderr, .text = "Ran 3 tests" }, .{ .stream = .stderr, .text = "2 passed" }, .{ .stream = .stderr, .text = "1 failed" }, .{ .stream = .stderr, .text = "Helper.roc:4:" }, .{ .stream = .stderr, .text = "expect x == 2" }, .{ .stream = .stderr, .text = "This test ran 2 times: 0 passed, 2 failed" } }, .occurrences = &.{.{ .stream = .stderr, .text = "Helper.roc:4:", .count = 1 }}, .not_contains = &.{ .{ .stream = .stderr, .text = "Expect failed: expect failed" }, .{ .stream = .stderr, .text = "Main.roc:4:" }, .{ .stream = .stderr, .text = "Ran 4 tests" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11091: an unexecuted inline expect is not counted", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/Issue11091UnexecutedInlineExpect.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stdout, .text = "All (2) tests passed" }, .{ .stream = .stderr, .text = "Issue11091UnexecutedInlineExpect.roc:3:" }, .{ .stream = .stderr, .text = "Expect failed: expect failed" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "transparent alias locals satisfy alias and backing requests", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/TransparentAliasLocalRequests.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "related local and request had no exact nominal backing path" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test skips a downloaded dependency's expects", .body = .{ .custom = .roc_test_skips_url_dependency_expects } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test runs a path dependency's expects and caches them by source", .body = .{ .custom = .roc_test_caches_local_dependency_expects } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test runs an app's expects without its platform entrypoint", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/AppWithoutEntrypoint.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "exposed but not defined" }, .{ .stream = .stderr, .text = "missing platform required definition" }, .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check still requires the platform entrypoint roc test does not", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/AppWithoutEntrypoint.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "exposed but not defined" }, .{ .stream = .stderr, .text = "missing platform required definition" }, .{ .stream = .stderr, .text = "main!" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test lowers opaque generic Try function wrappers", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/OpaqueTryFunction.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1185,7 +1278,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "nominal record update remains a known nominal value in optimized build", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/record_update_nominal_result.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "structural constructor value was typed at a nominal type without its nominal wrapper" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 9815: roc check reports discarded Iter.collect polymorphic output without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_9815_iter_collect_polymorphic_where.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "from_iter" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "checked artifact invariant violated" }, .{ .stream = .stderr, .text = "unresolved `where`-clause method dispatch on a polymorphic value" }, .{ .stream = .stderr, .text = "dispatch plan had no method owner" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 9815: roc run turns discarded user where-clause error into ordinary crash", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_9815_discarded_user_where_clause_output.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "from_thing" }, .{ .stream = .stderr, .text = "Roc application crashed with this message:" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "unresolved `where`-clause method dispatch on a polymorphic value" }, .{ .stream = .stderr, .text = "dispatch plan had no method owner" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "issue 10430: roc test reports unannotated Bool not missing method without postcheck panic", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10430_unannotated_bool_not.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "not" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10430: roc test infers Bool for logical negation", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10430_unannotated_bool_not.roc", .exit = .{ .code = 2 }, .contains = &.{ .{ .stream = .stdout, .text = "passed" }, .{ .stream = .stderr, .text = "unconditional condition" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10412: annotated lambda list mismatch reports without postcheck panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache" }, .roc_file = "test/cli/issue_10412_annotated_lambda_list_mismatch.roc", .exit = .{ .code = 1 }, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10694: a value-mode
     // low-level dispatch whose result is an open error union must not request
@@ -1299,10 +1392,10 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc repl accepts unused loop over unconstrained empty list", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "unused = { for _ in [] {} }\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "assigned `unused`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list iterator pattern from element provenance", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "unused = { for [x] in [] {} }\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "assigned `unused`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes nested record-rest iterator pattern", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "unused = { for [{ a, ..rest }] in [] {} }\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "assigned `unused`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "record rest pattern must be lowered" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list nested under as pattern", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |[x] as xs| x\nf([1])\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list nested under as pattern", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |list| match list {\n    [x] as xs => x + xs.len() - 1\n    _ => 0\n}\nf([1])\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl materialized as-list miss remains a runtime pattern failure", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |[x] as xs| x\nf([])\n", .exit = .failure, .contains = &.{.{ .stream = .stdout, .text = "assigned `f`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "runtime value demand remained unresolved" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes nested lists sharing an element node", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |[[x], [y]]| x + y\nf([[1], [2]])\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "3" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under tag payload", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |Ok([x])| x\nf(Ok([1]))\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes nested lists sharing an element node", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |lists| match lists {\n    [[x], [y]] => x + y\n    _ => 0\n}\nf([[1], [2]])\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "3" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under tag payload", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |tag| match tag {\n    Ok([x]) => x\n    _ => 0\n}\nf(Ok([1]))\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl materialized tag-list miss remains a runtime pattern failure", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |Ok([x])| x\nf(Ok([]))\n", .exit = .failure, .contains = &.{.{ .stream = .stdout, .text = "assigned `f`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "runtime value demand remained unresolved" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl indirect materialized-pattern miss remains a runtime failure", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "apply = |f, x| f(x)\napply(|[y]| y, [])\n", .exit = .failure, .contains = &.{.{ .stream = .stdout, .text = "assigned `apply`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "runtime value demand remained unresolved" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl hoisted callable materialized-pattern miss remains a runtime failure", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "id = |f| f\ng = id(|[y]| y)\ng([])\n", .exit = .failure, .contains = &.{ .{ .stream = .stdout, .text = "assigned `id`" }, .{ .stream = .stdout, .text = "assigned `g`" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "runtime value demand remained unresolved" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1322,20 +1415,20 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc repl deferred structural equality proof does not mutate frozen graph", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "g = |x| x == x\ng({ a: [] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "True" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "relation changed after freeze" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves a stored private iterator witness through a public identity", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "id : Iter(I64) -> Iter(I64)\nid = |x| x\nxs = [1.I64].iter()\nid(xs)\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `xs`" }, .{ .stream = .stdout, .text = "<opaque>" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "generated-private representation reached ordinary public/private graph unification" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl deferred inspect tag pattern proof does not mutate frozen graph", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "a = Str.inspect(Foo([]))\na\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "assigned `a`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "relation changed after freeze" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under tuple item", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |([x], y)| x\nf(([1], []))\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under ordinary record child", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |{ a: [x] }| x\nf({ a: [1] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl record-rest continuation sees nested list binder", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |{ a: [x], ..rest }| x\nf({ a: [1], b: [] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "unbound binder" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under tuple item", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |pair| match pair {\n    ([x], _) => x\n    _ => 0\n}\nf(([1], []))\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl materializes list under ordinary record child", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |record| match record {\n    { a: [x] } => x\n    _ => 0\n}\nf({ a: [1] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl record-rest continuation sees nested list binder", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |record| match record {\n    { a: [x], ..rest } => x + rest.b.len()\n    _ => 0\n}\nf({ a: [1], b: [] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "unbound binder" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl record-rest continuation sees required binder", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |{ a, ..rest }| a\nf({ a: 1, b: [] })\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "1" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "unbound binder" }, .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl ignores inspect in unreachable empty iterator One branch", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "unused = { for n in [] { Str.inspect(n) } }\n", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "assigned `unused`" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves open list provenance through record lambda argument", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |{ x }| {}\nf({ x: [] })\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `f`" }, .{ .stream = .stdout, .text = "{}" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves open return provenance through materialized lambda argument", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |[x]| []\nf([[1]])\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `f`" }, .{ .stream = .stdout, .text = "[]" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves open return provenance through materialized lambda argument", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = |list| match list {\n    [_x] => []\n    _ => []\n}\nf([[1]])\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `f`" }, .{ .stream = .stdout, .text = "[]" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves open list provenance through pattern statement", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = || {\n  { x } = { x: [] }\n  {}\n}\nf()\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `f`" }, .{ .stream = .stdout, .text = "{}" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl preserves open list provenance through record rest statement", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "f = || {\n  { a, ..rest } = { a: 1, b: [] }\n  {}\n}\nf()\n", .exit = .success, .contains = &.{ .{ .stream = .stdout, .text = "assigned `f`" }, .{ .stream = .stdout, .text = "{}" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl :help command works", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = ":help\n", .contains_any = &.{.{ .needles = &.{ .{ .stream = .stdout, .text = ":exit" }, .{ .stream = .stdout, .text = ":quit" } } }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl :exit command exits cleanly in batch mode", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = ":exit\n", .stdout_exact = "", .stderr_exact = "" } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl parse diagnostics go to stderr in batch mode", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "1+\\n\n", .exit = .failure, .stdout_exact = "", .contains_any = &.{.{ .needles = &repl_parse_diagnostic_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "Error: ParseError" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl type diagnostics go to stderr without ANSI in batch mode", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "x = 1\nx + \"a\"\nx + 1\n", .exit = .failure, .contains = &.{ .{ .stream = .stdout, .text = "assigned `x`" }, .{ .stream = .stdout, .text = "2.0" }, .{ .stream = .stderr, .text = "type mismatch" } }, .not_contains = &.{.{ .stream = .stderr, .text = "\x1b" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc repl reports integer overflow and continues (issue 10491)", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "U64.highest + U64.highest\n1 + 1\n", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "This Roc code crashed with: \"Integer addition overflowed\"" }, .{ .stream = .stdout, .text = "2.0" } }, .not_contains = &.{.{ .stream = .stderr, .text = "wasm Roc crash" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc repl reports compile-time integer overflow and continues (issue 10491)", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "U64.highest + U64.highest\n1 + 1\n", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "Integer addition overflowed" }, .{ .stream = .stdout, .text = "2.0" } }, .not_contains = &.{.{ .stream = .stderr, .text = "wasm Roc crash" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl variable definition and usage", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "x = 5\nx + 3\n", .contains = &.{.{ .stream = .stdout, .text = "8" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc repl string expression", .body = .{ .command = .{ .args = &.{"repl"}, .stdin = "\"hello\"\n", .contains = &.{.{ .stream = .stdout, .text = "hello" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc help contains Usage:", .body = .{ .command = .{ .args = &.{"help"}, .contains = &.{.{ .stream = .stdout, .text = "Usage:" }} } } },
@@ -1391,7 +1484,8 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects old ParseTagUnionSpec.parse matcher API", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserOldTagSpecApi.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects parser Field direct construction", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserFieldConstructionRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects parser Field backing access", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserFieldAccessRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects hidden Encoding parser state types", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserHiddenEncodingTypesRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "missing nested type" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects internal Encoding parser state types", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserInternalEncodingTypesRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "internal builtin type" }, .{ .stream = .stderr, .text = "a.Json.Encodable" }, .{ .stream = .stderr, .text = "a.Encoding.HttpHeader.Parseable" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check accepts nameable Json and HttpHeader codec constraints", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/JsonCodecWhereAliases.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects parser Field pattern matching", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserFieldPatternRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects parser FieldNames backing access", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserFieldsAccessRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check rejects parser FieldNames pattern matching", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserFieldsPatternRejected.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &type_error_needles }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
@@ -1399,27 +1493,35 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc check accepts direct nominal record construction", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/NominalRecordConstruction.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check keeps generic missing-field errors out of optional-only parser records", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserOptionalOnlyRecordNoMissingMethod.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test composes JSON and derived-record parser errors", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonParseErrorComposition.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    // Repro for https://github.com/roc-lang/roc/issues/10888: record shapes
+    // with the same field set at consecutive levels must retain nested codec metadata.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10888: JSON parser retains metadata for repeated nested record fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10888_json_parse_repeated_nested_field.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10898: JSON parsing a nominal record does not publish its generated parser as an app root", .body = .{ .command = .{ .args = &.{ "build", "--no-cache" }, .roc_file = "test/cli/issue_10898_json_parse_nominal_record.roc", .exit = .not_panic, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test infers JSON record parser shape without record annotation", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonParseInferredRecord.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test infers JSON article parser shape from use sites", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonParseInferredArticle.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test preserves composed parser errors through a generic wrapper", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonParseGenericWrapperErrors.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc test reports generic missing required field from non-JSON parser", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserRequiredFieldError.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test reports generic missing field without constraining unused invalid_value", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserRequiredFieldError.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check accepts derived parser on structural alias", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/ParserStructuralAlias.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test uses renamed FieldNames metadata in derived parser", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserRenamedFieldsMetadata.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test uses renamed FieldNames name bounds in derived parser", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserRenamedFieldBounds.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test supports userspace FieldNames.rename_fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserRuntimeRenameFields.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test restores stored parser FieldNames metadata", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserStoredTryFieldCaseless.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "boxy roc test derives runtime tag-union parser evidence", .body = .{ .command = .{ .args = &.{ "test", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/ParserTagUnionRuntime.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "boxy roc test lowers optional and defaulted record fields", .body = .{ .command = .{ .args = &.{ "test", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/BoxyOptionalRecordFields.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (4) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "boxy roc test lowers optional and defaulted record fields", .body = .{ .command = .{ .args = &.{ "test", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/BoxyOptionalRecordFields.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10576: boxy lowers a generalized constructor's optional slot", .body = .{ .command = .{ .args = &.{ "test", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/Issue10576GeneralizedOptionalFieldKind.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (10) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test derives optional parser field with exact Missing tag", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserOptionalAbsentTagName.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test supports custom parser_for on records with optional fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserCustomOptionalField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "postcheck invariant violated" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test derives optional non-Str parser field", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserOptionalNonStrField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test derives optional parser field from wildcard Try error row", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserWildcardOptionalField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test uses custom nominal parser_for inside derived record", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserCustomNominalField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10584: custom nominal tag union Json codec round-trips", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10584_encode_decode_custom_item_kind.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (2) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "type mismatch" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test uses block-local parser_for inside derived record", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/ParserLocalCustomNominalField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test supports structural encoder_for on records", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EncoderForStructuralRecord.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test supports custom encoder_for on records with optional fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EncoderForOptionalRecordField.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "postcheck invariant violated" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10379: derived record encoder passes active field state to custom encoder_for", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/issue_10379_custom_encoder_field_state/Main.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10379: polymorphic custom encoder lowers on LLVM speed backend", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/cli/issue_10379_custom_encoder_field_state/Main.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10968: re-encoding a decoded Str reads bytes that are still live (speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/cli/issue_10968_reencoded_decoded_str.roc", .app_args = &.{"xxxx"}, .exit = .success, .stdout_exact = "bytes: 65570, guid matches\n", .not_contains = &.{ .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10968: re-encoding a decoded Str reads bytes that are still live (size)", .backend = .size, .body = .{ .command = .{ .args = &.{ "--opt=size", "--no-cache" }, .roc_file = "test/cli/issue_10968_reencoded_decoded_str.roc", .app_args = &.{"xxxx"}, .exit = .success, .stdout_exact = "bytes: 65570, guid matches\n", .not_contains = &.{ .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test supports structural encoder_for on empty records without field methods", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EncoderForEmptyRecordNoFieldMethods.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test supports stored top-level encoder_for value", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EncoderForTopLevelStored.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test gives formats dedicated tag encoding", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EncoderForTags.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
@@ -1431,6 +1533,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc test round-trips JSON parse and encode", .timeout_ms = 600_000, .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonEncodeRoundTrip.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test round-trips JSON records with many optional fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonOptionalRecordRoundTrip.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test derives JSON codecs for ?: optional record fields", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonOptionalFieldKinds.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc test shares one generated parser contract between a nominal's own and nested derivations", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonNestedNominalContract.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (5) tests passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test covers JSON string escaping", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonStringEscapes.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test covers JSON integer edge cases", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/JsonEncodeEdgeCases.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "boxy roc test preserves generated JSON codec descriptors across function boundaries", .body = .{ .command = .{ .args = &.{ "test", "--specialize=no", "--no-cache" }, .roc_file = "test/cli/JsonU8RoundTrip.roc", .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
@@ -1454,15 +1557,24 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc test/str/app.roc runs successfully (default dev)", .backend = .dev, .skip = .{ .windows = "test/str platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/str/app.roc" } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test/str/app.roc runs successfully (dev)", .backend = .dev, .skip = .{ .windows = "test/str platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/str/app.roc" } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_allocates.roc: allocation counter positive control (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_allocates.roc", .contains = &.{.{ .stream = .stderr, .text = "byte count: 16" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert.roc: pre-sized Dict inserts allocate nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, insert allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11162: pre-sized Dict inserts stay unique across a closure (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_closure.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, closure insert allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11162: Dict overwrites stay unique across a closure (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite_closure.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, closure overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert_overwrite.roc: overwriting an existing key allocates nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert_overwrite_refcounted.roc: refcounted Dict overwrite allocates nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite_refcounted.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 48, refcounted overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/box-model-uniqueness/app.roc: boxed host model updates stay in place", .backend = .speed, .skip = .{ .windows = "test platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/box-model-uniqueness/app.roc", .contains = &.{.{ .stream = .stderr, .text = "box model updates stayed in place" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_allocates.roc: allocation counter positive control (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/alloc-count/app_allocates.roc", .contains = &.{.{ .stream = .stderr, .text = "byte count: 16" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_module_list.roc: module-level list access performs zero allocations (default dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/alloc-count/app_module_list.roc", .contains = &.{.{ .stream = .stderr, .text = "value: 2, read allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_while.roc: while loop performs zero allocations (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_while.roc", .contains = &.{.{ .stream = .stderr, .text = "sum: 1609, loop allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_while.roc: while loop performs zero allocations (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/alloc-count/app_while.roc", .contains = &.{.{ .stream = .stderr, .text = "sum: 1609, loop allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11047: Iter.custom threaded iterator state does not allocate per item (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_iter_custom.roc", .contains = &.{.{ .stream = .stderr, .text = "iter custom items: 128 1024, threaded sums: 8128 523776" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11047: Iter.custom threaded iterator state does not allocate per item (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/alloc-count/app_iter_custom.roc", .contains = &.{.{ .stream = .stderr, .text = "iter custom items: 128 1024, threaded sums: 8128 523776" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app.roc: for loop performs zero allocations (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app.roc", .contains = &.{.{ .stream = .stderr, .text = "sum: 1609, loop allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app.roc: for loop performs zero allocations (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/alloc-count/app.roc", .contains = &.{.{ .stream = .stderr, .text = "sum: 1609, loop allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10484: test/alloc-count/app_json_encode.roc: Json.to_str allocations do not scale with element count (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_json_encode.roc", .contains = &.{.{ .stream = .stderr, .text = "json bytes: 833 13313" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10484: test/alloc-count/app_json_encode.roc: Json.to_str allocations do not scale with element count (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_json_encode.roc", .contains = &.{.{ .stream = .stderr, .text = "json bytes: 833 13313" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10967: test/alloc-count/app_dbg_list.roc: dbg allocations do not scale with element count (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_dbg_list.roc", .contains = &.{ .{ .stream = .stderr, .text = "ROC DBG: [16, 16, 16, 16" }, .{ .stream = .stderr, .text = "dbg elements: 64 1024" } }, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10967: test/alloc-count/app_dbg_list.roc: dbg allocations do not scale with element count (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/alloc-count/app_dbg_list.roc", .contains = &.{ .{ .stream = .stderr, .text = "ROC DBG: [16, 16, 16, 16" }, .{ .stream = .stderr, .text = "dbg elements: 64 1024" } }, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test/str/app_static_24_byte_string.roc does not panic", .skip = .{ .windows = "test/str platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/str/app_static_24_byte_string.roc", .exit = .not_panic, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build creates executable from test/int/app.roc (interpreter)", .backend = .interpreter, .skip = .{ .windows = "test/int platform does not have Windows host libraries" }, .body = .{ .custom = .build_int_interpreter_creates_output } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build creates executable from test/int/app.roc (dev)", .backend = .dev, .skip = .{ .windows = "test/int platform does not have Windows host libraries" }, .body = .{ .custom = .build_int_dev_creates_output } },
@@ -1475,10 +1587,25 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc build fails with file not found error", .body = .{ .command = .{ .args = &.{"build"}, .roc_file = "nonexistent_file.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "FileNotFound" }, .{ .stream = .stderr, .text = "not found" }, .{ .stream = .stderr, .text = "not found" }, .{ .stream = .stderr, .text = "Failed" } } }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build fails with invalid target error", .body = .{ .command = .{ .args = &.{ "build", "--target=invalid_target_name" }, .roc_file = "test/int/app.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "Invalid target" }, .{ .stream = .stderr, .text = "invalid" } } }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build wasm32 shared module succeeds for list builtins", .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--no-cache" }, .roc_file = "test/wasm/list_builtin_static_lib_app.roc", .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "FunctionTypeMismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc build wasm32 schedules field defaults before explicit platform roots", .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--no-cache" }, .roc_file = "test/wasm/field_default_root_order/app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "compile-time root request order placed a root before its field defaults or another dependency" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "issue 10733: dev wasm32 caches a valid Boxy-prepared compiler-rt host", .backend = .dev, .body = .{ .custom = .issue_10733_wasm_boxy_dev_cache } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc build wasm32 succeeds with per-specialization field defaults", .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--no-cache" }, .roc_file = "test/wasm/field_default_root_order/app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "compile-time root request order placed a root before another root it depends on" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10733: dev wasm32 emits a valid sealed Boxy object", .backend = .dev, .body = .{ .custom = .issue_10733_wasm_boxy_dev_sealed_object } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM size wasm32 links the Boxy runtime", .backend = .size, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=size", "--no-cache", "--output=boxed_closure_size.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM speed wasm32 links the Boxy runtime", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=speed", "--no-cache", "--output=boxed_closure_speed.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10827: Roc compiler support is private from a strong-intrinsic wasm host", .backend = .dev, .body = .{ .custom = .issue_10827_private_compiler_support } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11134: wasm speed uses explicit post-LLVM passes", .backend = .speed, .body = .{ .custom = .issue_11134_wasm_post_llvm_pipeline } },
+    // issue 10951: https://github.com/roc-lang/roc/issues/10951
+    // The wasm32 linker exports exactly what the platform header's `exports:`
+    // field names, so a header that omits the field links a module with no
+    // host-visible functions at all. That is a platform mistake the build must
+    // report, not link and hand back as a successful build.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10951: wasm32 target block without exports is reported", .backend = .dev, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=dev", "--no-cache" }, .roc_file = "test/wasm/issue_10951_wasm_exports/missing_exports/app.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "exports" }, .{ .stream = .stdout, .text = "exports" } } }}, .not_contains = &.{ .{ .stream = .stdout, .text = "successfully building" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // issue 10951: an `exports:` entry that names no symbol in the final link
+    // must be reported against that name, rather than dropped from the module.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10951: wasm32 exports naming an unknown symbol is reported", .backend = .dev, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=dev", "--no-cache" }, .roc_file = "test/wasm/issue_10951_wasm_exports/unknown_export/app.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "this_symbol_does_not_exist" }, .{ .stream = .stdout, .text = "this_symbol_does_not_exist" } } }}, .not_contains = &.{ .{ .stream = .stdout, .text = "successfully building" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10951: LLVM wasm32 exports naming an unknown symbol is reported", .backend = .size, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=size", "--no-cache" }, .roc_file = "test/wasm/issue_10951_wasm_exports/unknown_export/app.roc", .exit = .failure, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stderr, .text = "this_symbol_does_not_exist" }, .{ .stream = .stdout, .text = "this_symbol_does_not_exist" } } }}, .not_contains = &.{ .{ .stream = .stdout, .text = "successfully building" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    // An explicit empty list remains the intentional way to export no
+    // functions; it is distinct from omitting the field by construction.
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10951: explicit empty wasm32 exports are accepted", .backend = .dev, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=dev", "--no-cache" }, .roc_file = "test/wasm/issue_10951_wasm_exports/empty_exports/app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "Missing Wasm Exports" }, .{ .stream = .stderr, .text = "linker failed" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build glibc target gives helpful error on non-Linux", .body = .{ .custom = .build_glibc_target_non_linux_error } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build Shared output links a Windows DLL", .body = .{ .custom = .build_windows_shared_library } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test caches passing results (interpreter)", .backend = .interpreter, .body = .{ .custom = .cache_passing_results } },
@@ -1516,6 +1643,15 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc check returns exit code 1 for errors", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/has_type_error_annotation.roc", .exit = .{ .code = 1 } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check reports comptime division by zero without panicking", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/comptime_div_zero.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "I64 division by zero" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic:" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check reports comptime remainder by zero without panicking", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/comptime_mod_zero.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "I64 remainder by zero" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic:" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "comptime crash inside an inlined foreign default names the declaring module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/multi_module_default_crash/Main.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "happened in the module" }, .{ .stream = .stderr, .text = "Cfg (line 1, column" }, .{ .stream = .stderr, .text = "Integer addition overflowed" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic:" }} } } },
+    // Same bare module name in two packages: the provenance comparison must use
+    // package-qualified module identity, or the crash is judged local and the
+    // platform module's byte offsets render against the app module's source.
+    // The origin's long path-qualified module name may be line-wrapped mid-token
+    // by the report renderer, so the assertions stick to short flowed fragments
+    // and the (unwrapped) local code snippet.
+    .{ .id = 0, .suite = .subcommands, .name = "comptime crash provenance distinguishes same-named modules across packages", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/same_name_module_default_crash/app/Main.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time crash" }, .{ .stream = .stderr, .text = "happened in the module" }, .{ .stream = .stderr, .text = "remote_cfg = Remote.Cfg.{}" }, .{ .stream = .stderr, .text = "Integer addition overflowed" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic:" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "comptime expect failure inside an inlined foreign default names the declaring module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/multi_module_default_expect/Main.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "compile time expect failed" }, .{ .stream = .stderr, .text = "failed in the module" }, .{ .stream = .stderr, .text = "Cfg (line 5, column" }, .{ .stream = .stderr, .text = "cfg = Cfg.Cfg.{}" } }, .not_contains = &.{.{ .stream = .stderr, .text = "panic:" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check reports large default Dec scientific literal without panicking", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/large_scientific_default_dec.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid number" }, .{ .stream = .stderr, .text = "Dec" }, .{ .stream = .stderr, .text = "large_scientific_default_dec.roc:1:" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic:" }, .{ .stream = .stderr, .text = ".zig-cache/tmp" } } } } },
     // The 30s bounds below are the 9760 perf regression guards: a healthy
     // check is <2s, and the 9567 text-reconstruction regression took 42s.
@@ -1629,6 +1765,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "integer SIMD runtime smoke passes (LLVM speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .success, .not_contains = &.{ .{ .stream = .stderr, .text = "Mismatch" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "integer SIMD Windows cross-build reaches the linker without an LLVM panic", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache", "--target=x64win" }, .roc_file = "test/cli/runtime_simd_smoke.roc", .exit = .not_panic, .contains_any = &.{.{ .needles = &.{ .{ .stream = .stdout, .text = "successfully building" }, .{ .stream = .stderr, .text = "WindowsSDKNotFound" } } }}, .not_contains = &.{ .{ .stream = .stderr, .text = "reached unreachable code" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "match extension fixture runs (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/match_extension_codegen.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "match extension fixture runs (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/cli/match_extension_codegen.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "match extension fixture runs (LLVM speed)", .backend = .speed, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/cli/match_extension_codegen.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
@@ -1715,6 +1852,8 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc test runs a headerless file that has no main! and no matching type", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/no_main_expects_only.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "main!" }, .{ .stream = .stdout, .text = "main!" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test runs a headerless file whose only type does not match the file name", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/no_main_expects_with_type.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "All (2) tests passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "nominal type declaration matching" }, .{ .stream = .stderr, .text = "main!" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check still requires main! on a headerless file with no matching type", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/no_main_expects_only.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "main!" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc run reports syntax errors, not a header error, when unbalanced parens hide main!", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/headerless_unbalanced_parens.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "expected closing brace" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "expected app header" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc run --opt=size reports syntax errors, not a header error, when unbalanced parens hide main!", .backend = .size, .body = .{ .command = .{ .args = &.{ "--opt=size", "--no-cache" }, .roc_file = "test/cli/headerless_unbalanced_parens.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "expected closing brace" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "expected app header" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check issue 10599 nominal render module does not retain relocated type-store slices", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/fx/exhaustive_canvas_polygon_checker_crash/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "index out of bounds" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test eq on tag union with list payload does not panic", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/EqTagWithListPayload.roc", .exit = .success, .not_contains = &.{.{ .stream = .stderr, .text = "panic" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test draft sealing coverage for nested closures loops equality and hashing", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/DraftSealingCoverage.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1725,6 +1864,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc test list replace retains its element (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RcListReplace.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test list replace retains its element (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RcListReplace.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "passed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test issue 9392 numeric utility expects are deterministic with no cache", .body = .{ .custom = .issue_9392_deterministic_no_cache } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10987: optimized affine-cipher expects pass on every run", .backend = .speed, .timeout_ms = 600_000, .body = .{ .custom = .issue_10987_optimized_affine_cipher } },
     .{ .id = 0, .suite = .subcommands, .name = "hosted try question widening rejects a non-included error row", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/fx-open/hosted_try_question_not_included.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "type mismatch" }, .{ .stream = .stderr, .text = "FallibleReject.roc" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "[ROC CRASHED]" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc build hosted Try with Str error succeeds (issue 10518)", .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--opt=dev" }, .roc_file = "test/fx-open/issue_10518_hosted_try_str_error.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "instantiation tag-row read had a non-tag-union node" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10595: concatenating a
@@ -1755,6 +1895,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc docs Builtin.roc succeeds", .body = .{ .command = .{ .args = &.{ "docs", "--no-cache" }, .roc_file = "src/build/roc/Builtin.roc", .contains = &.{.{ .stream = .stdout, .text = "Generated docs for" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc test complex_package --verbose passes all tests", .body = .{ .command = .{ .args = &.{ "test", "--no-cache", "--verbose" }, .roc_file = "test/complex_package/main.roc", .contains = &.{ .{ .stream = .stdout, .text = "tests passed" }, .{ .stream = .stdout, .text = "PASS" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc bundle complex_package includes all transitively imported modules", .body = .{ .custom = .bundle_complex_package } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc bundle issue 10845 entry point in a subdirectory bundles relative to it", .body = .{ .custom = .bundle_entrypoint_subdirectory } },
     .{ .id = 0, .suite = .subcommands, .name = "failed inline expect exits with code 1 and continues program (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{}, .roc_file = "test/cli/failed_inline_expect.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stdout, .text = "Hello, World!" }, .{ .stream = .stderr, .text = "expect failed" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "failed inline expect exits with code 1 and continues program (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{"--opt=interpreter"}, .roc_file = "test/cli/failed_inline_expect.roc", .exit = .{ .code = 1 }, .contains = &.{ .{ .stream = .stdout, .text = "Hello, World!" }, .{ .stream = .stderr, .text = "Expect failed" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "failed inline expect is omitted from roc --opt=size", .body = .{ .command = .{ .args = &.{ "--opt=size", "--no-cache" }, .roc_file = "test/cli/failed_inline_expect.roc", .contains = &.{.{ .stream = .stdout, .text = "Hello, World!" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "expect failed" }, .{ .stream = .stderr, .text = "Expect failed" } } } } },
@@ -2593,12 +2734,12 @@ fn checkCommandExpectation(
         }
     }
     for (command.contains) |needle| {
-        if (std.mem.find(u8, streamBytes(result, needle.stream), needle.text) == null) {
+        if (!outputHasNeedle(streamBytes(result, needle.stream), needle)) {
             return std.fmt.allocPrint(allocator, "{s} did not contain expected text: {s}", .{ streamLabel(needle.stream), needle.text }) catch "missing expected output";
         }
     }
     for (command.not_contains) |needle| {
-        if (std.mem.find(u8, streamBytes(result, needle.stream), needle.text) != null) {
+        if (outputHasNeedle(streamBytes(result, needle.stream), needle)) {
             return std.fmt.allocPrint(allocator, "{s} contained forbidden text: {s}", .{ streamLabel(needle.stream), needle.text }) catch "forbidden output";
         }
     }
@@ -2616,7 +2757,7 @@ fn checkCommandExpectation(
     for (command.contains_any) |set| {
         var matched = false;
         for (set.needles) |needle| {
-            if (std.mem.find(u8, streamBytes(result, needle.stream), needle.text) != null) {
+            if (outputHasNeedle(streamBytes(result, needle.stream), needle)) {
                 matched = true;
                 break;
             }
@@ -2654,6 +2795,35 @@ fn checkExitExpectation(
         },
         .any => null,
     };
+}
+
+fn outputHasNeedle(haystack: []const u8, needle: OutputNeedle) bool {
+    if (!needle.wrapped) return std.mem.find(u8, haystack, needle.text) != null;
+    var start: usize = 0;
+    while (start <= haystack.len) : (start += 1) {
+        if (matchesWrappedAt(haystack, start, needle.text)) return true;
+    }
+    return false;
+}
+
+/// Match `text` against `haystack` at `start`, letting every space in `text`
+/// stand for one or more whitespace bytes so a word wrap cannot hide the phrase.
+fn matchesWrappedAt(haystack: []const u8, start: usize, text: []const u8) bool {
+    var pos = start;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == ' ') {
+            const run_start = pos;
+            while (pos < haystack.len and std.ascii.isWhitespace(haystack[pos])) pos += 1;
+            if (pos == run_start) return false;
+            i += 1;
+            continue;
+        }
+        if (pos >= haystack.len or haystack[pos] != text[i]) return false;
+        pos += 1;
+        i += 1;
+    }
+    return true;
 }
 
 fn streamBytes(result: std.process.RunResult, stream: Stream) []const u8 {
@@ -2707,7 +2877,9 @@ fn runCustomCase(
         .default_platform_build_x64openbsd_rejected => customDefaultPlatformOpenBsdRejected(io, allocator, &env, &timer, timeout_ms),
         .default_platform_build_wasm32 => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .wasm32),
         .default_platform_wasm32_archive_reproducible => customDefaultPlatformWasm32ArchiveReproducible(io, allocator, &env, &timer, timeout_ms),
-        .issue_10733_wasm_boxy_dev_cache => customIssue10733WasmBoxyDevCache(io, allocator, &env, &timer, timeout_ms),
+        .issue_10733_wasm_boxy_dev_sealed_object => customIssue10733WasmBoxyDevSealedObject(io, allocator, &env, &timer, timeout_ms),
+        .issue_10827_private_compiler_support => customIssue10827PrivateCompilerSupport(io, allocator, &env, &timer, timeout_ms),
+        .issue_11134_wasm_post_llvm_pipeline => customWasmPostLlvmPipeline(io, allocator, &env, &timer, timeout_ms),
         .macos_output_basename_reproducible => customMacosOutputBasenameReproducible(io, allocator, &env, &timer, timeout_ms),
         .default_platform_crash_x64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .x64musl, .crash),
         .default_platform_crash_arm64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .arm64musl, .crash),
@@ -2748,11 +2920,13 @@ fn runCustomCase(
         .verbose_and_non_verbose_failure_format_match => customVerboseAndNonVerboseFailureFormatMatch(io, allocator, &timer, timeout_ms, spec.backend orelse .interpreter),
         .build_warning => customBuildWarning(io, allocator, &env, &timer, timeout_ms, spec.backend orelse .interpreter),
         .issue_9392_deterministic_no_cache => customIssue9392Deterministic(io, allocator, &env, &timer, timeout_ms),
+        .issue_10987_optimized_affine_cipher => customIssue10987OptimizedAffineCipher(io, allocator, &env, &timer, timeout_ms),
         .issue_10022_deep_tail_recursion => customIssue10022DeepTailRecursion(io, allocator, &env, &timer, timeout_ms),
         .issue_10015_url_random_test_size => customIssue10015UrlRandomTestSize(io, allocator, &env, &timer, timeout_ms),
         .docs_main_platform_url_package => customDocsMainPlatformUrlPackage(io, allocator, &env, &timer, timeout_ms),
         .build_issue_9435_hosted_nominal_return => customBuildIssue9435(io, allocator, &env, &timer, timeout_ms),
         .bundle_complex_package => customBundleComplexPackage(io, allocator, &env, &timer, timeout_ms),
+        .bundle_entrypoint_subdirectory => customBundleEntrypointSubdirectory(io, allocator, &env, &timer, timeout_ms),
         .install_run_roundtrip => customInstallRunRoundtrip(io, allocator, &env, &timer, timeout_ms),
         .install_hash_mismatch => customInstallHashMismatch(io, allocator, &env, &timer, timeout_ms),
         .install_glue_roundtrip => customInstallGlueRoundtrip(io, allocator, &env, &timer, timeout_ms),
@@ -2778,6 +2952,8 @@ fn runCustomCase(
         .glue_try_box_model_unknown_payload => customGlueTryBoxModelUnknownPayload(io, allocator, &env, &timer, timeout_ms),
         .glue_unresolved_by_value_errors => customGlueUnresolvedByValueErrors(io, allocator, &env, &timer, timeout_ms),
         .glue_c_tests => customGlueCTests(io, allocator, &env, &timer, timeout_ms),
+        .roc_test_skips_url_dependency_expects => customRocTestSkipsUrlDependencyExpects(io, allocator, &env, &timer, timeout_ms),
+        .roc_test_caches_local_dependency_expects => customRocTestCachesLocalDependencyExpects(io, allocator, &env, &timer, timeout_ms),
     };
 
     if (result) |failure| {
@@ -3248,7 +3424,7 @@ fn hotReloadPlatformSource(allocator: Allocator, target: NativeMuslTarget) CliRu
         \\    }}
         \\    targets: {{
         \\        inputs_dir: "targets/",
-        \\        {s}: {{ inputs: ["crt1.o", "libhost.a", app, "libc.a"] }},
+        \\        {s}: {{ inputs: ["crt1.o", "libhost.a", app, "compiler_rt.o", "libc.a"] }},
         \\    }}
         \\
         \\import Host
@@ -3724,6 +3900,36 @@ fn copyNativeMuslTargetFile(
     };
 }
 
+fn buildNativeMuslCompilerRtObject(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+    target: NativeMuslTarget,
+    target_dir: []const u8,
+) ?TestResult {
+    const root_path = std.fs.path.join(allocator, &.{ target_dir, "compiler_rt_root.zig" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate compiler-rt root path: {}", .{err});
+    const object_path = std.fs.path.join(allocator, &.{ target_dir, "compiler_rt.o" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate compiler-rt object path: {}", .{err});
+    const emit_arg = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{object_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate compiler-rt output argument: {}", .{err});
+
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = root_path, .data = "" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write compiler-rt root: {}", .{err});
+
+    return runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
+        "zig",
+        "build-obj",
+        "-target",
+        target.zig_target,
+        "-fcompiler-rt",
+        root_path,
+        emit_arg,
+    }, project_root_path, .{ .args = &.{} });
+}
+
 fn customHotReloadDevShim(
     io: std.Io,
     allocator: Allocator,
@@ -3768,6 +3974,7 @@ fn customHotReloadDevShim(
         return customInfraFailure(allocator, timer, "failed to copy crt1.o: {}", .{err});
     copyNativeMuslTargetFile(io, allocator, target, "libc.a", target_dir) catch |err|
         return customInfraFailure(allocator, timer, "failed to copy libc.a: {}", .{err});
+    if (buildNativeMuslCompilerRtObject(io, allocator, env, timer, timeout_ms, target, target_dir)) |failure| return failure;
 
     const platform_source = hotReloadPlatformSource(allocator, target) catch |err|
         return customInfraFailure(allocator, timer, "failed to render platform source: {}", .{err});
@@ -3939,7 +4146,7 @@ fn hotReloadModelPlatformSource(allocator: Allocator, target: NativeMuslTarget) 
         \\    }}
         \\    targets: {{
         \\        inputs_dir: "targets/",
-        \\        {s}: {{ inputs: ["crt1.o", "libhost.a", app, "libc.a"] }},
+        \\        {s}: {{ inputs: ["crt1.o", "libhost.a", app, "compiler_rt.o", "libc.a"] }},
         \\    }}
         \\
         \\init_model_for_host : U64 -> Box(Model)
@@ -4165,6 +4372,7 @@ fn customHotReloadModelBoundary(
         return customInfraFailure(allocator, timer, "failed to copy model crt1.o: {}", .{err});
     copyNativeMuslTargetFile(io, allocator, target, "libc.a", target_dir) catch |err|
         return customInfraFailure(allocator, timer, "failed to copy model libc.a: {}", .{err});
+    if (buildNativeMuslCompilerRtObject(io, allocator, env, timer, timeout_ms, target, target_dir)) |failure| return failure;
 
     const platform_source = hotReloadModelPlatformSource(allocator, target) catch |err|
         return customInfraFailure(allocator, timer, "failed to render model platform source: {}", .{err});
@@ -5186,7 +5394,7 @@ fn customDefaultPlatformWasm32ArchiveReproducible(
     return null;
 }
 
-fn validateIssue10733Wasm(
+fn validateWasmOutput(
     io: std.Io,
     allocator: Allocator,
     timer: *harness.Timer,
@@ -5196,7 +5404,7 @@ fn validateIssue10733Wasm(
         return customInfraFailure(allocator, timer, "failed to read wasm output {s}: {}", .{ path, err });
     defer allocator.free(wasm_bytes);
 
-    var module_def = bytebox.createModuleDefinition(allocator, .{ .debug_name = "issue_10733_boxy" }) catch |err|
+    var module_def = bytebox.createModuleDefinition(allocator, .{ .debug_name = "cli_wasm_output" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to create wasm validator: {}", .{err});
     defer module_def.destroy();
     module_def.decode(wasm_bytes) catch |err|
@@ -5204,7 +5412,74 @@ fn validateIssue10733Wasm(
     return null;
 }
 
-fn customIssue10733WasmBoxyDevCache(
+fn customWasmPostLlvmPipeline(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    if (!@import("cli_test_options").binaryen) {
+        return .{ .status = .skip, .phase = .setup, .message = "requires bundled Binaryen" };
+    }
+
+    var trace_env = CaseEnv{
+        .dirs = env.dirs,
+        .env_map = env.env_map.clone(allocator) catch |err|
+            return customInfraFailure(allocator, timer, "failed to clone wasm test environment: {}", .{err}),
+    };
+    defer trace_env.env_map.deinit();
+    trace_env.env_map.put("BINARYEN_PASS_DEBUG", "1") catch |err|
+        return customInfraFailure(allocator, timer, "failed to enable Binaryen pass tracing: {}", .{err});
+
+    const wasm_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "pipeline.wasm" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output path: {}", .{err});
+    defer allocator.free(wasm_path);
+    const output_arg = outputArg(allocator, wasm_path) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output argument: {}", .{err});
+    defer allocator.free(output_arg);
+
+    const modes = [_]struct { opt: OptMode, debug: bool }{
+        .{ .opt = .speed, .debug = false },
+        .{ .opt = .speed, .debug = true },
+        .{ .opt = .size, .debug = false },
+        .{ .opt = .size, .debug = true },
+    };
+    for (modes) |mode| {
+        const speed = mode.opt == .speed;
+        const opt_arg = if (speed) "--opt=speed" else "--opt=size";
+        const args = [_][]const u8{ "build", "--target=wasm32", "--no-cache", opt_arg, output_arg, "--debug" };
+        const contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: remove-unused-module-elements" },
+            .{ .stream = .stderr, .text = "running pass: memory-packing" },
+            .{ .stream = .stderr, .text = "(final validation)" },
+            .{ .stream = .stderr, .text = if (speed) "running pass: vacuum" else "running pass: coalesce-locals" },
+        };
+        const not_contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: coalesce-locals" },
+            .{ .stream = .stderr, .text = "running pass: merge-locals" },
+            .{ .stream = .stderr, .text = "running pass: precompute" },
+            .{ .stream = .stderr, .text = "running pass: inlining-optimizing" },
+        };
+        const occurrences = [_]OutputOccurrence{
+            .{ .stream = .stderr, .text = "running pass: strip-debug", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-dwarf", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-producers", .count = 1 },
+            .{ .stream = .stderr, .text = "running pass: strip-target-features", .count = @intFromBool(!speed and !mode.debug) },
+        };
+        if (runRocAndCheck(io, allocator, &trace_env, timer, timeout_ms, .{
+            .args = args[0..if (mode.debug) args.len else args.len - 1],
+            .roc_file = "test/wasm/str_concat_join_static_lib_app.roc",
+            .contains = &contains,
+            .not_contains = if (speed) &not_contains else &.{},
+            .occurrences = &occurrences,
+        })) |failure| return failure;
+        if (validateWasmOutput(io, allocator, timer, wasm_path)) |failure| return failure;
+    }
+    return null;
+}
+
+fn customIssue10733WasmBoxyDevSealedObject(
     io: std.Io,
     allocator: Allocator,
     env: *const CaseEnv,
@@ -5237,7 +5512,7 @@ fn customIssue10733WasmBoxyDevCache(
         .contains = &contains,
         .not_contains = &not_contains,
     })) |failure| return failure;
-    if (validateIssue10733Wasm(io, allocator, timer, first_path)) |failure| return failure;
+    if (validateWasmOutput(io, allocator, timer, first_path)) |failure| return failure;
 
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
         .args = &.{ "build", "--target=wasm32", "--opt=dev", "--no-cache", second_output_arg },
@@ -5246,24 +5521,60 @@ fn customIssue10733WasmBoxyDevCache(
         .contains = &contains,
         .not_contains = &not_contains,
     })) |failure| return failure;
-    if (validateIssue10733Wasm(io, allocator, timer, second_path)) |failure| return failure;
+    if (validateWasmOutput(io, allocator, timer, second_path)) |failure| return failure;
 
     const first_bytes = std.Io.Dir.cwd().readFileAlloc(io, first_path, allocator, .unlimited) catch |err|
         return customInfraFailure(allocator, timer, "failed to reread first wasm output: {}", .{err});
     defer allocator.free(first_bytes);
     const second_bytes = std.Io.Dir.cwd().readFileAlloc(io, second_path, allocator, .unlimited) catch |err|
-        return customInfraFailure(allocator, timer, "failed to reread cached wasm output: {}", .{err});
+        return customInfraFailure(allocator, timer, "failed to reread second wasm output: {}", .{err});
     defer allocator.free(second_bytes);
     if (!std.mem.eql(u8, first_bytes, second_bytes)) {
-        return customFailure(allocator, timer, "cached prepared host changed the final wasm bytes", .{});
+        return customFailure(allocator, timer, "sealed Roc object changed the final wasm bytes", .{});
     }
     if (std.mem.find(u8, first_bytes, "wasm_main") == null) {
-        return customFailure(allocator, timer, "prepared host lost its platform export", .{});
+        return customFailure(allocator, timer, "final wasm lost its declared platform export", .{});
     }
     if (std.mem.find(u8, first_bytes, "roc_boxy_init_embedded") != null or
         std.mem.find(u8, first_bytes, "roc_builtins_str_concat") != null)
     {
-        return customFailure(allocator, timer, "prepared host leaked runtime internals into final wasm exports", .{});
+        return customFailure(allocator, timer, "sealed Roc object leaked runtime internals into final wasm exports", .{});
+    }
+
+    return null;
+}
+
+fn customIssue10827PrivateCompilerSupport(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    const output_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "issue-10827.wasm" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate issue 10827 output path: {}", .{err});
+    defer allocator.free(output_path);
+    const output_arg = outputArg(allocator, output_path) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate issue 10827 output argument: {}", .{err});
+    defer allocator.free(output_arg);
+
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "build", "--target=wasm32", "--opt=dev", "--no-cache", output_arg },
+        .roc_file = "test/wasm/issue_10827_strong_intrinsic_host/app.roc",
+        .exit = .success,
+        .contains = &.{.{ .stream = .stdout, .text = "successfully building" }},
+        .not_contains = &.{ .{ .stream = .stderr, .text = "duplicate symbol" }, .{ .stream = .stderr, .text = "panic" } },
+    })) |failure| return failure;
+    if (validateWasmOutput(io, allocator, timer, output_path)) |failure| return failure;
+
+    const wasm_bytes = std.Io.Dir.cwd().readFileAlloc(io, output_path, allocator, .unlimited) catch |err|
+        return customInfraFailure(allocator, timer, "failed to reread issue 10827 wasm output: {}", .{err});
+    defer allocator.free(wasm_bytes);
+    if (std.mem.find(u8, wasm_bytes, "run") == null) {
+        return customFailure(allocator, timer, "final wasm lost its declared run export", .{});
+    }
+    if (std.mem.find(u8, wasm_bytes, "__multi3") != null) {
+        return customFailure(allocator, timer, "final wasm exposed the compiler-rt __multi3 name", .{});
     }
 
     return null;
@@ -6810,6 +7121,25 @@ fn customIssue9392Deterministic(io: std.Io, allocator: Allocator, env: *const Ca
     return null;
 }
 
+fn customIssue10987OptimizedAffineCipher(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    const command = CommandCase{
+        .args = &.{ "test", "--opt=speed", "--no-cache", "-j2" },
+        .roc_file = "test/cli/issue_10987_affine_cipher_optimized.roc",
+        .contains = &.{.{ .stream = .stdout, .text = "All (16) tests passed" }},
+        .not_contains = &.{
+            .{ .stream = .stderr, .text = "Segmentation fault" },
+            .{ .stream = .stderr, .text = "SIGSEGV" },
+            .{ .stream = .stderr, .text = "panic" },
+        },
+    };
+
+    // The original failure is a race between concurrent test-root calls.
+    for (0..20) |_| {
+        if (runRocAndCheck(io, allocator, env, timer, timeout_ms, command)) |failure| return failure;
+    }
+    return null;
+}
+
 fn customIssue10022DeepTailRecursion(
     io: std.Io,
     allocator: Allocator,
@@ -7076,7 +7406,13 @@ fn customIssue10015UrlRandomTestSize(
         \\
         \\main! = |_args| Ok({})
         \\
-        \\expect True
+        \\# The app owns this expect, so `roc test` runs it and the downloaded
+        \\# package's code has to link into the optimized test image, which is
+        \\# what regressed in issue 10015.
+        \\expect {
+        \\    generation = Random.step(Random.seed(0), Random.static(5))
+        \\    generation.value == 5
+        \\}
         \\
     ;
 
@@ -7252,6 +7588,98 @@ fn customBundleComplexPackage(io: std.Io, allocator: Allocator, env: *const Case
     return null;
 }
 
+/// Repro for https://github.com/roc-lang/roc/issues/10845
+fn customBundleEntrypointSubdirectory(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    const package_dir = createWorkSubdir(io, allocator, env, "bundle-subdir") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create package dir: {}", .{err});
+    const src_dir = std.fs.path.join(allocator, &.{ package_dir, "src" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate src dir: {}", .{err});
+    std.Io.Dir.cwd().createDirPath(io, src_dir) catch |err|
+        return customInfraFailure(allocator, timer, "failed to create src dir: {}", .{err});
+
+    const package_main = std.fs.path.join(allocator, &.{ src_dir, "main.roc" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate main.roc path: {}", .{err});
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = package_main, .data = "package [Helper] {}\n" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write main.roc: {}", .{err});
+    const package_helper = std.fs.path.join(allocator, &.{ src_dir, "Helper.roc" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate Helper.roc path: {}", .{err});
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = package_helper, .data = "module []\n\nhelper : U64\nhelper = 42\n" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write Helper.roc: {}", .{err});
+    const outside_module = std.fs.path.join(allocator, &.{ package_dir, "Outside.roc" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate outside module path: {}", .{err});
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = outside_module, .data = "module []\n" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write outside module: {}", .{err});
+
+    const out_dir = createWorkSubdir(io, allocator, env, "bundle-subdir-out") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create bundle output dir: {}", .{err});
+    const extract_dir = createWorkSubdir(io, allocator, env, "bundle-subdir-extract") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create extract dir: {}", .{err});
+
+    const roc_abs = if (std.fs.path.isAbsolute(roc_binary_path))
+        roc_binary_path
+    else
+        std.fs.path.join(allocator, &.{ project_root_path, roc_binary_path }) catch |err|
+            return customInfraFailure(allocator, timer, "failed to allocate roc path: {}", .{err});
+
+    const bundle_timeout = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .run, "case timeout exhausted before bundling");
+    const bundle_result = runRawInEnv(io, allocator, env, &.{ roc_abs, "bundle", "--output-dir", out_dir, "src/main.roc" }, package_dir, null, bundle_timeout) catch |err|
+        return customInfraFailure(allocator, timer, "bundle spawn error: {}", .{err});
+    if (exitCode(bundle_result.term) != 0) {
+        return failureFromRun(allocator, timer, bundle_result, "roc bundle failed");
+    }
+    const created_prefix = "Created: ";
+    const created_idx = std.mem.find(u8, bundle_result.stdout, created_prefix) orelse
+        return failureFromRun(allocator, timer, bundle_result, "roc bundle did not report a created file");
+    const created_rest = bundle_result.stdout[created_idx + created_prefix.len ..];
+    const created_eol = std.mem.find(u8, created_rest, "\n") orelse created_rest.len;
+    const bundle_path = std.mem.trim(u8, created_rest[0..created_eol], " \r");
+    const bundle_filename = std.fs.path.basename(bundle_path);
+    if (!std.mem.endsWith(u8, bundle_filename, ".tar.zst")) {
+        return failureFromRun(allocator, timer, bundle_result, "roc bundle did not create a .tar.zst archive");
+    }
+    const extracted_name = bundle_filename[0 .. bundle_filename.len - ".tar.zst".len];
+
+    const unbundle_timeout = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .run, "case timeout exhausted before unbundling");
+    const unbundle_result = runRawInEnv(io, allocator, env, &.{ roc_abs, "unbundle", bundle_path }, extract_dir, null, unbundle_timeout) catch |err|
+        return customInfraFailure(allocator, timer, "unbundle spawn error: {}", .{err});
+    if (exitCode(unbundle_result.term) != 0) {
+        return failureFromRun(allocator, timer, unbundle_result, "roc unbundle failed");
+    }
+
+    const extracted_root = std.fs.path.join(allocator, &.{ extract_dir, extracted_name }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate extracted root path: {}", .{err});
+
+    for ([_][]const u8{ "main.roc", "Helper.roc" }) |entry| {
+        const entry_path = std.fs.path.join(allocator, &.{ extracted_root, entry }) catch |err|
+            return customInfraFailure(allocator, timer, "failed to allocate extracted entry path: {}", .{err});
+        std.Io.Dir.cwd().access(io, entry_path, .{}) catch |err|
+            return customFailure(allocator, timer, "bundle of src/main.roc is missing {s} at its root: {}", .{ entry, err });
+    }
+
+    const extracted_src = std.fs.path.join(allocator, &.{ extracted_root, "src" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate extracted src path: {}", .{err});
+    if (std.Io.Dir.cwd().access(io, extracted_src, .{})) |_| {
+        return customFailure(allocator, timer, "bundle of src/main.roc kept the src/ directory inside the archive", .{});
+    } else |_| {}
+
+    // Raising the archive root to include an outside file would put main.roc
+    // below src/ again. Refuse that unrepresentable layout explicitly.
+    const outside_timeout = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .run, "case timeout exhausted before outside-root bundle check");
+    const outside_result = runRawInEnv(io, allocator, env, &.{ roc_abs, "bundle", "--output-dir", out_dir, "src/main.roc", "Outside.roc" }, package_dir, null, outside_timeout) catch |err|
+        return customInfraFailure(allocator, timer, "outside-root bundle spawn error: {}", .{err});
+    if (exitCode(outside_result.term) == 0) {
+        return failureFromRun(allocator, timer, outside_result, "roc bundle accepted a file outside the entry point directory");
+    }
+    if (std.mem.find(u8, outside_result.stderr, "outside the entry point directory") == null) {
+        return failureFromRun(allocator, timer, outside_result, "roc bundle did not explain the outside-root file error");
+    }
+
+    return null;
+}
+
 /// Serves one HTTP request from a background thread: reads whatever arrives,
 /// responds with the bundle bytes, and exits. `roc install` performs exactly
 /// one download in the roundtrip below; every later step must work offline.
@@ -7305,7 +7733,7 @@ fn customInstallRunRoundtrip(io: std.Io, allocator: Allocator, env: *const CaseE
         return customInfraFailure(allocator, timer, "failed to create app dir: {}", .{err});
     const app_main = std.fs.path.join(allocator, &.{ app_dir, "main.roc" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate app path: {}", .{err});
-    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = app_main, .data = "main! = |_args| {\n    echo!(\"installed tool ran\")\n    Ok({})\n}\n" }) catch |err|
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = app_main, .data = "main! = |_args| {\n    echo!(\"installed tool ran\")\n    Ok({})\n}\n\nexpect True\n" }) catch |err|
         return customInfraFailure(allocator, timer, "failed to write app main.roc: {}", .{err});
 
     const serve_dir = createWorkSubdir(io, allocator, env, "install-serve") catch |err|
@@ -7365,13 +7793,19 @@ fn customInstallRunRoundtrip(io: std.Io, allocator: Allocator, env: *const CaseE
     }
     server_thread.join();
 
-    // 2. Run the installed shorthand.
+    // 2. Test the installed shorthand's explicitly requested root.
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "test", "hello_tool", "--no-cache" },
+        .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }},
+    })) |failure| return failure;
+
+    // 3. Run the installed shorthand.
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
         .args = &.{ "run", "hello_tool" },
         .contains = &.{.{ .stream = .stdout, .text = "installed tool ran" }},
     })) |failure| return failure;
 
-    // 3. Desert island: delete the package cache; the installed tool must
+    // 4. Desert island: delete the package cache; the installed tool must
     //    still run (and must not touch the network—the server is gone).
     std.Io.Dir.cwd().deleteTree(io, env.dirs.roc_cache_dir) catch |err|
         return customInfraFailure(allocator, timer, "failed to delete cache dir: {}", .{err});
@@ -7380,13 +7814,13 @@ fn customInstallRunRoundtrip(io: std.Io, allocator: Allocator, env: *const CaseE
         .contains = &.{.{ .stream = .stdout, .text = "installed tool ran" }},
     })) |failure| return failure;
 
-    // 4. Same name + same URL is an idempotent no-op (no download).
+    // 5. Same name + same URL is an idempotent no-op (no download).
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
         .args = &.{ "install", "hello_tool", url },
         .contains = &.{.{ .stream = .stdout, .text = "already installed" }},
     })) |failure| return failure;
 
-    // 5. Same name + different URL fails without touching the entry
+    // 6. Same name + different URL fails without touching the entry
     //    (detected before any download).
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
         .args = &.{ "install", "hello_tool", "https://example.com/other/1.2.3/AQmoxbAY7eQfXMbi9XUxBvBGZcxZCs1tdNeFriRRkwSc.tar.zst" },
@@ -7398,7 +7832,7 @@ fn customInstallRunRoundtrip(io: std.Io, allocator: Allocator, env: *const CaseE
         .contains = &.{.{ .stream = .stdout, .text = "installed tool ran" }},
     })) |failure| return failure;
 
-    // 6. Build flags that cannot apply to a prebuilt binary are rejected.
+    // 7. Build flags that cannot apply to a prebuilt binary are rejected.
     if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
         .args = &.{ "run", "hello_tool", "--opt=speed" },
         .exit = .failure,
@@ -8514,6 +8948,221 @@ fn customGlueDylibCacheHit(io: std.Io, allocator: Allocator, env: *const CaseEnv
     return null;
 }
 
+/// A package the developer downloaded ships with its publisher's tests, and
+/// `roc test` must leave those alone. The dependency here is staged straight
+/// into the isolated package cache under the hash its URL names, so no network
+/// is involved, and its `expect`s are written to fail loudly if they ever run.
+fn customRocTestSkipsUrlDependencyExpects(
+    io: std.Io,
+    allocator: Allocator,
+    env: *CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    // Any base58 name works: a cache hit is looked up by the URL's filename
+    // and never re-verified against the directory's contents.
+    const dep_hash = "3Fw8gN1qsy7Zc4kR6vTbEuXhLm2pDoAj5YWnQrKtVxSz";
+
+    const cache_package_dir = std.fs.path.join(allocator, &.{ env.dirs.roc_cache_dir, "roc", "packages", dep_hash }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate downloaded dependency cache path: {}", .{err});
+    defer allocator.free(cache_package_dir);
+    std.Io.Dir.cwd().createDirPath(io, cache_package_dir) catch |err|
+        return customInfraFailure(allocator, timer, "failed to create downloaded dependency cache dir: {}", .{err});
+
+    if (writeCaseFile(io, allocator, timer, cache_package_dir, "main.roc", "package [Greeting] {}\n")) |failure| return failure;
+    if (writeCaseFile(io, allocator, timer, cache_package_dir, "Greeting.roc",
+        \\Greeting := [].{
+        \\    greet : Str -> Str
+        \\    greet = |name| "Hello, ${name}!"
+        \\}
+        \\
+        \\# These belong to whoever published this package. If `roc test` ever runs
+        \\# them the case fails on the test count and on the failure itself.
+        \\expect Greeting.greet("Roc") == "Hello, Roc!"
+        \\expect Bool.False
+        \\
+    )) |failure| return failure;
+
+    const dep_url = std.fmt.allocPrint(allocator, "https://example.com/greeting/releases/download/0.1.0/{s}.tar.zst", .{dep_hash}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to render downloaded dependency URL: {}", .{err});
+    defer allocator.free(dep_url);
+
+    const app_source = std.fmt.allocPrint(allocator,
+        \\app [main!] {{
+        \\    dep: "{s}",
+        \\}}
+        \\
+        \\import dep.Greeting
+        \\
+        \\expect Greeting.greet("World") == "Hello, World!"
+        \\
+        \\main! = |_| Ok({{}})
+        \\
+    , .{dep_url}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to render downloaded-dependency app source: {}", .{err});
+    defer allocator.free(app_source);
+
+    if (writeCaseFile(io, allocator, timer, env.dirs.work_dir, "app_with_url_dep.roc", app_source)) |failure| return failure;
+
+    const app_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "app_with_url_dep.roc" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate downloaded-dependency app path: {}", .{err});
+    defer allocator.free(app_path);
+
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "test", "--no-cache" },
+        .roc_file = app_path,
+        .exit = .success,
+        // Exactly the app's own expect: the dependency contributes none.
+        .contains = &.{.{ .stream = .stdout, .text = "All (1) tests passed" }},
+        .not_contains = &.{
+            .{ .stream = .stdout, .text = "failed" },
+            .{ .stream = .stderr, .text = "failed" },
+            .{ .stream = .stderr, .text = "panic" },
+        },
+    })) |failure| return failure;
+
+    // The same bundle is developer-selected when it is the command's root, so
+    // its own expects must run even though its package identity remains a URL.
+    if (writeCaseFile(io, allocator, timer, cache_package_dir, "Greeting.roc",
+        \\Greeting := [].{
+        \\    greet : Str -> Str
+        \\    greet = |name| "Hello, ${name}!"
+        \\}
+        \\
+        \\expect Greeting.greet("Roc") == "Hello, Roc!"
+        \\expect Greeting.greet("") == "Hello, !"
+        \\
+    )) |failure| return failure;
+
+    return runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "test", "--no-cache", dep_url },
+        .exit = .success,
+        .contains = &.{.{ .stream = .stdout, .text = "All (2) tests passed" }},
+        .not_contains = &.{
+            .{ .stream = .stdout, .text = "failed" },
+            .{ .stream = .stderr, .text = "failed" },
+            .{ .stream = .stderr, .text = "panic" },
+        },
+    });
+}
+
+/// A dependency reached through a filesystem path is the developer's own code,
+/// so its `expect`s run alongside the root's. They also have to stop running
+/// once nothing has changed: results are cached against a hash of the source
+/// that produced them, so a second run reports them without executing any.
+fn customRocTestCachesLocalDependencyExpects(
+    io: std.Io,
+    allocator: Allocator,
+    env: *CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    const dep_dir = createWorkSubdir(io, allocator, env, "greeting_pkg") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create path dependency dir: {}", .{err});
+    defer allocator.free(dep_dir);
+
+    if (writeCaseFile(io, allocator, timer, dep_dir, "main.roc", "package [Greeting] {}\n")) |failure| return failure;
+
+    const dep_module_source =
+        \\Greeting := [].{
+        \\    greet : Str -> Str
+        \\    greet = |name| "Hello, ${name}!"
+        \\}
+        \\
+        \\expect Greeting.greet("Roc") == "Hello, Roc!"
+        \\expect Greeting.greet("") == "Hello, !"
+        \\
+    ;
+    if (writeCaseFile(io, allocator, timer, dep_dir, "Greeting.roc", dep_module_source)) |failure| return failure;
+
+    if (writeCaseFile(io, allocator, timer, env.dirs.work_dir, "app_with_path_dep.roc",
+        \\app [main!] {
+        \\    dep: "./greeting_pkg/main.roc",
+        \\}
+        \\
+        \\import dep.Greeting
+        \\
+        \\expect Greeting.greet("World") == "Hello, World!"
+        \\
+        \\main! = |_| Ok({})
+        \\
+    )) |failure| return failure;
+
+    const app_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "app_with_path_dep.roc" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate path-dependency app path: {}", .{err});
+    defer allocator.free(app_path);
+
+    // The app's one expect plus the dependency's two.
+    const all_three_passed: OutputNeedle = .{ .stream = .stdout, .text = "All (3) tests passed" };
+    const cached_marker: OutputNeedle = .{ .stream = .stdout, .text = "(cached)" };
+    const ran_tests: []const OutputNeedle = &.{
+        .{ .stream = .stdout, .text = "failed" },
+        .{ .stream = .stderr, .text = "panic" },
+        .{ .stream = .stdout, .text = "(cached)" },
+    };
+    const reused_results: []const OutputNeedle = &.{
+        .{ .stream = .stdout, .text = "failed" },
+        .{ .stream = .stderr, .text = "panic" },
+    };
+
+    // First run: nothing is cached, so every root actually runs.
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{"test"},
+        .roc_file = app_path,
+        .exit = .success,
+        .contains = &.{all_three_passed},
+        .not_contains = ran_tests,
+    })) |failure| return failure;
+
+    // Second run: same sources, so the stored results answer every root and no
+    // test executes.
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{"test"},
+        .roc_file = app_path,
+        .exit = .success,
+        .contains = &.{ all_three_passed, cached_marker },
+        .not_contains = reused_results,
+    })) |failure| return failure;
+
+    // Editing the dependency changes its source hash, which must invalidate the
+    // entry it keys and send those roots back through execution.
+    if (writeCaseFile(io, allocator, timer, dep_dir, "Greeting.roc", "# edited\n" ++ dep_module_source)) |failure| return failure;
+
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{"test"},
+        .roc_file = app_path,
+        .exit = .success,
+        .contains = &.{all_three_passed},
+        .not_contains = ran_tests,
+    })) |failure| return failure;
+
+    // And the edited sources cache in turn.
+    return runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{"test"},
+        .roc_file = app_path,
+        .exit = .success,
+        .contains = &.{ all_three_passed, cached_marker },
+        .not_contains = reused_results,
+    });
+}
+
+/// Write one file of a case's fixture, reporting the path in any failure.
+fn writeCaseFile(
+    io: std.Io,
+    allocator: Allocator,
+    timer: *harness.Timer,
+    dir: []const u8,
+    name: []const u8,
+    data: []const u8,
+) ?TestResult {
+    const path = std.fs.path.join(allocator, &.{ dir, name }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate path for {s}: {}", .{ name, err });
+    defer allocator.free(path);
+    std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = data }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write {s}: {}", .{ path, err });
+    return null;
+}
+
 fn customGluePackageNominalApiAlias(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
     const output_dir = createWorkSubdir(io, allocator, env, "glue-out") catch |err|
         return customInfraFailure(allocator, timer, "failed to create glue output dir: {}", .{err});
@@ -9600,6 +10249,12 @@ fn printProblemResult(tc: CliCase, r: TestResult, ms: f64) void {
     printRepro(tc);
 }
 
+/// How many lines of a failing case's captured output to print. A crashing
+/// child's own report is the whole diagnosis on a platform the reader cannot
+/// reproduce on, and a Roc crash report plus a stack trace runs to dozens of
+/// lines, so the budget has to clear that with room to spare.
+const captured_output_line_budget = 200;
+
 fn printCapturedOutput(label: []const u8, capture: ?[]const u8) void {
     const data = capture orelse return;
     if (data.len == 0) return;
@@ -9609,7 +10264,7 @@ fn printCapturedOutput(label: []const u8, capture: ?[]const u8) void {
         if (line.len == 0) continue;
         if (count == 0) {
             std.debug.print("        {s}: {s}\n", .{ label, line });
-        } else if (count < 5) {
+        } else if (count < captured_output_line_budget) {
             std.debug.print("        {s}\n", .{line});
         } else {
             std.debug.print("        ... ({s} truncated)\n", .{label});
@@ -9977,6 +10632,27 @@ test "diagnostic summary detection ignores later diagnostic headers" {
 
     const summary_start = diagnosticSummaryStart(stderr) orelse return error.SummaryNotFound;
     try std.testing.expectEqualStrings("── 1 error and 0 warnings ─── app.roc\n── ✗ linker failed ──────────\nlinker problem", stderr[summary_start..]);
+}
+
+test "wrapped needles match report prose across a word wrap" {
+    const phrase = "Only apps may depend on platforms.";
+
+    // The wrap point moves with the length of the absolute path the report
+    // embeds, so the same sentence breaks in a different place per machine.
+    const wrapped_before = "which is a platform.\nOnly apps may depend on platforms.\n";
+    const wrapped_inside = "which is a platform. Only apps may depend on\nplatforms.\n";
+    const unwrapped = "which is a platform. Only apps may depend on platforms.\n";
+
+    for ([_][]const u8{ wrapped_before, wrapped_inside, unwrapped }) |stderr| {
+        try std.testing.expect(outputHasNeedle(stderr, .{ .stream = .stderr, .text = phrase, .wrapped = true }));
+    }
+
+    // Without the flag the match stays byte-exact, and a wrapped needle still
+    // has to see every word.
+    try std.testing.expect(!outputHasNeedle(wrapped_inside, .{ .stream = .stderr, .text = phrase }));
+    try std.testing.expect(!outputHasNeedle("Only apps may depend on apps.", .{ .stream = .stderr, .text = phrase, .wrapped = true }));
+    // A space in the needle must consume at least one whitespace byte.
+    try std.testing.expect(!outputHasNeedle("Onlyapps", .{ .stream = .stderr, .text = "Only apps", .wrapped = true }));
 }
 
 test "effectiveTimeoutMs extends default for glue suite only" {

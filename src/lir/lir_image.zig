@@ -42,7 +42,12 @@ pub const MAGIC: u32 = 0x52494c52; // "RLIR" in little-endian bytes.
 /// v21: erased calls and procedures carry explicit packed-argument plans.
 /// v22: combines the independent v20 and v21 image changes.
 /// v23: Boxy type descriptors identify field-presence slots explicitly.
-pub const FORMAT_VERSION: u32 = 23;
+/// v24: source file table entries carry package-qualified module identities
+///      alongside display names.
+/// v25: integer arithmetic uses explicit behavior-family operations.
+/// v26: LIR images carry the exact dense Boxy runtime worker proc set.
+/// v27: `expect` statements optionally carry a test observation site.
+pub const FORMAT_VERSION: u32 = 27;
 
 /// Public `ImageError` declaration.
 pub const ImageError = error{
@@ -86,6 +91,7 @@ pub const Header = extern struct {
     _padding: [8]u8 = [_]u8{0} ** 8,
     root_procs: ArrayRef,
     platform_entrypoints: ArrayRef,
+    boxy_worker_procs: ArrayRef,
     store: LirStoreImage,
     layouts: LayoutStoreImage,
     boxy_tables: BoxyTablesImage,
@@ -109,6 +115,7 @@ pub const ProgramView = struct {
     boxy_adapt_steps: []Program.BoxyAdaptStep,
     boxy_payload_steps: []Program.BoxyPayloadStep,
     boxy_method_slots: []Program.BoxyMethodSlot,
+    boxy_worker_procs: []LIR.LirProcSpecId,
     boxy_method_arg_layouts: []layout_mod.Idx,
     boxy_method_hidden_desc_sources: []Program.BoxyMethodHiddenDescSource,
     boxy_erased_arg_layouts: []layout_mod.Idx,
@@ -141,6 +148,8 @@ pub const LirStoreImage = extern struct {
     next_synthetic_symbol: u64,
     source_file_bytes: ArrayRef,
     source_file_ends: ArrayRef,
+    source_file_qualified_bytes: ArrayRef,
+    source_file_qualified_ends: ArrayRef,
     cf_stmt_locs: ArrayRef,
     cf_stmt_regions: ArrayRef,
     cf_stmt_inline_scopes: ArrayRef,
@@ -166,6 +175,8 @@ pub const LirStoreImage = extern struct {
             .next_synthetic_symbol = store.next_synthetic_symbol,
             .source_file_bytes = try arrayRef(base_ptr, image_size, store.source_file_bytes.unsafeRawItemsForView()),
             .source_file_ends = try arrayRef(base_ptr, image_size, store.source_file_ends.unsafeRawItemsForView()),
+            .source_file_qualified_bytes = try arrayRef(base_ptr, image_size, store.source_file_qualified_bytes.unsafeRawItemsForView()),
+            .source_file_qualified_ends = try arrayRef(base_ptr, image_size, store.source_file_qualified_ends.unsafeRawItemsForView()),
             .cf_stmt_locs = try arrayRef(base_ptr, image_size, store.cf_stmt_locs.unsafeRawItemsForView()),
             .cf_stmt_regions = try arrayRef(base_ptr, image_size, store.cf_stmt_regions.unsafeRawItemsForView()),
             .cf_stmt_inline_scopes = try arrayRef(base_ptr, image_size, store.cf_stmt_inline_scopes.unsafeRawItemsForView()),
@@ -198,6 +209,8 @@ pub const LirStoreImage = extern struct {
             .next_synthetic_symbol = store.next_synthetic_symbol,
             .source_file_bytes = try copyArrayRef(allocator, base_ptr, image_capacity, store.source_file_bytes.unsafeRawItemsForView()),
             .source_file_ends = try copyArrayRef(allocator, base_ptr, image_capacity, store.source_file_ends.unsafeRawItemsForView()),
+            .source_file_qualified_bytes = try copyArrayRef(allocator, base_ptr, image_capacity, store.source_file_qualified_bytes.unsafeRawItemsForView()),
+            .source_file_qualified_ends = try copyArrayRef(allocator, base_ptr, image_capacity, store.source_file_qualified_ends.unsafeRawItemsForView()),
             .cf_stmt_locs = try copyArrayRef(allocator, base_ptr, image_capacity, store.cf_stmt_locs.unsafeRawItemsForView()),
             .cf_stmt_regions = try copyArrayRef(allocator, base_ptr, image_capacity, store.cf_stmt_regions.unsafeRawItemsForView()),
             .cf_stmt_inline_scopes = try copyArrayRef(allocator, base_ptr, image_capacity, store.cf_stmt_inline_scopes.unsafeRawItemsForView()),
@@ -230,10 +243,14 @@ pub const LirStoreImage = extern struct {
             .pattern_ids = .empty,
             .source_file_bytes = try guardedListFromRef(u8, "LirStore.source_file_bytes", base_ptr, image_size, self.source_file_bytes),
             .source_file_ends = try guardedListFromRef(u32, "LirStore.source_file_ends", base_ptr, image_size, self.source_file_ends),
+            .source_file_qualified_bytes = try guardedListFromRef(u8, "LirStore.source_file_qualified_bytes", base_ptr, image_size, self.source_file_qualified_bytes),
+            .source_file_qualified_ends = try guardedListFromRef(u32, "LirStore.source_file_qualified_ends", base_ptr, image_size, self.source_file_qualified_ends),
             .cf_stmt_locs = try guardedListFromRef(base.SourceLoc, "LirStore.cf_stmt_locs", base_ptr, image_size, self.cf_stmt_locs),
             .cf_stmt_regions = try guardedListFromRef(base.Region, "LirStore.cf_stmt_regions", base_ptr, image_size, self.cf_stmt_regions),
             .cf_stmt_inline_scopes = try guardedListFromRef(LIR.InlineScopeId, "LirStore.cf_stmt_inline_scopes", base_ptr, image_size, self.cf_stmt_inline_scopes),
             .inline_scopes = try guardedListFromRef(LIR.InlineScope, "LirStore.inline_scopes", base_ptr, image_size, self.inline_scopes),
+            .body_coordinator = null,
+            .body_prefix = std.mem.zeroes(LirStore.BodyPrefix),
             .proc_locs = try guardedListFromRef(base.SourceLoc, "LirStore.proc_locs", base_ptr, image_size, self.proc_locs),
             .proc_debug_names = try guardedListFromRef(LirStore.ProcDebugName, "LirStore.proc_debug_names", base_ptr, image_size, self.proc_debug_names),
             .local_names = try guardedListFromRef(u32, "LirStore.local_names", base_ptr, image_size, self.local_names),
@@ -333,7 +350,7 @@ pub const LayoutStoreImage = extern struct {
             .tag_union_data = try safeListFromRef(layout_mod.TagUnionData, base_ptr, image_size, self.tag_union_data),
             .interned_layouts = std.StringHashMap(layout_mod.Idx).init(allocator),
             .scratch_intern_key = .empty,
-            .interned_recursive_graphs = std.StringHashMap(layout_mod.Idx).init(allocator),
+            .interned_recursive_graphs = layout_mod.Store.RecursiveGraphMap.init(allocator),
             .target_usize = target_usize,
         };
     }
@@ -746,7 +763,7 @@ fn serializeSidecarInto(
         .tag_union_data = try cloneSafeList(layout_mod.TagUnionData, gpa, lowered.layouts.tag_union_data),
         .interned_layouts = std.StringHashMap(layout_mod.Idx).init(gpa),
         .scratch_intern_key = .empty,
-        .interned_recursive_graphs = std.StringHashMap(layout_mod.Idx).init(gpa),
+        .interned_recursive_graphs = layout_mod.Store.RecursiveGraphMap.init(gpa),
         .target_usize = lowered.layouts.target_usize,
     };
     const strings = try lowered.store.strings.clone(gpa);
@@ -824,14 +841,14 @@ pub fn buildSidecarBlob(
 }
 
 comptime {
-    // The LIR image mirrors these three stores field-for-field. When a
-    // serialized field is added to or removed from a store, update the matching
-    // `*Image` extern struct, its `fromStore` and `view` methods, and the
-    // "LIR image round-trips every populated store field" test at the bottom of
-    // this file, then update the expected field count below. A same-build
-    // omission (a new store field left out of the image plumbing) is otherwise
-    // silent, since `FORMAT_VERSION` only guards cross-version mismatches.
-    std.debug.assert(@typeInfo(LirStore).@"struct".fields.len == 30);
+    // The LIR image mirrors each serializable field in these three stores. When
+    // a serialized field is added to or removed from a store, update the
+    // matching `*Image` extern struct, its `fromStore` and `view` methods, and
+    // the "LIR image round-trips every populated store field" test at the
+    // bottom of this file, then update the expected field count below. A
+    // same-build omission is otherwise silent, since `FORMAT_VERSION` only
+    // guards cross-version mismatches.
+    std.debug.assert(@typeInfo(LirStore).@"struct".fields.len == 34);
     std.debug.assert(@typeInfo(layout_mod.Store).@"struct".fields.len == 12);
     std.debug.assert(@typeInfo(base.StringLiteral.Store).@"struct".fields.len == 1);
 }
@@ -858,6 +875,7 @@ pub fn fillHeaderInBuffer(
         .image_size = image_size,
         .root_procs = try arrayRef(base_ptr, image_size, lowered.root_procs.items),
         .platform_entrypoints = try arrayRef(base_ptr, image_size, platform_entrypoints),
+        .boxy_worker_procs = try arrayRef(base_ptr, image_size, lowered.boxy_worker_procs.items),
         .store = try LirStoreImage.fromStore(base_ptr, image_size, &lowered.store),
         .layouts = try LayoutStoreImage.fromStore(base_ptr, image_size, &lowered.layouts),
         .boxy_tables = try BoxyTablesImage.fromProgram(base_ptr, image_size, lowered),
@@ -869,6 +887,7 @@ pub const CopiedProgram = struct {
     image_capacity: usize,
     root_procs: ArrayRef,
     platform_entrypoints: ArrayRef,
+    boxy_worker_procs: ArrayRef,
     store: LirStoreImage,
     layouts: LayoutStoreImage,
     boxy_tables: BoxyTablesImage,
@@ -881,6 +900,7 @@ pub const CopiedProgram = struct {
             .image_size = image_size,
             .root_procs = self.root_procs,
             .platform_entrypoints = self.platform_entrypoints,
+            .boxy_worker_procs = self.boxy_worker_procs,
             .store = self.store,
             .layouts = self.layouts,
             .boxy_tables = self.boxy_tables,
@@ -905,6 +925,7 @@ pub fn copyProgramIntoBuffer(
         .image_capacity = image_capacity,
         .root_procs = try copyArrayRef(allocator, base_ptr, image_capacity, lowered.root_procs.items),
         .platform_entrypoints = try copyArrayRef(allocator, base_ptr, image_capacity, platform_entrypoints),
+        .boxy_worker_procs = try copyArrayRef(allocator, base_ptr, image_capacity, lowered.boxy_worker_procs.items),
         .store = try LirStoreImage.copyFromStore(allocator, base_ptr, image_capacity, &lowered.store),
         .layouts = try LayoutStoreImage.copyFromStore(allocator, base_ptr, image_capacity, &lowered.layouts),
         .boxy_tables = try BoxyTablesImage.copyFromProgram(allocator, base_ptr, image_capacity, lowered),
@@ -968,6 +989,7 @@ pub fn viewMappedImageWithAllocator(
         .boxy_adapt_steps = boxy_tables.adapt_steps,
         .boxy_payload_steps = boxy_tables.payload_steps,
         .boxy_method_slots = boxy_tables.method_slots,
+        .boxy_worker_procs = try sliceFromRef(LIR.LirProcSpecId, mutable_base, @intCast(header.image_size), header.boxy_worker_procs),
         .boxy_method_arg_layouts = boxy_tables.method_arg_layouts,
         .boxy_method_hidden_desc_sources = boxy_tables.method_hidden_desc_sources,
         .boxy_erased_arg_layouts = boxy_tables.erased_arg_layouts,
@@ -1122,6 +1144,7 @@ test "LIR image views empty and populated boxy tables" {
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_adapt_steps.len);
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_payload_steps.len);
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_method_slots.len);
+    try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_worker_procs.len);
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_method_arg_layouts.len);
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_method_hidden_desc_sources.len);
     try std.testing.expectEqual(@as(usize, 0), empty_view.boxy_erased_arg_layouts.len);
@@ -1157,6 +1180,7 @@ test "LIR image views empty and populated boxy tables" {
             .hidden_desc_sources = .{ .start = 0, .len = 1 },
         },
     });
+    try lowered.boxy_worker_procs.append(allocator, @enumFromInt(fixtureTableIndex(0)));
     try lowered.boxy_type_descs.append(allocator, .{
         .payload_layout = .zst,
         .contains_refcounted = true,
@@ -1219,6 +1243,7 @@ test "LIR image views empty and populated boxy tables" {
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_adapt_steps.len);
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_payload_steps.len);
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_method_slots.len);
+    try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_worker_procs.len);
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_method_arg_layouts.len);
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_method_hidden_desc_sources.len);
     try std.testing.expectEqual(@as(usize, 1), populated_view.boxy_erased_arg_layouts.len);
@@ -1234,6 +1259,7 @@ test "LIR image views empty and populated boxy tables" {
     try std.testing.expectEqual(layout_mod.Idx.zst, populated_view.boxy_method_arg_layouts[0]);
     try std.testing.expectEqual(layout_mod.Idx.u64, populated_view.boxy_erased_arg_layouts[0]);
     try std.testing.expectEqual(Program.BoxySpan{ .start = 0, .len = 1 }, populated_view.boxy_method_slots[0].adapter.call_descs);
+    try std.testing.expectEqual(@as(u32, 0), @intFromEnum(populated_view.boxy_worker_procs[0]));
     try std.testing.expectEqual(@as(u32, 0), populated_view.boxy_method_hidden_desc_sources[0].slot);
     try std.testing.expectEqual(@as(u16, 7), populated_view.layouts.struct_fields.fieldItem(.index, struct_field_idx));
     try std.testing.expectEqual(layout_mod.Idx.str, populated_view.layouts.struct_fields.fieldItem(.layout, struct_field_idx));
@@ -1246,7 +1272,7 @@ test "LIR image declarations are referenced" {
     std.testing.refAllDecls(@This());
 }
 
-/// The 20 `LirStore` array-backed lists serialized as `ArrayRef`s, in the order
+/// The 22 `LirStore` array-backed lists serialized as `ArrayRef`s, in the order
 /// they appear in `LirStoreImage`. `strings` (a sub-image) and the scalar
 /// `next_synthetic_symbol` are serialized too but exercised separately below.
 const serialized_guarded_fields = [_][]const u8{
@@ -1263,6 +1289,8 @@ const serialized_guarded_fields = [_][]const u8{
     "proc_specs",
     "source_file_bytes",
     "source_file_ends",
+    "source_file_qualified_bytes",
+    "source_file_qualified_ends",
     "cf_stmt_locs",
     "cf_stmt_regions",
     "cf_stmt_inline_scopes",
@@ -1419,6 +1447,8 @@ test "LIR image copies and round-trips every populated store field" {
     try std.testing.expectEqual(base.SourceLoc.none, view.store.current_loc);
     try std.testing.expectEqual(base.Region.zero(), view.store.current_region);
     try std.testing.expectEqual(LIR.InlineScopeId.none, view.store.current_inline_scope);
+    try std.testing.expectEqual(@as(?*const LirStore, null), view.store.body_coordinator);
+    try std.testing.expectEqual(std.mem.zeroes(LirStore.BodyPrefix), view.store.body_prefix);
     // A viewed image is read-only, so string insertion is disabled.
     try std.testing.expectEqual(false, view.store.strings_insertable);
 

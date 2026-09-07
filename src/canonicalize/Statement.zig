@@ -42,7 +42,7 @@ pub const Statement = union(enum) {
     /// Not valid at the top level of a module.
     ///
     /// ```roc
-    /// var foo_ = "bar"
+    /// var $foo_ = "bar"
     /// ```
     s_var: struct {
         pattern_idx: Pattern.Idx,
@@ -192,7 +192,7 @@ pub const Statement = union(enum) {
     /// A where alias declaration, naming a reusable set of method constraints.
     ///
     /// ```roc
-    /// a.Sortable : where [a.compare : a -> [LT, EQ, GT]]
+    /// a.Sortable : where [a.order_relative_to : a -> [Before, Same, After]]
     /// ```
     ///
     /// The declaration's type is `receiver`: a rigid variable carrying every
