@@ -94,8 +94,7 @@ fn contains(names: []const []const u8, name: []const u8) bool {
 /// Prepare and verify an input archive, writing output only after its contract passes.
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
-    const args = try init.minimal.args.toSlice(gpa);
-    defer gpa.free(args);
+    const args = try init.minimal.args.toSlice(init.arena.allocator());
     if (args.len != 4) return error.ExpectedOsInputAndOutputPaths;
     const os = std.meta.stringToEnum(Os, args[1]) orelse return error.UnsupportedTarget;
     const bytes = try std.Io.Dir.cwd().readFileAlloc(init.io, args[2], gpa, .unlimited);
