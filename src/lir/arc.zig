@@ -8326,23 +8326,31 @@ test "ARC emission shares solver resources without allocating when no capture is
 }
 
 test "ARC emission exclusions copy once and preserve solver resources on allocation failure" {
-    const borrow_anchors = [_]bool{ true, false, true };
-    var emission = EmissionRefcounted{ .shared = &borrow_anchors };
+    var f = try ArcTest.init(testing.allocator);
+    defer f.deinit();
+
+    const first_list = try f.local(f.list_str);
+    const scalar = try f.local(.i64);
+    const second_list = try f.local(f.list_str);
+    const borrow_anchors = try arc_solve.computeLocalContainsRefcounted(f.allocator, &f.store, &f.layouts);
+    defer f.allocator.free(borrow_anchors);
+
+    var emission = EmissionRefcounted{ .shared = borrow_anchors };
     defer emission.deinit(testing.allocator);
 
     // Already ineligible locals need no copy, even with an allocator that fails.
-    try emission.exclude(testing.failing_allocator, @enumFromInt(1));
-    try testing.expectError(error.OutOfMemory, emission.exclude(testing.failing_allocator, @enumFromInt(0)));
-    try testing.expect(emission.slice().ptr == &borrow_anchors);
+    try emission.exclude(testing.failing_allocator, scalar);
+    try testing.expectError(error.OutOfMemory, emission.exclude(testing.failing_allocator, first_list));
+    try testing.expect(emission.slice().ptr == borrow_anchors.ptr);
     try testing.expectEqualSlices(bool, &.{ true, false, true }, emission.slice());
 
-    try emission.exclude(testing.allocator, @enumFromInt(0));
+    try emission.exclude(testing.allocator, first_list);
     const owned = emission.slice().ptr;
-    try testing.expect(owned != &borrow_anchors);
-    try emission.exclude(testing.failing_allocator, @enumFromInt(2));
+    try testing.expect(owned != borrow_anchors.ptr);
+    try emission.exclude(testing.failing_allocator, second_list);
     try testing.expect(emission.slice().ptr == owned);
     try testing.expectEqualSlices(bool, &.{ false, false, false }, emission.slice());
-    try testing.expectEqualSlices(bool, &.{ true, false, true }, &borrow_anchors);
+    try testing.expectEqualSlices(bool, &.{ true, false, true }, borrow_anchors);
 }
 
 test "ARC uses erased capture views as solver-only Boxy borrow anchors" {
