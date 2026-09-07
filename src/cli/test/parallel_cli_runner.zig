@@ -6094,6 +6094,8 @@ fn writeCallTreeApp(
     proc_count: usize,
 ) CliRunnerError![]const u8 {
     const platform_path = try absoluteFromProjectRoot(allocator, "test/fx-open/platform/main.roc");
+    // Windows accepts forward slashes, which need no escaping in Roc strings.
+    if (builtin.os.tag == .windows) std.mem.replaceScalar(u8, platform_path, '\\', '/');
 
     var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
     defer dir.close(io);
