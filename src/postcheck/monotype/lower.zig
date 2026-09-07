@@ -33344,18 +33344,18 @@ const BodyContext = struct {
             self.graph,
             self.draft,
         );
-        try body_ctx.inheritActiveConstBinding(self);
-        body_ctx.evidence = rootEvidence(eval.entry_template, self.restore_evidence.vector);
-        if (self.restore_evidence.vector.len < entry_template.evidence_params.len) {
-            const root_evidence = try self.rootEdgeEvidence(store_view, eval.entry_template, entry_template);
-            body_ctx.evidence = rootEvidenceWithSubstitution(
-                eval.entry_template,
-                templateSchemaIn(store_view, &entry_template),
-                root_evidence,
-            );
-            try body_ctx.seedSubstitution(body_ctx.evidence.schema.?, root_evidence.subst);
-        }
         defer body_ctx.deinit();
+        try body_ctx.inheritActiveConstBinding(self);
+        const schema = templateSchemaIn(store_view, &entry_template);
+        const root_evidence: EdgeEvidence = if (self.restore_evidence.vector.len < entry_template.evidence_params.len)
+            try body_ctx.rootEdgeEvidence(store_view, eval.entry_template, entry_template)
+        else
+            .{
+                .subst = try body_ctx.substitutionFromCheckedTypes(store_view, schema.scheme_vars),
+                .vector = self.restore_evidence.vector,
+            };
+        body_ctx.evidence = rootEvidenceWithSubstitution(eval.entry_template, schema, root_evidence);
+        try body_ctx.seedSubstitution(schema, root_evidence.subst);
         body_ctx.source_region_override = source_region_override;
         body_ctx.current_entry_root = current_entry_root orelse .{
             .module = store_view.key,
