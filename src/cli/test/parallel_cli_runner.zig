@@ -4017,7 +4017,7 @@ fn customHotReloadDevShim(
         "-fno-compiler-rt",
         "--dep",
         "erased_callable",
-        "-Mroot=src/cli/test/hot_reload_host_rc.zig",
+        "-Mroot=test/cli/hot_reload_host_rc.zig",
         "--dep",
         "tracy",
         "-Merased_callable=src/builtins/erased_callable.zig",
