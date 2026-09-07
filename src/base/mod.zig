@@ -29,6 +29,7 @@ pub const post_check_task_executor = @import("post_check_task_executor.zig");
 pub const ConcurrentU64 = @import("ConcurrentU64.zig").ConcurrentU64;
 pub const SmallStringInterner = @import("SmallStringInterner.zig");
 pub const SerialStringInterner = @import("SerialStringInterner.zig");
+pub const InternedBytes = @import("InternedBytes.zig");
 pub const SpecializationStrategy = @import("SpecializationStrategy.zig").SpecializationStrategy;
 pub const ModuleIdentity = @import("module_identity.zig");
 

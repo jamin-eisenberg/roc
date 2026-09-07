@@ -136,6 +136,41 @@ is not a reason to hash an ID. Direct columns avoid hashing, table growth,
 repeated key storage, allocator traffic, and duplicate per-consumer indexing
 work.
 
+Mutable checked module tables retain contiguous capacity while checking
+produces its output, including when procedure templates are extended with
+compile-time entry wrappers. Known batch sizes reserve capacity once;
+incremental appends grow amortized. Producing checked module data must not
+repeatedly copy a completed prefix, and serialization writes only live rows,
+never spare capacity.
+
+Checked source schemes are interned by their complete structural keys. The
+owning table retains the first representative root and assigns dense scheme
+IDs in insertion order. Its probing index stores only those IDs and travels
+with the serialized checked module, so mutable and frozen lookups never scan the
+scheme table or rebuild an index from its rows.
+
+While producing checked data for an immutable source module, checking computes
+each requested source scheme once and retains its scheme ID by resolved source
+variable. Consumers use that explicit source identity; a specialized checked
+root's scheme cannot substitute for the source scheme. This index is temporary
+and is released after its last consumer, before compile-time evaluation; error
+exits also release it. Scheme hashing may reuse traversal
+capacity, but every complete digest starts fresh identity and cycle numbering,
+including after allocation failure. Neither this index nor hashing scratch is
+added to the serialized checked module or reused across source-store mutations.
+
+Instantiation substitutions, generalization visitation, and per-query function
+effect memos retain sparse storage while clearing and iterating only live
+entries. A large earlier query must not impose its retained capacity on each
+subsequent small query. These changes do not extend memo lifetimes across
+solver mutations.
+
+Annotation visitation is local to one generation scope. Nested declaration
+generation starts with an empty visited set and restores its caller's exact
+marks on exit, including allocation failure. Entering a scope must not scan or
+copy the caller's visited set. Clearing and restoration are proportional to
+the words touched in that scope, rather than the module's CIR node count.
+
 LLVM's store-indexed local-slot and deferred-capture columns retain capacity
 across procedures and module generation. Only newly added store rows are
 initialized. Procedure exit, including allocation failure, invalidates the
@@ -5730,9 +5765,13 @@ Restrictions:
   default-incompatible—the `defaulted(d1) ~ defaulted(d2)` conflict and its
   "Incompatible Defaults" report are no longer constructible from source and
   remain as identity-skew invariants, pinned at the unify level—and every
-  omission site of a defaulted field is a syntactically explicit nominal
-  construction (`Cfg.{...}`), which is what enables canonicalize-side
-  default-cycle analysis for the pure-expression defaults work. Derived
+  omission site of a defaulted field constructs a nominal, either explicitly
+  (`Cfg.{...}`) or through an expected nominal type (`cfg : Cfg; cfg = {}`).
+  Empty and nonempty literals use the same backing-row relation: omission
+  validates every field and the complete extension before retaining the nominal
+  result, and records each default on its source construction. Canonicalization
+  analyzes cycles through explicit constructors; checking also analyzes the
+  omissions determined by expected types. Derived
   codecs reach defaulted fields through the nominal's derived methods
   (`parser_for : _` etc.), which derive against the backing row.
 - `?:` and `??` do not combine: a default makes the field never missing,
@@ -5765,8 +5804,8 @@ Restrictions:
     (lookups resolving to same-module defs, walked into their bodies—
     except lambda bodies, per the function-value rule below) and
     OMISSION edges (a LOCAL nominal construction whose literal omits a
-    declared defaulted field—syntactically explicit post the nominal-only
-    restriction). Value references only point down the import DAG, so a
+    declared defaulted field through an explicit constructor). Value references
+    only point down the import DAG, so a
     name-resolvable cycle can never leave the declaring module; the pass
     is module-local without loss. Each cyclic SCC containing a default
     reports `record_default_reference_cycle` ("Default Value Cycle")
@@ -5813,8 +5852,12 @@ Restrictions:
     `defaultMaterializationIsRecursive` walk descends every expression
     form and additionally follows same-module reference edges,
     DISPATCH-RESOLVED call targets, type-dispatch method bindings, and
-    omitted defaulted fields on SOLVED rows (which also covers
-    foreign-omission edges). It applies the same invoked-ness rules as
+    the exact omitted-default entries emitted by unification (which also
+    covers implicit nominal lifting and foreign-omission edges). A dense
+    construction index and links into the omission table are built once per
+    judgment, so each walk visits only that construction's omissions rather
+    than scanning the module or reconstructing omissions from solved types.
+    It applies the same invoked-ness rules as
     CAN—a lambda or closure reached as a value walks its captures but
     not its body; invoked-ness follows name-resolvable reference chains
     to the def body they name (re-traversed by necessity: a mixed cycle
@@ -10897,11 +10940,21 @@ contain members from other proc specs that share ownership-neutral locals. The
 proc liveness domain counts exactly the members in its own frame, since an
 outside member cannot occur on one of that proc's paths. It derives those
 counts in one linear frame scan from the solved leader relation, so the module
-solution retains no redundant flat group-member table. The proc domain also
-indexes its resource bits by the solved group leader. Lender-death queries
-visit only that group's proc-local resources, including solver-only anchors;
-they never scan unrelated groups.
-Join ownership sets use the resource prefix of this same per-proc domain.
+solution retains no redundant flat group-member table.
+Ownership indices retain producer-local order independently of raw liveness
+numbering. Each source procedure's immutable liveness graph owns one compact
+mapping that places its resource locals contiguously by solved borrow group;
+all ownership variants reuse it. Singleton-only frames use identity numbering
+without a mapping allocation. The extra group and borrowed-result bits keep
+their original meanings and remain outside the raw resource-bit prefix.
+Queries excluding one group member inspect only that group's raw-bit range,
+with the excluded bit removed. Sparse snapshots answer range-existence queries
+using null pointers for empty subtrees and descend only at interval boundaries; neither
+resource count nor group membership count is scanned per query. No mutable
+per-statement group counters or additional membership sets are maintained.
+Solver-only resource anchors participate exactly like concrete RC resources in
+these queries. Group-extension bits are not substitutes for raw member bits:
+their read-before-rebind kill equations differ.
 Consequently neither ownership nor liveness rows are widened by locals from
 other procedures. Unrelated scalar locals are not ARC resources and never
 receive raw liveness bits. This distinction is load-bearing for wide static
@@ -11086,6 +11139,13 @@ same-value alias clears that entry bit. Borrowing reads leave it set. At each
 normal return, the bits still set are intersected with every other path that
 returns the same discriminant. A loop is the ordinary finite fixed point over
 the per-resource rows below.
+
+Restitution consumes the structural lift's existing procedure statement
+inventory. Its reusable scratch arrays and statement-to-ordinal lookup contain
+only the active procedure's statements. Initialization, per-parameter scratch
+merges, and final receipt emission iterate that compact domain, never the
+module statement count. Only the final receipt table output is indexed by
+module statement id.
 
 The analysis is a polynomial product of independent finite resource states, not
 an enumeration of parameter subsets. For each represented entry parameter

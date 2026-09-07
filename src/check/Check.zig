@@ -171,7 +171,7 @@ unify_scratch: unifier.Scratch,
 /// reusable scratch arrays used in occurs check
 occurs_scratch: occurs.Scratch,
 /// Type annotation nodes already seen while generating one annotation type.
-seen_annos: std.DynamicBitSetUnmanaged,
+seen_annos: collections.ScopedBitSet,
 /// A pool of solver envs
 env_pool: EnvPool,
 /// wrapper around generalization, contains some internal state used to do it's work
@@ -183,7 +183,7 @@ return_constraints: std.ArrayListUnmanaged(ReturnConstraint),
 /// Stack of active lambda-owned return constraint ranges.
 return_constraint_frames: std.ArrayListUnmanaged(ReturnConstraintFrame),
 /// A map from one var to another. Used in instantiation and var copying
-var_map: std.AutoHashMap(Var, Var),
+var_map: collections.DenseMap(Var, Var),
 /// A map from one var to another. Used in instantiation and var copying
 var_set: std.AutoHashMap(Var, void),
 /// Reusable visited set for validating the concrete content of values passed
@@ -896,7 +896,7 @@ effectful_lambda_bodies: std.AutoHashMap(CIR.Expr.Idx, void),
 pending_function_effect_dependencies: std.ArrayListUnmanaged(Var),
 function_effect_dependency_frame_starts: std.ArrayListUnmanaged(usize),
 /// Reusable sparse memo for one directed function-effect graph query.
-function_effect_resolution: std.AutoHashMap(Var, FunctionEffectResolution),
+function_effect_resolution: collections.DenseMap(Var, FunctionEffectResolution),
 /// Scratch for `beginCommitProbe`: the caller env's var-pool length per rank
 /// at probe start, restored on a failed probe's rollback. One buffer suffices
 /// because commit-probes never nest. The type store's trail-based savepoints
@@ -1021,8 +1021,8 @@ fn typeAnnoSeen(self: *const Self, anno_idx: CIR.TypeAnno.Idx) bool {
     return self.seen_annos.isSet(nodeSlot(anno_idx));
 }
 
-fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) void {
-    self.seen_annos.set(nodeSlot(anno_idx));
+fn markTypeAnnoSeen(self: *Self, anno_idx: CIR.TypeAnno.Idx) std.mem.Allocator.Error!void {
+    try self.seen_annos.set(self.gpa, nodeSlot(anno_idx));
 }
 
 /// A static-dispatch receiver relation copied by instantiating a constrained
@@ -2559,10 +2559,10 @@ fn initAssumePrepared(
         .import_mapping = import_mapping,
         .unify_scratch = try unifier.Scratch.init(gpa),
         .occurs_scratch = try occurs.Scratch.init(gpa),
-        .seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(gpa, node_count),
+        .seen_annos = try collections.ScopedBitSet.initEmpty(gpa, node_count),
         .env_pool = try EnvPool.init(gpa),
         .generalizer = try Generalizer.init(gpa, types),
-        .var_map = std.AutoHashMap(Var, Var).init(gpa),
+        .var_map = collections.DenseMap(Var, Var).init(gpa),
         .constraints = try Constraint.SafeList.initCapacity(gpa, 32),
         .return_constraints = .empty,
         .return_constraint_frames = .empty,
@@ -2682,7 +2682,7 @@ fn initAssumePrepared(
         .effectful_lambda_bodies = std.AutoHashMap(CIR.Expr.Idx, void).init(gpa),
         .pending_function_effect_dependencies = .empty,
         .function_effect_dependency_frame_starts = .empty,
-        .function_effect_resolution = std.AutoHashMap(Var, FunctionEffectResolution).init(gpa),
+        .function_effect_resolution = collections.DenseMap(Var, FunctionEffectResolution).init(gpa),
         .probe_var_pool_lens = .empty,
     };
 
@@ -6575,7 +6575,7 @@ fn instantiateVarWithSubs(
 fn substitutedStructuralOrigin(
     self: *Self,
     origin: StructuralSchemeRequirementOrigin,
-    var_map: *const std.AutoHashMap(Var, Var),
+    var_map: *const collections.DenseMap(Var, Var),
 ) StructuralSchemeRequirementOrigin {
     const receiver_root = self.types.resolveVar(origin.receiver_var).var_;
     const fn_root = self.types.resolveVar(origin.constraint_fn_var).var_;
@@ -14444,13 +14444,11 @@ fn ensureTypeDeclGenerated(
     self.setTypeDeclGenerationState(decl_idx, .generating);
     errdefer self.setTypeDeclGenerationState(decl_idx, .not_generated);
 
-    const outer_seen_annos = self.seen_annos;
+    const anno_scope = self.seen_annos.enterScope();
+    defer self.seen_annos.leaveScope(anno_scope);
     const outer_type_decl_rigid_vars = self.type_decl_rigid_vars;
-    self.seen_annos = try std.DynamicBitSetUnmanaged.initEmpty(self.gpa, @intCast(self.cir.store.nodes.len()));
     self.type_decl_rigid_vars = .{};
     defer {
-        self.seen_annos.deinit(self.gpa);
-        self.seen_annos = outer_seen_annos;
         self.type_decl_rigid_vars.deinit(self.gpa);
         self.type_decl_rigid_vars = outer_type_decl_rigid_vars;
     }
@@ -15356,7 +15354,7 @@ fn generateAnnoTypeInPlace(self: *Self, anno_idx: CIR.TypeAnno.Idx, env: *Env, c
     defer self.recordTypeDeclAnnoResult(ctx, anno_var);
 
     // Put this anno in the "seen" map immediately, to support recursive references
-    self.markTypeAnnoSeen(anno_idx);
+    try self.markTypeAnnoSeen(anno_idx);
 
     switch (anno) {
         .rigid_var => |rigid| {
@@ -25550,8 +25548,16 @@ fn checkDefaultRestrictions(self: *Self) std.mem.Allocator.Error!void {
     var recursive_defaults: std.ArrayList(PendingDefaultCheck) = .empty;
     defer recursive_defaults.deinit(self.gpa);
 
-    var evidence = DefaultWalkEvidence{};
+    var evidence = DefaultWalkEvidence{
+        .omitted_defaults_by_expr = .init(self.gpa),
+        .next_omitted_default = try self.gpa.alloc(?u32, self.cir.record_omitted_defaults.items.items.len),
+    };
     defer evidence.deinit(self.gpa);
+    for (self.cir.record_omitted_defaults.items.items, 0..) |omitted, index| {
+        const entry = try evidence.omitted_defaults_by_expr.getOrPut(omitted.expr);
+        evidence.next_omitted_default[index] = if (entry.found_existing) entry.value_ptr.* else null;
+        entry.value_ptr.* = @intCast(index);
+    }
 
     // Top-level binder pattern -> def body, for following reference edges
     // through def bodies during the residue walk. A destructuring def
@@ -25862,6 +25868,10 @@ fn rejectDefaultParameterAliasing(
 /// Prebuilt evidence indexes for one `checkDefaultRestrictions` run (built
 /// once, shared by every default's residue walk).
 const DefaultWalkEvidence = struct {
+    /// Construction -> first recorded omission, with links into the CIR table.
+    /// Built once so cycle walks consume exact omission evidence in O(fields).
+    omitted_defaults_by_expr: collections.DenseMap(CIR.Expr.Idx, u32),
+    next_omitted_default: []?u32,
     pattern_to_def_expr: std.AutoHashMapUnmanaged(CIR.Pattern.Idx, CIR.Expr.Idx) = .empty,
     /// Local instantiating node -> scheme-use record indices
     /// (`value_use`/`nested_function_use` slots only).
@@ -25873,6 +25883,8 @@ const DefaultWalkEvidence = struct {
     instantiations_by_var: std.AutoHashMapUnmanaged(Var, std.ArrayListUnmanaged(u32)) = .empty,
 
     fn deinit(evidence: *DefaultWalkEvidence, gpa: std.mem.Allocator) void {
+        evidence.omitted_defaults_by_expr.deinit();
+        gpa.free(evidence.next_omitted_default);
         evidence.pattern_to_def_expr.deinit(gpa);
         var node_lists = evidence.node_to_scheme_uses.valueIterator();
         while (node_lists.next()) |list| list.deinit(gpa);
@@ -25896,7 +25908,7 @@ const DefaultWalkEvidence = struct {
 /// were already dropped by canonicalization's cycle pass), dispatch-resolved
 /// call targets (`dispatch_target_instantiations`, joined through scheme-use
 /// evidence, see `followDispatchSeed`), type-dispatch method bindings, and
-/// every omitted defaulted field on a construction's SOLVED row. Foreign
+/// the recorded omitted defaults owned by each construction. Foreign
 /// defaults were validated in their declaring module, which cannot reference
 /// this one.
 fn defaultMaterializationIsRecursive(
@@ -26159,7 +26171,7 @@ fn defaultMaterializationIsRecursive(
             .e_empty_record => {
                 if (try self.appendOmittedDefaultDependencies(
                     expr_idx,
-                    &.{},
+                    evidence,
                     self_module,
                     target_expr_node,
                     &visited_defaults,
@@ -26171,7 +26183,7 @@ fn defaultMaterializationIsRecursive(
                 if (record.ext == null) {
                     if (try self.appendOmittedDefaultDependencies(
                         expr_idx,
-                        fields,
+                        evidence,
                         self_module,
                         target_expr_node,
                         &visited_defaults,
@@ -26417,95 +26429,28 @@ fn appendDefaultWalkStmtExprs(
     }
 }
 
-fn recordLiteralSuppliesField(
-    self: *const Self,
-    fields: []const CIR.RecordField.Idx,
-    field_name: Ident.Idx,
-) bool {
-    for (fields) |field_idx| {
-        if (self.cir.store.getRecordField(field_idx).name == field_name) return true;
-    }
-    return false;
-}
-
-/// Append the local default expressions that `record_expr` materializes by
-/// omission. Returns true immediately when one is the target default.
+/// Append the local defaults recorded for this construction by unification.
+/// Solved types alone cannot identify omissions: an implicitly lifted record's
+/// root is nominal, and the nominal declaration does not say what this site
+/// supplied. Returns true immediately when one omission is the target default.
 fn appendOmittedDefaultDependencies(
     self: *Self,
     record_expr: CIR.Expr.Idx,
-    supplied_fields: []const CIR.RecordField.Idx,
+    evidence: *const DefaultWalkEvidence,
     self_module: base.ModuleIdentity.Idx,
     target_expr_node: u32,
     visited_defaults: *std.AutoHashMapUnmanaged(u32, void),
     expr_work: *std.ArrayList(CIR.Expr.Idx),
 ) std.mem.Allocator.Error!bool {
-    var current = ModuleEnv.varFrom(record_expr);
-    var visited_rows: std.AutoHashMapUnmanaged(Var, void) = .empty;
-    defer visited_rows.deinit(self.gpa);
-
-    while (true) {
-        const resolved = self.types.resolveVar(current);
-        const seen = try visited_rows.getOrPut(self.gpa, resolved.var_);
-        if (seen.found_existing) return false;
-
-        switch (resolved.desc.content) {
-            .alias => |alias| current = self.types.getAliasBackingVar(alias),
-            .structure => |flat| switch (flat) {
-                .record => |record| {
-                    if (try self.appendDefaultsFromRecordFields(
-                        record.fields,
-                        supplied_fields,
-                        self_module,
-                        target_expr_node,
-                        visited_defaults,
-                        expr_work,
-                    )) return true;
-                    current = record.ext;
-                },
-                .record_unbound => |fields| return try self.appendDefaultsFromRecordFields(
-                    fields,
-                    supplied_fields,
-                    self_module,
-                    target_expr_node,
-                    visited_defaults,
-                    expr_work,
-                ),
-                .empty_record => return false,
-                .tuple,
-                .nominal_type,
-                .fn_pure,
-                .fn_effectful,
-                .fn_unbound,
-                .tag_union,
-                .empty_tag_union,
-                => return false,
-            },
-            .flex, .rigid, .field_presence, .err => return false,
-        }
-    }
-}
-
-fn appendDefaultsFromRecordFields(
-    self: *Self,
-    fields_range: types_mod.RecordField.SafeMultiList.Range,
-    supplied_fields: []const CIR.RecordField.Idx,
-    self_module: base.ModuleIdentity.Idx,
-    target_expr_node: u32,
-    visited_defaults: *std.AutoHashMapUnmanaged(u32, void),
-    expr_work: *std.ArrayList(CIR.Expr.Idx),
-) std.mem.Allocator.Error!bool {
-    const fields = self.types.getRecordFieldsSlice(fields_range);
-    for (fields.items(.name), fields.items(.presence)) |field_name, presence| {
-        if (self.recordLiteralSuppliesField(supplied_fields, field_name)) continue;
-        const presence_var = presence.presenceVar() orelse continue;
-        const presence_content = self.types.resolveVar(presence_var).desc.content;
-        if (presence_content != .field_presence or presence_content.field_presence != .defaulted) continue;
-        const default_id = presence_content.field_presence.defaulted;
-        if (default_id.origin_module != self_module) continue;
-        if (default_id.expr_node == target_expr_node) return true;
-        const seen = try visited_defaults.getOrPut(self.gpa, default_id.expr_node);
+    var next = evidence.omitted_defaults_by_expr.get(record_expr);
+    while (next) |index| {
+        const omitted = self.cir.record_omitted_defaults.items.items[index];
+        next = evidence.next_omitted_default[index];
+        if (omitted.origin_module != self_module) continue;
+        if (omitted.default_expr_node == target_expr_node) return true;
+        const seen = try visited_defaults.getOrPut(self.gpa, omitted.default_expr_node);
         if (!seen.found_existing) {
-            try expr_work.append(self.gpa, @enumFromInt(default_id.expr_node));
+            try expr_work.append(self.gpa, @enumFromInt(omitted.default_expr_node));
         }
     }
     return false;

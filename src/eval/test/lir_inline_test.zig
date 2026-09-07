@@ -3517,6 +3517,42 @@ test "boxy lowering preserves a runtime-built crash message" {
     return error.TestUnexpectedResult;
 }
 
+test "issue 11024 boxy materializes imported defaults for repeated empty constructions" {
+    const allocator = std.testing.allocator;
+    const cfg_module =
+        \\Cfg := { f : U8 -> U8 ?? |n| n + 5, amount : U8 ?? 7, extra ?: U8 }
+    ;
+    const source =
+        \\import Cfg
+        \\make : {} -> Cfg.Cfg
+        \\make = |_| {}
+        \\main = {
+        \\    first = make({})
+        \\    second = make({})
+        \\    f = first.f
+        \\    g = second.f
+        \\    f(1) + g(2) + first.amount + second.amount + (first.?extra ?? 9)
+        \\}
+    ;
+    var compiled = try helpers.compileInspectedProgramForTargetWithBuiltin(
+        allocator,
+        std.testing.io,
+        .module,
+        source,
+        &.{.{ .name = "Cfg", .source = cfg_module }},
+        .native,
+        try sharedPrePublishedBuiltin(),
+        null,
+        .boxy,
+    );
+    defer compiled.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 0), compiled.resources.checker.problems.problems.items.len);
+    const output = try helpers.lirInterpreterInspectedStr(allocator, &compiled.lowered);
+    defer allocator.free(output);
+    try std.testing.expectEqualStrings("36", output);
+}
+
 test "issue 11099 boxy dispatches an imported procedure stored in a record" {
     const allocator = std.testing.allocator;
     const tp_module =
@@ -8075,19 +8111,19 @@ test "dispatch evidence boundary validator rejects malformed specialization inte
     try std.testing.expect(templates.specialization_interface_relations.len > 0);
 
     var template_index: ?usize = null;
-    for (templates.templates, 0..) |template, i| {
+    for (templates.templates.items, 0..) |template, i| {
         if (template.specialization_interface_relations.len > 0) {
             template_index = i;
             break;
         }
     }
     const raw_template = template_index orelse return error.TestUnexpectedResult;
-    const saved_template_span = templates.templates[raw_template].specialization_interface_relations;
-    templates.templates[raw_template].specialization_interface_relations.start = @intCast(templates.specialization_interface_relations.len);
-    templates.templates[raw_template].specialization_interface_relations.len = 1;
+    const saved_template_span = templates.templates.items[raw_template].specialization_interface_relations;
+    templates.templates.items[raw_template].specialization_interface_relations.start = @intCast(templates.specialization_interface_relations.len);
+    templates.templates.items[raw_template].specialization_interface_relations.len = 1;
     var failure = artifact.validateDispatchEvidence() orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(check.CheckedArtifact.DispatchEvidenceFailure.Kind.template_specialization_relations_out_of_bounds, failure.kind);
-    templates.templates[raw_template].specialization_interface_relations = saved_template_span;
+    templates.templates.items[raw_template].specialization_interface_relations = saved_template_span;
 
     const saved_parent = templates.dispatch_scopes[0].parent;
     templates.dispatch_scopes[0].parent = @enumFromInt(templates.dispatch_scopes.len);
@@ -8184,8 +8220,8 @@ test "dispatch evidence boundary validator rejects malformed specialization inte
     try std.testing.expectEqual(check.CheckedArtifact.DispatchEvidenceFailure.Kind.specialization_relation_local_proc_use_invalid, failure.kind);
     templates.dispatch_scopes[raw_local_scope].checked_expr = saved_scope_expr;
 
-    var path_param_span: ?@TypeOf(templates.templates[0].evidence_params) = null;
-    for (templates.templates) |template| {
+    var path_param_span: ?@TypeOf(templates.templates.items[0].evidence_params) = null;
+    for (templates.templates.items) |template| {
         const params = templates.evidenceParams(&template);
         for (params) |param| {
             if (param.path.len > 0) {
