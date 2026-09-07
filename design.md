@@ -10129,7 +10129,7 @@ root proc ids, platform entrypoints, and target usize.
 
 Glue ABI attachment records whether a tag union has nonzero payload storage on
 either pointer width during its existing committed-variant walk. Generated type
-declarations, companion aliases, and reserved names consume that same fact;
+declarations, companion aliases, and reserved names consume that recorded storage flag;
 source-level payload arity does not determine whether payload storage exists.
 Per-variant declarations and ownership helper branches consume the same committed
 payload sizes, so a zero-sized payload never causes a reference to omitted
