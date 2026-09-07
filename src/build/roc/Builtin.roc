@@ -2226,6 +2226,10 @@ Builtin :: [].{
 			is_eq : Utf8Problem, Utf8Problem -> Bool
 		}
 
+		## A stub function to help people discover [how they should handle this in Roc](https://www.roc-lang.org/faq.html#strings-in-roc).
+		len : Str -> [LearnAboutStringsInRoc(Str)]
+		len = |_str| LearnAboutStringsInRoc("We want to help you make reliable software, so we aim to make sure that you're aware of all the pitfalls when handling strings. For (professional) software that needs to be reliable, check out the explainer [here](https://www.roc-lang.org/builtins/Str) and the [unicode package](https://github.com/roc-lang/unicode). For personal scripts or things like advent of code, the [roc-ascii package](https://github.com/Hasnep/roc-ascii) can cover your needs.")
+
 		is_empty : Str -> Bool
 		is_empty = |str| Str.count_utf8_bytes(str) == 0
 
@@ -2515,12 +2519,12 @@ Builtin :: [].{
 		iter_utf8 : Str -> Iter(U8)
 		iter_utf8 = |str| {
 			make = |index| {
-				len = Str.count_utf8_bytes(str)
+				byte_count = Str.count_utf8_bytes(str)
 
 				iter_from_step(
-					Known(len - index),
+					Known(byte_count - index),
 					||
-						if index == len {
+						if index == byte_count {
 							Done
 						} else {
 							One({ item: str_get_utf8_byte_unsafe(str, index), rest: make(index + 1) })
@@ -2553,11 +2557,11 @@ Builtin :: [].{
 			if count == 0 {
 				Ok(str)
 			} else {
-				len = Str.count_utf8_bytes(str)
-				if count >= len {
+				byte_count = Str.count_utf8_bytes(str)
+				if count >= byte_count {
 					Ok("")
 				} else {
-					end = len - count
+					end = byte_count - count
 					byte = str_get_utf8_byte_unsafe(str, end)
 					if byte >= 128 and byte < 192 {
 						Err(BadUtf8)
