@@ -377,6 +377,7 @@ const CustomCase = enum {
     generated_graph_5_5,
     generated_graph_2_100,
     generated_graph_200_5,
+    issue_11133_llvm_emit_scaling,
     list_builtin_inlined,
     default_platform_linux_disassembly,
     default_platform_build_x64glibc,
@@ -1224,6 +1225,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 10529: open Try ? chain builds in dev within the perf guard", .backend = .dev, .timeout_ms = 30_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue10529OpenTryChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 11072: hooks chain interns its interchangeable closure layouts once and builds in dev within the perf guard", .backend = .dev, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue11072HooksChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "spec-constr re-cloning keeps the inline scope chain bounded", .backend = .speed, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/SpecConstrInlineScopeRebaseGrowth.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack memory" }, .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11133: LLVM Optimize + Emit stays proportional to procedure count", .backend = .speed, .timeout_ms = 600_000, .body = .{ .custom = .issue_11133_llvm_emit_scaling } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10015: macOS roc test imported package expect passes on LLVM size backend", .backend = .size, .body = .{ .custom = .issue_10015_url_random_test_size } },
     // Repro for https://github.com/roc-lang/roc/issues/10620: optimized
     // inlining must preserve explicitly keyed closure capture operands.
@@ -2856,6 +2858,7 @@ fn runCustomCase(
         .generated_graph_5_5 => customGeneratedModuleGraph(io, allocator, &env, &timer, timeout_ms, .{ .roc_file_count = 5, .symbols_per_file = 5 }),
         .generated_graph_2_100 => customGeneratedModuleGraph(io, allocator, &env, &timer, timeout_ms, .{ .roc_file_count = 2, .symbols_per_file = 100 }),
         .generated_graph_200_5 => customGeneratedModuleGraph(io, allocator, &env, &timer, timeout_ms, .{ .roc_file_count = 200, .symbols_per_file = 5 }),
+        .issue_11133_llvm_emit_scaling => customIssue11133LlvmEmitScaling(io, allocator, &env, &timer, timeout_ms),
         .list_builtin_inlined => customListBuiltinInlined(io, allocator, &env, &timer, timeout_ms),
         .default_platform_linux_disassembly => customDefaultPlatformLinuxDisassembly(io, allocator, &env, &timer, timeout_ms),
         .default_platform_build_x64glibc => customDefaultPlatformBuild(io, allocator, &env, &timer, timeout_ms, .x64glibc),
@@ -5913,6 +5916,164 @@ fn countModuleCacheFiles(io: std.Io, allocator: Allocator, cache_path: []const u
         count += 1;
     }
     return count;
+}
+
+/// The `--timings` row that covers LLVM's optimization pipeline and object
+/// emission for the app.
+const llvm_emit_phase_name = "LLVM Optimize + Emit";
+
+/// Procedure counts for the scaling comparison. The larger app is eight times
+/// the smaller one, so its LLVM phase should cost about eight times as much.
+const llvm_scaling_small_procs: usize = 500;
+const llvm_scaling_large_procs: usize = 4000;
+
+/// How much more than proportional growth the phase may cost. The slack
+/// absorbs per-build fixed cost and host noise while staying far below the
+/// growth an app-sized quadratic produces.
+const llvm_scaling_slack_numerator: u64 = 3;
+const llvm_scaling_slack_denominator: u64 = 2;
+
+/// Growth ratios are only meaningful once the phase is long enough to measure,
+/// so a large app that finishes this fast satisfies the guard outright.
+const llvm_scaling_floor_ms: u64 = 250;
+
+fn customIssue11133LlvmEmitScaling(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    // Repro for https://github.com/roc-lang/roc/issues/11133.
+    //
+    // Both apps are the same shape - a binary call tree of one-statement
+    // procedures - so the only thing that changes is how many procedures the
+    // LLVM backend receives. Optimizing and emitting them must cost time
+    // proportional to that count.
+    var small_ms: u64 = 0;
+    if (measureLlvmOptimizeEmitMs(io, allocator, env, timer, timeout_ms, "llvm_scaling_small.roc", llvm_scaling_small_procs, &small_ms)) |failure| return failure;
+
+    var large_ms: u64 = 0;
+    if (measureLlvmOptimizeEmitMs(io, allocator, env, timer, timeout_ms, "llvm_scaling_large.roc", llvm_scaling_large_procs, &large_ms)) |failure| return failure;
+
+    const proportional_growth: u64 = @intCast(llvm_scaling_large_procs / llvm_scaling_small_procs);
+    const budget_ms = @max(
+        small_ms * proportional_growth * llvm_scaling_slack_numerator / llvm_scaling_slack_denominator,
+        llvm_scaling_floor_ms,
+    );
+    if (large_ms > budget_ms) {
+        return customFailure(
+            allocator,
+            timer,
+            "{s} took {d}ms for {d} procedures and {d}ms for {d} procedures; {d}x the procedures may cost at most {d}ms",
+            .{ llvm_emit_phase_name, large_ms, llvm_scaling_large_procs, small_ms, llvm_scaling_small_procs, proportional_growth, budget_ms },
+        );
+    }
+    return null;
+}
+
+fn measureLlvmOptimizeEmitMs(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+    file_name: []const u8,
+    proc_count: usize,
+    out_ms: *u64,
+) ?TestResult {
+    const app_path = writeCallTreeApp(io, allocator, env.dirs.work_dir, file_name, proc_count) catch |err|
+        return customInfraFailure(allocator, timer, "failed to write the {d}-procedure app: {}", .{ proc_count, err });
+    const output_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "llvm_scaling_output" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate output path: {}", .{err});
+    const out_arg = outputArg(allocator, output_path) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate output arg: {}", .{err});
+    const child_timeout_ms = childCommandTimeoutMs(timer, timeout_ms) orelse
+        return timeoutFailure(allocator, timer, .build, "case timeout exhausted before roc build started");
+
+    const args: []const []const u8 = &.{ "build", "--no-cache", "--timings", out_arg };
+    const result = runRocInEnv(io, allocator, env, args, app_path, .absolute, &.{}, null, child_timeout_ms) catch |err|
+        return customInfraFailure(allocator, timer, "roc build spawn error: {}", .{err});
+    if (checkCommandExpectation(allocator, result, .{ .args = args, .exit = .success })) |message| {
+        return failureFromRun(allocator, timer, result, message);
+    }
+
+    out_ms.* = llvmOptimizeEmitMs(result.stderr) orelse
+        return customFailure(allocator, timer, "roc build --timings reported no \"{s}\" row for the {d}-procedure app", .{ llvm_emit_phase_name, proc_count });
+    return null;
+}
+
+/// Writes an app whose `proc_count` procedures form a binary call tree, each
+/// with one `Str.concat` statement, so procedure count is the only thing that
+/// grows between two sizes.
+fn writeCallTreeApp(
+    io: std.Io,
+    allocator: Allocator,
+    dir_path: []const u8,
+    file_name: []const u8,
+    proc_count: usize,
+) CliRunnerError![]const u8 {
+    const platform_path = try absoluteFromProjectRoot(allocator, "test/fx-open/platform/main.roc");
+
+    var dir = try std.Io.Dir.openDirAbsolute(io, dir_path, .{});
+    defer dir.close(io);
+
+    var file = try dir.createFile(io, file_name, .{});
+    defer file.close(io);
+
+    var write_buffer: [4096]u8 = undefined;
+    var writer = file.writer(io, &write_buffer);
+    const out = &writer.interface;
+
+    try out.print("app [main!] {{ pf: platform \"{s}\" }}\n\nimport pf.Stdout\n\n", .{platform_path});
+
+    var proc_idx: usize = 0;
+    while (proc_idx < proc_count) : (proc_idx += 1) {
+        const left = 2 * proc_idx + 1;
+        const right = 2 * proc_idx + 2;
+        try out.print("f{d} : Str -> Str\n", .{proc_idx});
+        try out.print("f{d} = |s| {{\n", .{proc_idx});
+        try out.writeAll("    a1 = Str.concat(s, \"1\")\n");
+        if (right < proc_count) {
+            try out.print("    Str.concat(f{d}(a1), f{d}(a1))\n", .{ left, right });
+        } else if (left < proc_count) {
+            try out.print("    f{d}(a1)\n", .{left});
+        } else {
+            try out.writeAll("    a1\n");
+        }
+        try out.writeAll("}\n\n");
+    }
+
+    try out.writeAll(
+        \\main! : List(Str) => Try({}, [Exit(I32), ..])
+        \\main! = |args| {
+        \\    Stdout.line!(f0(args.len().to_str()))
+        \\    Ok({})
+        \\}
+        \\
+    );
+    try out.flush();
+
+    return try std.fs.path.join(allocator, &.{ dir_path, file_name });
+}
+
+/// Reads the duration off the `--timings` phase row, which always renders as
+/// underscore-grouped milliseconds.
+fn llvmOptimizeEmitMs(stderr: []const u8) ?u64 {
+    const row_start = std.mem.find(u8, stderr, llvm_emit_phase_name) orelse return null;
+    const after_name = stderr[row_start + llvm_emit_phase_name.len ..];
+    const row = after_name[0 .. std.mem.findScalar(u8, after_name, '\n') orelse after_name.len];
+
+    var idx = std.mem.findAny(u8, row, "0123456789") orelse return null;
+    var ms: u64 = 0;
+    while (idx < row.len) : (idx += 1) {
+        const char = row[idx];
+        if (char == '_') continue;
+        if (char < '0' or char > '9') break;
+        ms = ms * 10 + @as(u64, char - '0');
+    }
+    if (!std.mem.startsWith(u8, row[idx..], "ms")) return null;
+    return ms;
 }
 
 fn customFmtReformatsFile(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {

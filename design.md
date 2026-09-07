@@ -799,6 +799,20 @@ LLVM object emission must request function and data sections, and the final
 target linker must use section garbage collection where the target format
 supports it.
 
+Fixed-size LLVM stack slots form an entry-block prefix. The builder records
+these allocations separately in creation order and materializes the reversed
+prefix once at function finalization. This preserves prepend ordering and
+fixed activation lifetime without repeatedly moving the accumulated entry
+instruction list. Slot values are available to body construction immediately;
+final instruction numbering follows the completed block order.
+
+LLVM string-literal lowering emits a complete target-layout constant when the
+literal fits the runtime's inline `RocStr` representation. It uses the runtime's
+word count and flag-byte encoding, the target pointer width and byte order, and
+zeroed unused bytes. Longer literals use the allocating runtime constructor.
+This is representation lowering of explicit LIR literal bytes; it introduces no
+ownership decisions and leaves all explicit LIR ARC statements intact.
+
 Static ownership reasoning lives in exactly one place: LIR ARC insertion.
 ARC insertion computes a whole-program borrows-with-lifetimes solution and
 emits explicit RC statements from it (see ARC Borrow Inference). No other
@@ -10731,7 +10745,10 @@ contain members from other proc specs that share ownership-neutral locals. The
 proc liveness domain counts exactly the members in its own frame, since an
 outside member cannot occur on one of that proc's paths. It derives those
 counts in one linear frame scan from the solved leader relation, so the module
-solution retains no redundant flat group-member table.
+solution retains no redundant flat group-member table. The proc domain also
+indexes its resource bits by the solved group leader. Lender-death queries
+visit only that group's proc-local resources, including solver-only anchors;
+they never scan unrelated groups.
 Join ownership sets use the resource prefix of this same per-proc domain.
 Consequently neither ownership nor liveness rows are widened by locals from
 other procedures. Unrelated scalar locals are not ARC resources and never

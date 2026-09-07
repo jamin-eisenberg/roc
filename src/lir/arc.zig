@@ -69,6 +69,9 @@ const ProcArcDomain = struct {
     frame_locals: []const LIR.LocalId,
     resource_bit_index: []const u32,
     resource_locals: []const LIR.LocalId,
+    /// Proc-local resource bits indexed by the solver-authored group leader.
+    group_resource_heads: []const u32,
+    group_resource_next: []const u32,
     /// Full committed field-place domain for dismantlable aggregate
     /// resources; zero for ordinary whole-value resources.
     resource_full_masks: []u64,
@@ -161,6 +164,15 @@ const ProcArcDomain = struct {
             group_member_counts[leader_frame_index] += 1;
         }
 
+        const group_resource_heads = try allocator.alloc(u32, frame_len);
+        @memset(group_resource_heads, no_arc_bit);
+        const group_resource_next = try allocator.alloc(u32, resource_count);
+        for (resource_locals_buffer[0..resource_count], 0..) |local, bit| {
+            const leader_index = requiredFrameIndex(global_local_index, solution.leaderOf(local));
+            group_resource_next[bit] = group_resource_heads[leader_index];
+            group_resource_heads[leader_index] = @intCast(bit);
+        }
+
         var group_count: usize = 0;
         for (frame_locals, 0..) |local, frame_index| {
             const leader = solution.leaderOf(local);
@@ -186,6 +198,8 @@ const ProcArcDomain = struct {
             .resource_bit_index = resource_bit_index,
             .resource_locals = resource_locals_buffer[0..resource_count],
             .resource_full_masks = resource_full_masks,
+            .group_resource_heads = group_resource_heads,
+            .group_resource_next = group_resource_next,
             .refcounted_locals = refcounted_locals_buffer[0..refcounted_count],
             .group_bit_index = group_bit_index,
             .group_leaders = group_leaders_buffer[0..group_count],
@@ -6941,12 +6955,10 @@ const Inserter = struct {
         // ownership-unit and borrow-group representatives. Those synthetic
         // anchors have liveness bits even though they need no concrete RC
         // helper of their own, and must participate in lender-death checks.
-        for (self.domain().resource_locals) |member_local| {
-            if (self.solution.leaderOf(member_local) != leader) continue;
-            if (member_local == except) continue;
-            const bit = self.rawLivenessBitOf(member_local) orelse
-                arcInvariant("ARC refcounted borrow-group member missing its raw liveness bit");
-            if (reads.isSet(bit)) return true;
+        const proc_domain = self.domain();
+        var bit = proc_domain.group_resource_heads[proc_domain.frameIndexOf(leader)];
+        while (bit != no_arc_bit) : (bit = proc_domain.group_resource_next[bit]) {
+            if (proc_domain.resource_locals[bit] != except and reads.isSet(bit)) return true;
         }
         return false;
     }
