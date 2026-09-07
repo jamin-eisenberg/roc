@@ -170,12 +170,11 @@ pub fn certifyStore(
     allocator: Allocator,
     store: *const LirStore,
     layouts: *const layout_mod.Store,
-    boxy_rc_descs: []const ?LIR.BoxyDescRef,
     sigs: arc_sig.SigTable,
     roots: []const LIR.LirProcSpecId,
     diag: *Diagnostic,
 ) CertifyError!void {
-    return certifyStoreWithWorkStats(allocator, store, layouts, boxy_rc_descs, sigs, roots, diag, null);
+    return certifyStoreWithWorkStats(allocator, store, layouts, sigs, roots, diag, null);
 }
 
 /// Deterministic work counters used by certifier complexity regression tests.
@@ -189,7 +188,6 @@ fn certifyStoreWithWorkStats(
     allocator: Allocator,
     store: *const LirStore,
     layouts: *const layout_mod.Store,
-    boxy_rc_descs: []const ?LIR.BoxyDescRef,
     sigs: arc_sig.SigTable,
     roots: []const LIR.LirProcSpecId,
     diag: *Diagnostic,
@@ -197,7 +195,7 @@ fn certifyStoreWithWorkStats(
 ) CertifyError!void {
     try certifyProcAbiMetadata(allocator, store, layouts, diag);
 
-    const rc_local = try arc_solve.computeLocalContainsRefcounted(allocator, store, layouts, boxy_rc_descs);
+    const rc_local = try arc_solve.computeLocalContainsRefcounted(allocator, store, layouts);
     defer allocator.free(rc_local);
 
     var maybe_uninitialized = try MaybeUninitializedConditions.init(allocator, store, diag);
@@ -518,12 +516,11 @@ pub fn certifyStoreOrPanic(
     allocator: Allocator,
     store: *const LirStore,
     layouts: *const layout_mod.Store,
-    boxy_rc_descs: []const ?LIR.BoxyDescRef,
     sigs: arc_sig.SigTable,
     roots: []const LIR.LirProcSpecId,
 ) Allocator.Error!void {
     var diag = Diagnostic{};
-    certifyStore(allocator, store, layouts, boxy_rc_descs, sigs, roots, &diag) catch |err| switch (err) {
+    certifyStore(allocator, store, layouts, sigs, roots, &diag) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.Certification => if (comptime builtin.target.os.tag == .freestanding) {
             @panic("ARC certification failed");
@@ -5807,17 +5804,17 @@ const CertifyTest = struct {
     }
 
     fn certify(self: *CertifyTest) CertifyError!void {
-        return certifyStore(self.allocator, &self.store, &self.layouts, &.{}, arc_sig.SigTable.all_owned, &.{}, &self.diag);
+        return certifyStore(self.allocator, &self.store, &self.layouts, arc_sig.SigTable.all_owned, &.{}, &self.diag);
     }
 
     fn certifyAndMeasureWork(self: *CertifyTest) CertifyError!CertifierWorkStats {
         var stats = CertifierWorkStats{};
-        try certifyStoreWithWorkStats(self.allocator, &self.store, &self.layouts, &.{}, arc_sig.SigTable.all_owned, &.{}, &self.diag, &stats);
+        try certifyStoreWithWorkStats(self.allocator, &self.store, &self.layouts, arc_sig.SigTable.all_owned, &.{}, &self.diag, &stats);
         return stats;
     }
 
     fn certifyWith(self: *CertifyTest, sigs: arc_sig.SigTable) CertifyError!void {
-        return certifyStore(self.allocator, &self.store, &self.layouts, &.{}, sigs, &.{}, &self.diag);
+        return certifyStore(self.allocator, &self.store, &self.layouts, sigs, &.{}, &self.diag);
     }
 
     fn certifyUniqueArgsOnly(self: *CertifyTest) CertifyError!void {
@@ -6389,11 +6386,6 @@ test "certify accepts a retained Boxy field borrowed from implicit capture stora
         .next = retain,
     } });
     _ = try f.addProc(&.{ capture, desc_local }, field_read, .i64);
-
-    const boxy_descs = try f.allocator.alloc(?LIR.BoxyDescRef, f.store.localCount());
-    defer f.allocator.free(boxy_descs);
-    @memset(boxy_descs, null);
-    boxy_descs[@intFromEnum(field)] = desc;
     const sigs = [_]arc_sig.RcSig{
         arc_sig.RcSig.all_owned.withBorrowedParam(0),
     };
@@ -6401,7 +6393,6 @@ test "certify accepts a retained Boxy field borrowed from implicit capture stora
         f.allocator,
         &f.store,
         &f.layouts,
-        boxy_descs,
         .{ .sigs = &sigs },
         &.{},
         &f.diag,

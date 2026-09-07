@@ -659,6 +659,12 @@ pub const ProcAbi = enum {
     erased_callable,
 };
 
+/// Producer-proven sites and their reserved loop identity, consumed before ARC.
+pub const TailCalls = struct {
+    head: CFStmtId,
+    loop: JoinPointId,
+};
+
 /// Which tail-recursion rewrite the TRMC pass (src/lir/trmc.zig) applied to a
 /// proc. Consumed by TRMC debug output, test assertions, and the interpreter's
 /// debug validator (null box pointers are legal in-flight holes only inside
@@ -733,6 +739,9 @@ pub const CFStmt = union(enum) {
         /// descriptor during execution.
         out_desc: ?LocalId = null,
         is_cold: bool = false,
+        /// Producer-proven self-tail site, linked for procedure finalization.
+        /// Consumed before ARC; no backend tail-call inference is required.
+        tail_call: ?struct { next: ?CFStmtId } = null,
         next: CFStmtId,
     },
     assign_call_erased: struct {
@@ -1137,6 +1146,8 @@ pub const LirProcSpec = struct {
     erased_reuse_arg: ?LocalId = null,
     /// Packed explicit-argument layout required by the erased-callable ABI.
     erased_call_args: ?ErasedCallArgsPlanId = null,
+    /// Complete producer-authored inventory, unique and sorted by LocalId.
+    /// Passes adding fresh locals must preserve this ordering.
     frame_locals: LocalSpan = LocalSpan.empty(),
     join_points: JoinPointSpan = JoinPointSpan.empty(),
     body: ?CFStmtId = null,
@@ -1170,6 +1181,8 @@ pub const LirProcSpec = struct {
     is_static_initializer: bool = false,
     /// Hosted call ABI metadata, when this proc is provided by the platform.
     hosted: ?HostedProc = null,
+    /// Exact self-tail sites produced by LIR construction, consumed by TRMC/TCE.
+    tail_calls: ?TailCalls = null,
     /// Tail-recursion rewrite applied by the TRMC pass, if any.
     tail_transform: TailTransform = .none,
     /// Explicit native-stack probing requirement for this proc.

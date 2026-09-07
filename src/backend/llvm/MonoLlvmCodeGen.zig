@@ -2379,28 +2379,16 @@ pub const MonoLlvmCodeGen = struct {
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
 
-        var resume_cursor = wip.cursor;
         const resume_debug_location = wip.debug_location;
-        defer {
-            wip.cursor = resume_cursor;
-            wip.debug_location = resume_debug_location;
-        }
-
-        const entry_block: LlvmBuilder.Function.Block.Index = .entry;
-        wip.cursor = .{ .block = entry_block };
+        defer wip.debug_location = resume_debug_location;
         wip.debug_location = .no_location;
-        const allocated = wip.alloca(
-            .normal,
+        return wip.allocaInEntry(
             ty,
             builder.intValue(.i32, element_count) catch return error.OutOfMemory,
             alignment,
             .default,
             name,
         ) catch return error.OutOfMemory;
-
-        // Inserting at instruction zero shifts an active entry-block cursor.
-        if (resume_cursor.block == entry_block) resume_cursor.instruction += 1;
-        return allocated;
     }
 
     fn unpackProcArgs(self: *MonoLlvmCodeGen, proc: LirProcSpec) Error!void {
@@ -8082,6 +8070,22 @@ pub const MonoLlvmCodeGen = struct {
     fn emitStrLiteral(self: *MonoLlvmCodeGen, out: LlvmBuilder.Value, literal: StrLiteral) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const bytes = self.store.getStringLiteral(literal);
+        const RocStr = builtins.str.RocStr;
+        if (bytes.len < RocStr.word_count * self.targetWordSize()) {
+            // Construct the complete value here. Inlining the runtime constructor
+            // makes LLVM rediscover these constants through partial-byte stores
+            // and expensive scalar promotion in large callers.
+            const words = smallStrLiteralWords(bytes, self.targetWordSize(), self.target.cpu.arch.endian());
+            var constants: [RocStr.word_count]LlvmBuilder.Constant = undefined;
+            for (words, &constants) |word, *constant| {
+                constant.* = builder.intConst(self.ptrSizedIntType(), word) catch return error.OutOfMemory;
+            }
+            const ty = builder.arrayType(RocStr.word_count, self.ptrSizedIntType()) catch return error.OutOfMemory;
+            const value = builder.arrayConst(ty, &constants) catch return error.OutOfMemory;
+            const wip = self.wip orelse return error.CompilationFailed;
+            _ = wip.store(.normal, value.toValue(), out, self.targetPointerAlignment()) catch return error.OutOfMemory;
+            return;
+        }
         try self.callBuiltinVoid(
             builtinSymbol(.str_from_literal),
             &.{ try self.ptrType(), try self.ptrType(), self.ptrSizedIntType(), try self.ptrType() },
@@ -12950,10 +12954,106 @@ fn repeatedByte(byte: u8, width: u8) u128 {
     return result;
 }
 
+/// Encode the runtime's inline RocStr layout as target-width integer constants.
+/// The final byte is the length/flag byte regardless of target endianness.
+fn smallStrLiteralWords(bytes: []const u8, word_size: u32, endian: std.builtin.Endian) [builtins.str.RocStr.word_count]u64 {
+    const RocStr = builtins.str.RocStr;
+    std.debug.assert(word_size == 2 or word_size == 4 or word_size == 8);
+    const str_size = RocStr.word_count * word_size;
+    std.debug.assert(bytes.len < str_size);
+    var encoded: [RocStr.word_count * @sizeOf(u64)]u8 = @splat(0);
+    @memcpy(encoded[0..bytes.len], bytes);
+    encoded[str_size - 1] = RocStr.smallStrFlagByte(bytes.len);
+    var words: [RocStr.word_count]u64 = undefined;
+    for (&words, 0..) |*word, word_index| {
+        const offset = word_index * word_size;
+        word.* = switch (word_size) {
+            2 => std.mem.readInt(u16, encoded[offset..][0..2], endian),
+            4 => std.mem.readInt(u32, encoded[offset..][0..4], endian),
+            8 => std.mem.readInt(u64, encoded[offset..][0..8], endian),
+            else => unreachable,
+        };
+    }
+    return words;
+}
+
+test "LLVM small string constants match the runtime constructor" {
+    const RocStr = builtins.str.RocStr;
+    // Include embedded NUL and UTF-8 in partial and full words.
+    const contents = "a\x00é🙂bc\x00é🙂defghijkl";
+    for (0..@sizeOf(RocStr)) |len| {
+        var runtime_value = RocStr.fromSliceSmall(contents[0..len]);
+        const encoded = smallStrLiteralWords(contents[0..len], @sizeOf(usize), builtin.cpu.arch.endian());
+        var native_words: [RocStr.word_count]usize = undefined;
+        for (encoded, &native_words) |word, *native_word| native_word.* = @intCast(word);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&runtime_value), std.mem.asBytes(&native_words));
+    }
+}
+
+test "LLVM small string constants preserve target layout at every length" {
+    const contents = "a\x00é🙂bc\x00é🙂defghijkl";
+    inline for (.{ u16, u32, u64 }) |Word| {
+        const size = builtins.str.RocStr.word_count * @sizeOf(Word);
+        inline for (.{ std.builtin.Endian.little, std.builtin.Endian.big }) |endian| {
+            for (0..size) |len| {
+                const words = smallStrLiteralWords(contents[0..len], @sizeOf(Word), endian);
+                var memory: [size]u8 = undefined;
+                for (words, 0..) |word, index| {
+                    std.mem.writeInt(Word, memory[index * @sizeOf(Word) ..][0..@sizeOf(Word)], @intCast(word), endian);
+                }
+                try std.testing.expectEqualSlices(u8, contents[0..len], memory[0..len]);
+                for (memory[len .. size - 1]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+                try std.testing.expectEqual(@as(u8, 0x80) | @as(u8, @intCast(len)), memory[size - 1]);
+            }
+        }
+    }
+}
+
 test "LLVM erased callable explicit arguments exclude capture and reuse" {
     try std.testing.expectEqual(@as(usize, 3), try MonoLlvmCodeGen.explicitProcParamCount(.erased_callable, 5));
     try std.testing.expectEqual(@as(usize, 5), try MonoLlvmCodeGen.explicitProcParamCount(.roc, 5));
     try std.testing.expectError(error.CompilationFailed, MonoLlvmCodeGen.explicitProcParamCount(.erased_callable, 1));
+}
+
+test "LLVM fixed stack slots dominate entry and loop uses" {
+    const allocator = std.testing.allocator;
+    const byte_alignment = LlvmBuilder.Alignment.fromByteUnits(@alignOf(u8));
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var codegen = MonoLlvmCodeGen.init(allocator, &store, &.{}, &.{}, &.{});
+    defer codegen.deinit();
+    var builder = try codegen.createBuilder("stack_slots");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    const function = try builder.addFunction(try builder.fnType(.void, &.{}, .normal), try builder.strtabString("slots"), .default);
+    var wip = try LlvmBuilder.WipFunction.init(&builder, .{ .function = function, .strip = true });
+    defer wip.deinit();
+    codegen.wip = &wip;
+    const entry = try wip.block(0, "entry");
+    const loop = try wip.block(1, "loop");
+    wip.cursor = .{ .block = entry };
+    const first = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "first");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 1), first, byte_alignment);
+    const second = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "second");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 2), second, byte_alignment);
+    const branch = try wip.br(loop);
+    wip.cursor = .{ .block = loop };
+    const loop_slot = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "loop_slot");
+    try std.testing.expectEqual(loop, wip.cursor.block);
+    try std.testing.expectEqual(@as(u32, 0), wip.cursor.instruction);
+    _ = try wip.store(.normal, try builder.intValue(.i8, 3), loop_slot, byte_alignment);
+    _ = try wip.br(loop);
+    try wip.flushEntryAllocas();
+    const instructions = entry.ptrConst(&wip).instructions.items;
+    try std.testing.expectEqual(loop_slot, instructions[0].toValue());
+    try std.testing.expectEqual(second, instructions[1].toValue());
+    try std.testing.expectEqual(first, instructions[2].toValue());
+    try std.testing.expectEqual(branch, instructions[instructions.len - 1]);
+    const expected = [_]LlvmBuilder.Function.Instruction.Tag{ .alloca, .alloca, .alloca, .store, .store, .br };
+    for (instructions, expected) |instruction, tag| {
+        try std.testing.expectEqual(tag, wip.instructions.get(@intFromEnum(instruction)).tag);
+    }
+    try codegen.finishCurrentWipFunction();
 }
 
 test "issue 11132: scratch clearing follows proc inventories and survives module reuse" {

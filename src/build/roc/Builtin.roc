@@ -3256,7 +3256,7 @@ Builtin :: [].{
 		## expect [].iter().sum() == 0.I64
 		## ```
 		sum : Iter(item) -> item
-			where [item.plus : item, item -> item, item.default : item]
+			where [item.plus : item, item -> item, item.default : () -> item]
 		sum = |iterator| {
 			Item : item
 			match Iter.next(iterator) {
@@ -5110,7 +5110,7 @@ Builtin :: [].{
 		## expect List.sum([]) == 0.I64
 		## ```
 		sum : List(item) -> item
-			where [item.plus : item, item -> item, item.default : item]
+			where [item.plus : item, item -> item, item.default : () -> item]
 		sum = |list| list.iter().sum()
 
 		## Find the minimum item in a list, or `Err(ListWasEmpty)` if the list is empty.
