@@ -953,6 +953,9 @@ const EvidenceScope = struct {
 
 const EvidenceChain = struct {
     scope: EvidenceScope,
+    /// Stored evidence is graph-free until a nested body creates its own
+    /// instantiation context. It must remain graph-free across root requests.
+    origin: enum { specialization, stored_function } = .specialization,
     vector: []const SpecEvidence = &.{},
     /// The scheme this frame's vector answers for, and the substitution the
     /// vector was derived from. A body lowered inside this frame forwards an
@@ -5999,9 +6002,10 @@ const Builder = struct {
         if (selection.selected() == null) {
             var seen_specs = std.AutoHashMap(u32, void).init(self.allocator);
             defer seen_specs.deinit();
-            var interface = try source_ctx.graph.functionInterfaceIterator(request_fn_node);
-            while (interface.next()) |interface_node| {
-                var aliases = source_ctx.graph.classMemberIterator(interface_node);
+            var interface = try source_ctx.graph.functionInterfaceClassIterator(request_fn_node);
+            defer interface.deinit();
+            while (try interface.next()) |interface_class| {
+                var aliases = source_ctx.graph.classMemberIterator(interface_class);
                 while (aliases.next()) |member| {
                     const lookup_address = DraftTemplateLookupAddress{
                         .family = family,
@@ -8016,10 +8020,11 @@ const Builder = struct {
                 }
             }
         }
-        var interface = try source_ctx.graph.functionInterfaceIterator(request_fn_node);
         if (selection.selected() == null) {
-            while (interface.next()) |interface_node| {
-                var aliases = source_ctx.graph.classMemberIterator(interface_node);
+            var interface = try source_ctx.graph.functionInterfaceClassIterator(request_fn_node);
+            defer interface.deinit();
+            while (try interface.next()) |interface_class| {
+                var aliases = source_ctx.graph.classMemberIterator(interface_class);
                 while (aliases.next()) |member| {
                     const lookup_address = DraftNestedLookupAddress{
                         .family = family,
@@ -8203,9 +8208,8 @@ const Builder = struct {
         const owner_scope = try source_ctx.draft.enterOwner(.{ .draft_fn = fn_id });
         defer owner_scope.leave();
 
-        var nested_ctx = try source_ctx.nestedInstantiationContext(source_fn_key);
+        var nested_ctx = try source_ctx.nestedInstantiationContext(source_fn_key, nested.site, requested_evidence, false);
         nested_ctx.in_deferred_body = true;
-        nested_ctx.evidence = requested_evidence;
         defer nested_ctx.deinit();
         if (codec_contract) |contract| {
             try nested_ctx.instantiateCodecContractAtCall(
@@ -18537,12 +18541,50 @@ const BodyContext = struct {
         return scope;
     }
 
-    fn nestedInstantiationContext(self: *BodyContext, current_fn_key: names.TypeDigest) Allocator.Error!BodyContext {
+    fn nestedInstantiationContext(
+        self: *BodyContext,
+        current_fn_key: names.TypeDigest,
+        site_id: names.NestedProcSiteId,
+        evidence: EvidenceChain,
+        constructing_scope: bool,
+    ) Allocator.Error!BodyContext {
         var child = try self.childContextWithTypeCells(current_fn_key, false);
         errdefer child.deinit();
+        child.evidence = switch (evidence.origin) {
+            .specialization => evidence,
+            .stored_function => try child.instantiateStoredEvidence(evidence),
+        };
         child.function_entry_demand_guards = &.{};
+        try child.bindNestedTypes(site_id, constructing_scope);
         try child.constrainCopiedBinderTypes();
         return child;
+    }
+
+    /// The checked inventory is sorted by lexical depth. Visit each frame
+    /// once, indexing its substitution directly; no enclosing type map is
+    /// copied and no checked type is searched for by identity.
+    fn bindNestedTypes(self: *BodyContext, site_id: names.NestedProcSiteId, constructing_scope: bool) Allocator.Error!void {
+        const site = self.view.nested_proc_sites.sites[@intFromEnum(site_id)];
+        const span = site.type_bindings;
+        const bindings = self.view.nested_proc_sites.type_bindings[span.start .. span.start + span.len];
+        var frame: *const EvidenceChain = &self.evidence;
+        // A scope's construction has its parent's evidence. Its own slots
+        // are fresh until the construction request determines them.
+        var depth: u32 = if (constructing_scope) 1 else 0;
+        for (bindings) |binding| {
+            if (constructing_scope and binding.depth == 0) continue;
+            while (depth < binding.depth) : (depth += 1) {
+                frame = frame.parent orelse Common.invariant("nested type binding omitted its lexical frame");
+            }
+            const schema = frame.schema orelse Common.invariant("nested type binding frame had no substitution schema");
+            if (binding.slot >= frame.subst.len or schema.scheme_vars[binding.slot] != binding.ty) {
+                Common.invariant("nested type binding differed from its checked lexical substitution");
+            }
+            switch (frame.subst[binding.slot]) {
+                .node => |node| try self.putScopedNode(self.scopedCheckedType(binding.ty), node),
+                .checked_error => {},
+            }
+        }
     }
 
     fn childContextWithTypeCells(
@@ -38161,7 +38203,7 @@ const BodyContext = struct {
                 }
                 // The construction instantiates the scope's scheme: its root
                 // related to the request binds every quantified variable.
-                var scheme_ctx = try self.nestedInstantiationContext(self.current_fn_key);
+                var scheme_ctx = try self.nestedInstantiationContext(self.current_fn_key, site.site, self.evidence, true);
                 defer scheme_ctx.deinit();
                 const scheme_root_node = try scheme_ctx.instNode(scope.scheme_root);
                 try relateFunctionRequestInterface(self.graph, scheme_root_node, request_fn_node);
@@ -39687,6 +39729,7 @@ const BodyContext = struct {
                     Common.invariant("stored function evidence did not begin at the checked root scope");
                 }
                 restored[index] = rootEvidence(owner, vector);
+                restored[index].origin = .stored_function;
                 continue;
             }
             if (scope == .root or frame.parent == null or frame.parent.? != index - 1) {
@@ -39707,6 +39750,7 @@ const BodyContext = struct {
             }
             restored[index] = .{
                 .scope = .{ .owner = owner, .lexical = scope },
+                .origin = .stored_function,
                 .vector = vector,
                 .parent = &restored[index - 1],
             };
@@ -39756,6 +39800,59 @@ const BodyContext = struct {
             Common.invariant("stored function evidence head differed from its checked nested site scope");
         }
         return restored[head];
+    }
+
+    fn instantiateStoredEvidence(self: *BodyContext, evidence: EvidenceChain) Allocator.Error!EvidenceChain {
+        var count: usize = 0;
+        var current: ?*const EvidenceChain = &evidence;
+        while (current) |frame| : (current = frame.parent) count += 1;
+        const frames = try self.builder.evidence_arena.allocator().alloc(EvidenceChain, count);
+        var index = count;
+        current = &evidence;
+        while (current) |frame| : (current = frame.parent) {
+            index -= 1;
+            frames[index] = frame.*;
+        }
+        for (frames, 0..) |*frame, i| {
+            const view = self.builder.moduleForDigest(names.procTemplateModuleDigest(frame.scope.owner));
+            frame.* = try self.restoreEvidenceFrame(view, frame.scope.owner, frame.scope.lexical, frame.vector, if (i == 0) null else &frames[i - 1]);
+        }
+        return frames[count - 1];
+    }
+
+    /// Stored functions have graph-free evidence. Recreate its lexical
+    /// substitution in the restoration context, where saved callable and
+    /// capture interfaces will constrain the same checked identities. Hidden
+    /// receivers additionally consume their retained method contracts.
+    fn restoreEvidenceFrame(
+        self: *BodyContext,
+        view: ModuleView,
+        owner: names.ProcTemplate,
+        scope: LexicalDispatchScope,
+        vector: []const SpecEvidence,
+        parent: ?*const EvidenceChain,
+    ) Allocator.Error!EvidenceChain {
+        const schema = switch (scope) {
+            .root => self.templateSchema(owner),
+            .generalized => |id| self.scopeSchema(view, id),
+        };
+        const subst = try self.substitutionFromCheckedTypes(view, schema.scheme_vars);
+        var ctx: ?BodyContext = null;
+        defer if (ctx) |*context| context.deinit();
+        for (schema.params, vector) |param, entry| {
+            if (!evidenceParamRequiresConstraintRelation(param)) continue;
+            switch (entry) {
+                .target => |target| {
+                    if (ctx == null) {
+                        ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, view, self.method_scope, owner, self.graph, self.draft);
+                        try ctx.?.seedSubstitution(schema, subst);
+                    }
+                    try self.relateTargetToConstraint(target, &ctx.?, param);
+                },
+                .structural, .from_callable, .unreachable_value, .checked_error => {},
+            }
+        }
+        return .{ .scope = .{ .owner = owner, .lexical = scope }, .schema = schema, .subst = subst, .vector = vector, .parent = parent };
     }
 
     fn materializeConstFnEvidenceVector(

@@ -7375,6 +7375,25 @@ strings, deriving names, inspecting layouts, or using incidental expression
 shape. It must also not attach a contextual monotype to a checked expression id
 as if that checked expression were a reusable runtime value.
 
+Nested procedure sites carry a compact checked inventory of the quantified type
+bindings their bodies consume, including use-site substitutions whose hidden
+receivers are absent from captured value types. Each binding names its checked
+type, lexical dispatch scope, and substitution slot. The existing nested-site
+walk produces this inventory from checked expression, pattern, and dispatch
+interfaces; it does not add a second body scan. Type visitation is cycle-safe,
+and nested sites propagate their required bindings to their lexical parents.
+Before instantiating a nested body, Monotype installs these exact bindings from
+its selected lexical evidence frames. Locally quantified variables consume that
+nested specialization's own substitution; they never share another request's
+cells. Construction of a new generalized scope imports only bindings owned by
+its enclosing scopes. Work at each specialization is proportional to the
+recorded bindings, not to the size of the enclosing scheme or its type-node map.
+Stored function evidence remains graph-free across root and cache boundaries.
+Entering a restored nested body recreates its lexical substitutions in that
+body's instantiation context, consuming saved callable/capture interfaces and
+retained hidden method contracts. Descendant contexts then use ordinary live
+bindings; decoding stored evidence never attaches graph cells to durable data.
+
 Type-only instantiation state is separate from operational body-lowering state.
 Creating a fresh checked-type instance swaps only its exact scope, checked-node
 cache, and nominal declaration-scope stack; it does not construct a parallel
@@ -7452,6 +7471,16 @@ final Monotype body is emitted.
 During active Monotype specialization, unresolved checked variables and row
 extensions remain instantiation graph nodes. They are not represented by
 durable Monotype `TypeId`s.
+
+Open draft specialization indexes retain permanent interface node ids. A lookup
+visits each current union-find class once and probes all its permanent members;
+repeated argument or return positions do not repeat those probes. Candidate
+inspection does not merge existing classes during this scan. Its visited set
+is local to the scan and uses pooled scratch, so a later lookup observes any
+intervening unions. Evidence, capture, and exact interface checks still decide
+whether a candidate may be reused. Probe work is proportional to interface
+positions plus the members of distinct classes, even when many positions share
+one class.
 
 Type-shaped inspection that can escape relation production or become durable
 specialization identity is allowed only for a fully resolved graph node. It
