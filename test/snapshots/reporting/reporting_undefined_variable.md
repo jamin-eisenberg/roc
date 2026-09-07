@@ -59,7 +59,9 @@ main = foo
 Nothing is named <span class="symbol-unqualified">foo</span> in this scope.<br>
 Is it misspelled, or is there an import missing?<br>
 <br>
-<div class="source-region"><pre class="error">main = foo</pre></div></div>
+<div class="source-region"><pre class="error">main = foo
+       ^^^
+</pre></div></div>
 </div>
 ~~~
 # LSP
@@ -70,4 +72,5 @@ Nothing is named foo in this scope.
 Is it misspelled, or is there an import missing?
 
 main = foo
+       ^^^
 ~~~

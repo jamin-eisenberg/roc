@@ -115,13 +115,17 @@ For example:<br>
 <br>
 I reached the end of the file before this construct was complete.<br>
 <br>
-<div class="source-region"><pre class="error"></pre></div></div>
+<div class="source-region"><pre class="error">
+^
+</pre></div></div>
 </div>
 <div class="report error">
 <h1 class="report-title">unrecognized syntax</h1>
 <div class="report-content">
 I don&#39;t recognize this syntax.<br>
-<div class="source-region"><pre class="error">x = (1 + 2</pre></div><br>
+<div class="source-region"><pre class="error">x = (1 + 2
+^
+</pre></div><br>
 This might be a syntax error, an unsupported language feature, or a typo.</div>
 </div>
 ~~~
@@ -138,10 +142,12 @@ For example:
 I reached the end of the file before this construct was complete.
 
 
+^
 unrecognized syntax
 
 I don't recognize this syntax.
 x = (1 + 2
+^
 
 This might be a syntax error, an unsupported language feature, or a typo.
 ~~~

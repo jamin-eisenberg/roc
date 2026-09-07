@@ -64,7 +64,9 @@ The type was determined to be:
 <h1 class="report-title">type mismatch</h1>
 <div class="report-content">
 This string literal is being used where a non-string type is needed.<br>
-<div class="source-region"><pre class="error">greeting = &quot;héllo 🐢&quot;</pre></div><br>
+<div class="source-region"><pre class="error">greeting = &quot;héllo 🐢&quot;
+           ^^^^^^^^^^^^^
+</pre></div><br>
 The type was determined to be:<br>
 <br>
 <pre class="code-block">&nbsp;&nbsp;&nbsp;&nbsp;U64</pre></div>
@@ -76,6 +78,7 @@ type mismatch
 
 This string literal is being used where a non-string type is needed.
 greeting = "héllo 🐢"
+           ^^^^^^^^^^^^^
 
 The type was determined to be:
 

@@ -95,7 +95,8 @@ This expression is used in an unexpected way.<br>
 	1,
 	2,
 	3,
-]</pre></div><br>
+]
+</pre></div><br>
 It has the type:<br>
 <br>
 <pre class="code-block">&nbsp;&nbsp;&nbsp;&nbsp;List(a) where [a.from_numeral : Numeral -&gt; Try(a, [InvalidNumeral(Str)])]</pre><br>
