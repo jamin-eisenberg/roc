@@ -389,6 +389,7 @@ const CustomCase = enum {
     default_platform_wasm32_archive_reproducible,
     issue_10733_wasm_boxy_dev_sealed_object,
     issue_10827_private_compiler_support,
+    issue_11134_wasm_post_llvm_pipeline,
     macos_output_basename_reproducible,
     default_platform_crash_x64musl,
     default_platform_crash_arm64musl,
@@ -988,6 +989,14 @@ const invalid_llvm_debug_info_needles = [_]OutputNeedle{
 };
 
 const subcommand_cases = [_]CliCase{
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality captures local values (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityLocal.roc", .contains = &.{.{ .stream = .stdout, .text = "All (4) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality captures local values (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityLocal.roc", .contains = &.{.{ .stream = .stdout, .text = "All (4) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality handles mutual recursion (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityMutual.roc", .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality handles mutual recursion (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityMutual.roc", .contains = &.{.{ .stream = .stdout, .text = "All (3) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality respects custom methods and operand spelling (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEquality.roc", .contains = &.{.{ .stream = .stdout, .text = "All (14) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (interpreter)", .backend = .interpreter, .body = .{ .command = .{ .args = &.{ "test", "--opt=interpreter", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "All (20) tests passed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "recursive equality imports retain method evidence (dev)", .backend = .dev, .body = .{ .command = .{ .args = &.{ "test", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/RecursiveEqualityImported.roc", .contains = &.{.{ .stream = .stdout, .text = "All (20) tests passed" }} } } },
     // One descriptor template descends through the same generic nominal at more
     // than one argument set: a backing shape is written once against its
     // declaration's formals and reached once per instantiation, so each descent
@@ -1052,9 +1061,9 @@ const subcommand_cases = [_]CliCase{
     // its target through an import, so no entry can reach the root and the
     // declaration is always missing from the section.
     .{ .id = 0, .suite = .subcommands, .name = "platform root hosted declaration reports without panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache", "--target=x64musl" }, .roc_file = "test/hosted-section-errors/platform_root_hosted_declaration/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "helper" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "did not say why" }, .{ .stream = .stderr, .text = "invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "package effect boundary: a package cannot depend on a platform", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_dependency/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid package dependency" }, .{ .stream = .stderr, .text = "Only apps may depend on platforms.", .wrapped = true } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "package platform target must use the platform marker", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_dependency/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid package dependency" }, .{ .stream = .stderr, .text = "Mark this dependency with the `platform` keyword.", .wrapped = true } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "package effect boundary: a package cannot gain builtin privileges by shipping a Builtin module", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/builtin_module/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "reference has no value" }, .{ .stream = .stderr, .text = "declaration has no value" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "package effect boundary: a package header cannot declare a platform dependency", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_keyword_dependency/app.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "invalid package dependency" }, .{ .stream = .stderr, .text = "HeaderParseFailed" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "package header accepts an exact platform dependency", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/package-effect-boundary/platform_keyword_dependency/app.roc", .exit = .success, .contains_any = &.{.{ .needles = &no_errors_needles }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } } } } },
     // A platform's own hosted declaration is named in its hosted section without
     // a module, since the platform cannot import itself.
     .{ .id = 0, .suite = .subcommands, .name = "platform root hosted declaration binds through an unqualified hosted entry", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/hosted-section-errors/platform_root_hosted_entry/platform/main.roc", .not_contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "panic" } } } } },
@@ -1271,7 +1280,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "nominal record update remains a known nominal value in optimized build", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/record_update_nominal_result.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "structural constructor value was typed at a nominal type without its nominal wrapper" }, .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 9815: roc check reports discarded Iter.collect polymorphic output without panic", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/issue_9815_iter_collect_polymorphic_where.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "from_iter" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "checked artifact invariant violated" }, .{ .stream = .stderr, .text = "unresolved `where`-clause method dispatch on a polymorphic value" }, .{ .stream = .stderr, .text = "dispatch plan had no method owner" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 9815: roc run turns discarded user where-clause error into ordinary crash", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "test/cli/issue_9815_discarded_user_where_clause_output.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "from_thing" }, .{ .stream = .stderr, .text = "Roc application crashed with this message:" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "unresolved `where`-clause method dispatch on a polymorphic value" }, .{ .stream = .stderr, .text = "dispatch plan had no method owner" }, .{ .stream = .stderr, .text = "panic" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "issue 10430: roc test reports unannotated Bool not missing method without postcheck panic", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10430_unannotated_bool_not.roc", .exit = .failure, .contains = &.{ .{ .stream = .stderr, .text = "missing method" }, .{ .stream = .stderr, .text = "not" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 10430: roc test infers Bool for logical negation", .body = .{ .command = .{ .args = &.{ "test", "--no-cache" }, .roc_file = "test/cli/issue_10430_unannotated_bool_not.roc", .exit = .{ .code = 2 }, .contains = &.{ .{ .stream = .stdout, .text = "passed" }, .{ .stream = .stderr, .text = "unconditional condition" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10412: annotated lambda list mismatch reports without postcheck panic", .body = .{ .command = .{ .args = &.{ "build", "--no-cache" }, .roc_file = "test/cli/issue_10412_annotated_lambda_list_mismatch.roc", .exit = .{ .code = 1 }, .contains = &.{.{ .stream = .stderr, .text = "type mismatch" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "postcheck invariant violated" }, .{ .stream = .stderr, .text = "Segmentation fault" }, .{ .stream = .stderr, .text = "SIGSEGV" }, .{ .stream = .stderr, .text = "panic" } } } } },
     // Repro for https://github.com/roc-lang/roc/issues/10694: a value-mode
     // low-level dispatch whose result is an open error union must not request
@@ -1551,6 +1560,8 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc test/str/app.roc runs successfully (dev)", .backend = .dev, .skip = .{ .windows = "test/str platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/str/app.roc" } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_allocates.roc: allocation counter positive control (dev)", .backend = .dev, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=dev", "--no-cache" }, .roc_file = "test/alloc-count/app_allocates.roc", .contains = &.{.{ .stream = .stderr, .text = "byte count: 16" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert.roc: pre-sized Dict inserts allocate nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, insert allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11162: pre-sized Dict inserts stay unique across a closure (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_closure.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, closure insert allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11162: Dict overwrites stay unique across a closure (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite_closure.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, closure overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert_overwrite.roc: overwriting an existing key allocates nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 1016, overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/alloc-count/app_dict_insert_overwrite_refcounted.roc: refcounted Dict overwrite allocates nothing (speed)", .backend = .speed, .skip = .{ .windows = "test/alloc-count platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/alloc-count/app_dict_insert_overwrite_refcounted.roc", .contains = &.{.{ .stream = .stderr, .text = "entries: 48, refcounted overwrite allocations: 0" }}, .not_contains = &.{.{ .stream = .stderr, .text = "Expect failed" }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "test/box-model-uniqueness/app.roc: boxed host model updates stay in place", .backend = .speed, .skip = .{ .windows = "test platform does not have Windows host libraries" }, .body = .{ .command = .{ .args = &.{ "--opt=speed", "--no-cache" }, .roc_file = "test/box-model-uniqueness/app.roc", .contains = &.{.{ .stream = .stderr, .text = "box model updates stayed in place" }} } } },
@@ -1583,6 +1594,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM size wasm32 links the Boxy runtime", .backend = .size, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=size", "--no-cache", "--output=boxed_closure_size.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10733: LLVM speed wasm32 links the Boxy runtime", .backend = .speed, .body = .{ .command = .{ .args = &.{ "build", "--target=wasm32", "--opt=speed", "--no-cache", "--output=boxed_closure_speed.wasm" }, .roc_file = "test/wasm/boxed_closure_app.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "UnresolvedBuiltinImport" }, .{ .stream = .stderr, .text = "panic" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10827: Roc compiler support is private from a strong-intrinsic wasm host", .backend = .dev, .body = .{ .custom = .issue_10827_private_compiler_support } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11134: wasm speed uses explicit post-LLVM passes", .backend = .speed, .body = .{ .custom = .issue_11134_wasm_post_llvm_pipeline } },
     // issue 10951: https://github.com/roc-lang/roc/issues/10951
     // The wasm32 linker exports exactly what the platform header's `exports:`
     // field names, so a header that omits the field links a module with no
@@ -2870,6 +2882,7 @@ fn runCustomCase(
         .default_platform_wasm32_archive_reproducible => customDefaultPlatformWasm32ArchiveReproducible(io, allocator, &env, &timer, timeout_ms),
         .issue_10733_wasm_boxy_dev_sealed_object => customIssue10733WasmBoxyDevSealedObject(io, allocator, &env, &timer, timeout_ms),
         .issue_10827_private_compiler_support => customIssue10827PrivateCompilerSupport(io, allocator, &env, &timer, timeout_ms),
+        .issue_11134_wasm_post_llvm_pipeline => customWasmPostLlvmPipeline(io, allocator, &env, &timer, timeout_ms),
         .macos_output_basename_reproducible => customMacosOutputBasenameReproducible(io, allocator, &env, &timer, timeout_ms),
         .default_platform_crash_x64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .x64musl, .crash),
         .default_platform_crash_arm64musl => customDefaultPlatformDebugBacktrace(io, allocator, &env, &timer, timeout_ms, .arm64musl, .crash),
@@ -5399,6 +5412,73 @@ fn validateWasmOutput(
     defer module_def.destroy();
     module_def.decode(wasm_bytes) catch |err|
         return customFailure(allocator, timer, "generated invalid wasm {s}: {}", .{ path, err });
+    return null;
+}
+
+fn customWasmPostLlvmPipeline(
+    io: std.Io,
+    allocator: Allocator,
+    env: *const CaseEnv,
+    timer: *harness.Timer,
+    timeout_ms: u64,
+) ?TestResult {
+    if (!@import("cli_test_options").binaryen) {
+        return .{ .status = .skip, .phase = .setup, .message = "requires bundled Binaryen" };
+    }
+
+    var trace_env = CaseEnv{
+        .dirs = env.dirs,
+        .env_map = env.env_map.clone(allocator) catch |err|
+            return customInfraFailure(allocator, timer, "failed to clone wasm test environment: {}", .{err}),
+    };
+    defer trace_env.env_map.deinit();
+    trace_env.env_map.put("BINARYEN_PASS_DEBUG", "1") catch |err|
+        return customInfraFailure(allocator, timer, "failed to enable Binaryen pass tracing: {}", .{err});
+
+    const wasm_path = std.fs.path.join(allocator, &.{ env.dirs.work_dir, "pipeline.wasm" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output path: {}", .{err});
+    defer allocator.free(wasm_path);
+    const output_arg = outputArg(allocator, wasm_path) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate wasm output argument: {}", .{err});
+    defer allocator.free(output_arg);
+
+    const modes = [_]struct { opt: OptMode, debug: bool }{
+        .{ .opt = .speed, .debug = false },
+        .{ .opt = .speed, .debug = true },
+        .{ .opt = .size, .debug = false },
+        .{ .opt = .size, .debug = true },
+    };
+    for (modes) |mode| {
+        const speed = mode.opt == .speed;
+        const opt_arg = if (speed) "--opt=speed" else "--opt=size";
+        const args = [_][]const u8{ "build", "--target=wasm32", "--no-cache", opt_arg, output_arg, "--debug" };
+        const contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: remove-unused-module-elements" },
+            .{ .stream = .stderr, .text = "running pass: memory-packing" },
+            .{ .stream = .stderr, .text = "(final validation)" },
+            .{ .stream = .stderr, .text = if (speed) "running pass: vacuum" else "running pass: coalesce-locals" },
+        };
+        const not_contains = [_]OutputNeedle{
+            .{ .stream = .stderr, .text = "running pass: coalesce-locals" },
+            .{ .stream = .stderr, .text = "running pass: merge-locals" },
+            .{ .stream = .stderr, .text = "running pass: precompute" },
+            .{ .stream = .stderr, .text = "running pass: inlining-optimizing" },
+        };
+        const occurrences = [_]OutputOccurrence{
+            .{ .stream = .stderr, .text = "running pass: strip-debug", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-dwarf", .count = @intFromBool(!mode.debug) },
+            .{ .stream = .stderr, .text = "running pass: strip-producers", .count = 1 },
+            .{ .stream = .stderr, .text = "running pass: strip-target-features", .count = @intFromBool(!speed and !mode.debug) },
+        };
+        if (runRocAndCheck(io, allocator, &trace_env, timer, timeout_ms, .{
+            .args = args[0..if (mode.debug) args.len else args.len - 1],
+            .roc_file = "test/wasm/str_concat_join_static_lib_app.roc",
+            .contains = &contains,
+            .not_contains = if (speed) &not_contains else &.{},
+            .occurrences = &occurrences,
+        })) |failure| return failure;
+        if (validateWasmOutput(io, allocator, timer, wasm_path)) |failure| return failure;
+    }
     return null;
 }
 

@@ -1612,6 +1612,31 @@ const core_tests = [_]TestCase{
     .{ .name = "inspect: decimal literal", .source = "1.5", .expected = .{ .inspect_str = "1.5" } },
     .{ .name = "inspect: boolean true", .source = "True", .expected = .{ .inspect_str = "True" } },
     .{ .name = "inspect: boolean false", .source = "False", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: unary not true", .source = "!True", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: unary not false", .source = "!False", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: unary not inferred parameter", .source = "{ negate = |value| !value\n (negate(True), negate(False)) }", .expected = .{ .inspect_str = "(False, True)" } },
+    .{
+        .name = "inspect: unary not mutable flag in loop issue 11157",
+        .source =
+        \\{
+        \\    run = |values| {
+        \\        var $swapped = False
+        \\        var $iterations = 0.U64
+        \\        while True {
+        \\            for value in values {
+        \\                if value > 0 and $iterations == 0 { $swapped = True }
+        \\            }
+        \\            $iterations = $iterations + 1
+        \\            if !$swapped { break }
+        \\            $swapped = False
+        \\        }
+        \\        $iterations
+        \\    }
+        \\    (run([0, 0]), run([1, 0]))
+        \\}
+        ,
+        .expected = .{ .inspect_str = "(1, 2)" },
+    },
     .{ .name = "inspect: string literal", .source = "\"hello\"", .expected = .{ .inspect_str = "\"hello\"" } },
     .{ .name = "inspect: standalone callable syntax", .source = "|value| value", .expected = .{ .inspect_str = "<function>" } },
     .{

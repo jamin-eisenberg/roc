@@ -158,6 +158,22 @@ test {
     _ = @import("test/ast_node_store_test.zig");
 }
 
+test "package S-expression emits each dependency once" {
+    const gpa = std.testing.allocator;
+    const source = "package [Wrapper] { util: \"../util/main.roc\", pf: platform \"../platform/main.roc\" }";
+    var env = try CommonEnv.init(gpa, source);
+    defer env.deinit(gpa);
+    var ast = try file(gpa, &env);
+    defer ast.deinit();
+    try std.testing.expectEqual(@as(usize, 0), ast.parse_diagnostics.items.len);
+
+    var output: std.Io.Writer.Allocating = .init(gpa);
+    defer output.deinit();
+    try ast.toSExprStr(gpa, &env, &output.writer);
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output.written(), "../platform/main.roc"));
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, output.written(), "../util/main.roc"));
+}
+
 test "deeply nested parentheses parse stack-safely" {
     const gpa = std.testing.allocator;
 
