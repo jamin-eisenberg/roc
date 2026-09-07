@@ -6009,3 +6009,21 @@ fn searchDirectoryForBuiltin(
         }
     }
 }
+
+test "snapshot CSS covers every diagnostic annotation class" {
+    const css = @embedFile("snapshot.css");
+    inline for (std.enums.values(reporting.Annotation)) |annotation| {
+        const selector = comptime "." ++ annotation.semanticName();
+        var offset: usize = 0;
+        var found = false;
+        while (std.mem.find(u8, css[offset..], selector)) |relative| {
+            const end = offset + relative + selector.len;
+            if (end < css.len and (css[end] == ' ' or css[end] == ',' or css[end] == '{' or css[end] == '\n')) {
+                found = true;
+                break;
+            }
+            offset = end;
+        }
+        try std.testing.expect(found);
+    }
+}
