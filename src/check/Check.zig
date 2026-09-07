@@ -19205,6 +19205,14 @@ fn checkExpr(self: *Self, expr_idx: CIR.Expr.Idx, env: *Env, expected: Expected)
                 try self.closeAbsentConstructedPayloadVars(lambda.body, body_var);
                 const body_result = try self.unifyInContext(expected_func.ret, body_var, env, anno_context);
                 if (body_result.isProblem()) {
+                    // Preserve platform unification's exact relation, and refine
+                    // only the recorded diagnostic with the position we checked.
+                    std.debug.assert(body_result == .problem);
+                    const mismatch = &self.problems.problems.items[@intFromEnum(body_result.problem)].type_mismatch;
+                    if (mismatch.context == .platform_requirement) {
+                        const requirement_context = mismatch.context.platform_requirement;
+                        mismatch.context = .{ .platform_requirement_return = requirement_context };
+                    }
                     try self.erroneous_value_exprs.put(self.gpa, lambda.body, {});
                 }
                 break :blk lambda_body_does_fx;
