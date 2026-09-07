@@ -11379,8 +11379,8 @@ tag-payload field is that payload struct's sole refcounted field. The tag read's
 variant and discriminant metadata is the explicit proof of the active shape;
 no layout shape is treated as evidence that a variant is active.
 
-Certification tracks field claims over the full committed semantic field-index
-domain. Scalar and padding fields contribute no ownership obligations, regardless
+Certification tracks field claims over the full committed layout field-index
+domain. Scalar and padding fields require no RC claims, regardless
 of their indices. The required claim set is derived once per queried layout from
 its committed RC fields. Path states keep the first word inline and share sparse
 persistent words for higher indices; forks and outcome-restitution receipts retain
