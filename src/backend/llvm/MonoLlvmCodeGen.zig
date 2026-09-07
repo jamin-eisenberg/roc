@@ -316,6 +316,14 @@ pub const MonoLlvmCodeGen = struct {
     stmt_entry_blocks: std.AutoHashMap(u32, LlvmBuilder.Function.Block.Index),
     loop_continue_blocks: std.ArrayList(LlvmBuilder.Function.Block.Index),
     loop_break_blocks: std.ArrayList(LlvmBuilder.Function.Block.Index),
+    /// Reusable store-indexed columns. Only a procedure's explicit inventory
+    /// is invalidated at its end; growing the store initializes only new rows.
+    local_slot_storage: std.ArrayList(LocalSlot) = .empty,
+    deferred_str_capture_storage: std.ArrayList(?DeferredStrCapture) = .empty,
+    /// Deterministic regression metric for initialization/invalidation work.
+    /// Allocation accounting alone cannot detect repeated whole-table clearing.
+    local_scratch_rows_visited: if (builtin.is_test) usize else void = if (builtin.is_test) 0 else {},
+    /// Active function's view. Synthetic helpers temporarily install no locals.
     local_slots: []LocalSlot = &.{},
     deferred_str_captures: []?DeferredStrCapture = &.{},
     /// Number of non-null entries in `deferred_str_captures`. Deferred
@@ -547,6 +555,9 @@ pub const MonoLlvmCodeGen = struct {
 
     /// Releases backend-owned scratch maps.
     pub fn deinit(self: *MonoLlvmCodeGen) void {
+        self.local_slot_storage.deinit(self.allocator);
+        self.deferred_str_capture_storage.deinit(self.allocator);
+        self.deferred_str_capture_actives.deinit(self.allocator);
         self.debug_types.deinit();
         self.debug_inline_callsites.deinit();
         self.debug_inline_subprograms.deinit();
@@ -1395,6 +1406,7 @@ pub const MonoLlvmCodeGen = struct {
 
     /// Declares and compiles every procedure in dependency-index order.
     pub fn compileAllProcSpecs(self: *MonoLlvmCodeGen, procs: []const LirProcSpec) Error!void {
+        try self.ensureLocalScratch();
         for (procs, 0..) |proc, i| {
             if (proc.is_static_initializer) continue;
             try self.declareProcSpec(@enumFromInt(@as(u32, @intCast(i))), proc);
@@ -1730,11 +1742,11 @@ pub const MonoLlvmCodeGen = struct {
         const outer_ret_layout = self.current_ret_layout;
         const outer_slots = self.local_slots;
         const outer_deferred_str_captures = self.deferred_str_captures;
-        const outer_deferred_str_capture_count = self.deferred_str_capture_count;
-        const outer_deferred_str_capture_actives = self.deferred_str_capture_actives;
+        // Procedure bodies are emitted serially by compileAllProcSpecs. Helper
+        // emission saves/restores the active views without owning this storage.
+        std.debug.assert(self.deferred_str_capture_count == 0);
+        std.debug.assert(self.deferred_str_capture_actives.items.len == 0);
         defer {
-            self.deferred_str_capture_actives.deinit(self.allocator);
-            self.deferred_str_capture_actives = outer_deferred_str_capture_actives;
             self.wip = outer_wip;
             self.rc_arg_scratch = outer_rc_scratch;
             self.roc_ops_arg = outer_roc_ops;
@@ -1748,7 +1760,6 @@ pub const MonoLlvmCodeGen = struct {
             self.current_ret_layout = outer_ret_layout;
             self.local_slots = outer_slots;
             self.deferred_str_captures = outer_deferred_str_captures;
-            self.deferred_str_capture_count = outer_deferred_str_capture_count;
         }
 
         self.join_points.clearRetainingCapacity();
@@ -1850,12 +1861,12 @@ pub const MonoLlvmCodeGen = struct {
         self.current_runtime_ret_desc = proc.runtime_ret_desc;
         self.current_ret_layout = proc.ret_layout;
 
-        self.local_slots = try self.allocator.alloc(LocalSlot, self.store.localCount());
-        defer self.allocator.free(self.local_slots);
-        self.deferred_str_captures = try self.allocator.alloc(?DeferredStrCapture, self.store.localCount());
-        defer self.allocator.free(self.deferred_str_captures);
-        self.deferred_str_capture_actives = .empty;
-        @memset(self.deferred_str_captures, null);
+        self.local_slots = self.local_slot_storage.items;
+        self.deferred_str_captures = self.deferred_str_capture_storage.items;
+        // Install cleanup before allocating any LLVM slots, including for OOM.
+        // Specialized siblings can share LocalIds but never LLVM slot values.
+        defer self.clearProcLocalSlots(proc);
+        defer self.clearDeferredStrCaptures();
         try self.allocProcLocalSlots(proc);
         try self.unpackProcArgs(proc);
         if (proc.boxy_runtime_entry) try self.emitBoxyRuntimeInit();
@@ -2286,18 +2297,42 @@ pub const MonoLlvmCodeGen = struct {
         return result;
     }
 
-    fn allocProcLocalSlots(self: *MonoLlvmCodeGen, proc: LirProcSpec) Error!void {
-        const unallocated = LocalSlot{
-            .ptr = undefined,
-            .layout_idx = .zst,
-            .size = 0,
-            .alignment = LlvmBuilder.Alignment.fromByteUnits(1),
-            .allocated = false,
-        };
-        for (self.local_slots) |*local_slot| {
-            local_slot.* = unallocated;
+    fn ensureLocalScratch(self: *MonoLlvmCodeGen) Error!void {
+        const count = self.store.localCount();
+        const old_slots_len = self.local_slot_storage.items.len;
+        if (count > old_slots_len) {
+            try self.local_slot_storage.resize(self.allocator, count);
+            // Other fields are read only after allocProcLocalSlot sets them.
+            for (self.local_slot_storage.items[old_slots_len..]) |*local_slot| {
+                if (builtin.is_test) self.local_scratch_rows_visited += 1;
+                local_slot.* = .{
+                    .ptr = undefined,
+                    .layout_idx = .zst,
+                    .size = 0,
+                    .alignment = LlvmBuilder.Alignment.fromByteUnits(1),
+                    .allocated = false,
+                };
+            }
         }
+        const old_captures_len = self.deferred_str_capture_storage.items.len;
+        if (count > old_captures_len) {
+            try self.deferred_str_capture_storage.resize(self.allocator, count);
+            @memset(self.deferred_str_capture_storage.items[old_captures_len..], null);
+            if (builtin.is_test) self.local_scratch_rows_visited += count - old_captures_len;
+        }
+    }
 
+    fn clearProcLocalSlots(self: *MonoLlvmCodeGen, proc: LirProcSpec) void {
+        for ([_]LocalSpan{ proc.args, proc.frame_locals }) |span| {
+            const locals = self.store.getLocalSpan(span);
+            for (0..locals.len) |i| {
+                if (builtin.is_test) self.local_scratch_rows_visited += 1;
+                self.local_slots[@intFromEnum(GuardedList.at(locals, i))].allocated = false;
+            }
+        }
+    }
+
+    fn allocProcLocalSlots(self: *MonoLlvmCodeGen, proc: LirProcSpec) Error!void {
         const proc_args = self.store.getLocalSpan(proc.args);
         for (0..proc_args.len) |i| {
             const local_id = GuardedList.at(proc_args, i);
@@ -2344,28 +2379,16 @@ pub const MonoLlvmCodeGen = struct {
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
 
-        var resume_cursor = wip.cursor;
         const resume_debug_location = wip.debug_location;
-        defer {
-            wip.cursor = resume_cursor;
-            wip.debug_location = resume_debug_location;
-        }
-
-        const entry_block: LlvmBuilder.Function.Block.Index = .entry;
-        wip.cursor = .{ .block = entry_block };
+        defer wip.debug_location = resume_debug_location;
         wip.debug_location = .no_location;
-        const allocated = wip.alloca(
-            .normal,
+        return wip.allocaInEntry(
             ty,
             builder.intValue(.i32, element_count) catch return error.OutOfMemory,
             alignment,
             .default,
             name,
         ) catch return error.OutOfMemory;
-
-        // Inserting at instruction zero shifts an active entry-block cursor.
-        if (resume_cursor.block == entry_block) resume_cursor.instruction += 1;
-        return allocated;
     }
 
     fn unpackProcArgs(self: *MonoLlvmCodeGen, proc: LirProcSpec) Error!void {
@@ -7621,6 +7644,7 @@ pub const MonoLlvmCodeGen = struct {
 
     fn clearDeferredStrCaptures(self: *MonoLlvmCodeGen) void {
         for (self.deferred_str_capture_actives.items) |index| {
+            if (builtin.is_test) self.local_scratch_rows_visited += 1;
             self.deferred_str_captures[index] = null;
         }
         self.deferred_str_capture_count = 0;
@@ -7633,6 +7657,7 @@ pub const MonoLlvmCodeGen = struct {
         const capture_slot = &self.deferred_str_captures[@intFromEnum(local)];
         if (capture_slot.* == null) {
             self.deferred_str_capture_actives.append(self.allocator, @intFromEnum(local)) catch return error.OutOfMemory;
+            self.deferred_str_capture_count += 1;
         }
         capture_slot.* = capture;
     }
@@ -7712,9 +7737,7 @@ pub const MonoLlvmCodeGen = struct {
         const capture = self.deferredStrCapture(source) orelse return false;
         if (!self.isStrLocal(target)) return error.CompilationFailed;
         if (target != source) {
-            try self.prepareLocalWrite(target);
-            self.deferred_str_captures[@intFromEnum(target)] = capture;
-            self.deferred_str_capture_count += 1;
+            try self.installDeferredStrCapture(target, capture);
         }
         return true;
     }
@@ -8043,6 +8066,22 @@ pub const MonoLlvmCodeGen = struct {
     fn emitStrLiteral(self: *MonoLlvmCodeGen, out: LlvmBuilder.Value, literal: StrLiteral) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const bytes = self.store.getStringLiteral(literal);
+        const RocStr = builtins.str.RocStr;
+        if (bytes.len < RocStr.word_count * self.targetWordSize()) {
+            // Construct the complete value here. Inlining the runtime constructor
+            // makes LLVM rediscover these constants through partial-byte stores
+            // and expensive scalar promotion in large callers.
+            const words = smallStrLiteralWords(bytes, self.targetWordSize(), self.target.cpu.arch.endian());
+            var constants: [RocStr.word_count]LlvmBuilder.Constant = undefined;
+            for (words, &constants) |word, *constant| {
+                constant.* = builder.intConst(self.ptrSizedIntType(), word) catch return error.OutOfMemory;
+            }
+            const ty = builder.arrayType(RocStr.word_count, self.ptrSizedIntType()) catch return error.OutOfMemory;
+            const value = builder.arrayConst(ty, &constants) catch return error.OutOfMemory;
+            const wip = self.wip orelse return error.CompilationFailed;
+            _ = wip.store(.normal, value.toValue(), out, self.targetPointerAlignment()) catch return error.OutOfMemory;
+            return;
+        }
         try self.callBuiltinVoid(
             builtinSymbol(.str_from_literal),
             &.{ try self.ptrType(), try self.ptrType(), self.ptrSizedIntType(), try self.ptrType() },
@@ -12911,8 +12950,228 @@ fn repeatedByte(byte: u8, width: u8) u128 {
     return result;
 }
 
+/// Encode the runtime's inline RocStr layout as target-width integer constants.
+/// The final byte is the length/flag byte regardless of target endianness.
+fn smallStrLiteralWords(bytes: []const u8, word_size: u32, endian: std.builtin.Endian) [builtins.str.RocStr.word_count]u64 {
+    const RocStr = builtins.str.RocStr;
+    std.debug.assert(word_size == 2 or word_size == 4 or word_size == 8);
+    const str_size = RocStr.word_count * word_size;
+    std.debug.assert(bytes.len < str_size);
+    var encoded: [RocStr.word_count * @sizeOf(u64)]u8 = @splat(0);
+    @memcpy(encoded[0..bytes.len], bytes);
+    encoded[str_size - 1] = RocStr.smallStrFlagByte(bytes.len);
+    var words: [RocStr.word_count]u64 = undefined;
+    for (&words, 0..) |*word, word_index| {
+        const offset = word_index * word_size;
+        word.* = switch (word_size) {
+            2 => std.mem.readInt(u16, encoded[offset..][0..2], endian),
+            4 => std.mem.readInt(u32, encoded[offset..][0..4], endian),
+            8 => std.mem.readInt(u64, encoded[offset..][0..8], endian),
+            else => unreachable,
+        };
+    }
+    return words;
+}
+
+test "LLVM small string constants match the runtime constructor" {
+    const RocStr = builtins.str.RocStr;
+    // Include embedded NUL and UTF-8 in partial and full words.
+    const contents = "a\x00é🙂bc\x00é🙂defghijkl";
+    for (0..@sizeOf(RocStr)) |len| {
+        var runtime_value = RocStr.fromSliceSmall(contents[0..len]);
+        const encoded = smallStrLiteralWords(contents[0..len], @sizeOf(usize), builtin.cpu.arch.endian());
+        var native_words: [RocStr.word_count]usize = undefined;
+        for (encoded, &native_words) |word, *native_word| native_word.* = @intCast(word);
+        try std.testing.expectEqualSlices(u8, std.mem.asBytes(&runtime_value), std.mem.asBytes(&native_words));
+    }
+}
+
+test "LLVM small string constants preserve target layout at every length" {
+    const contents = "a\x00é🙂bc\x00é🙂defghijkl";
+    inline for (.{ u16, u32, u64 }) |Word| {
+        const size = builtins.str.RocStr.word_count * @sizeOf(Word);
+        inline for (.{ std.builtin.Endian.little, std.builtin.Endian.big }) |endian| {
+            for (0..size) |len| {
+                const words = smallStrLiteralWords(contents[0..len], @sizeOf(Word), endian);
+                var memory: [size]u8 = undefined;
+                for (words, 0..) |word, index| {
+                    std.mem.writeInt(Word, memory[index * @sizeOf(Word) ..][0..@sizeOf(Word)], @intCast(word), endian);
+                }
+                try std.testing.expectEqualSlices(u8, contents[0..len], memory[0..len]);
+                for (memory[len .. size - 1]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+                try std.testing.expectEqual(@as(u8, 0x80) | @as(u8, @intCast(len)), memory[size - 1]);
+            }
+        }
+    }
+}
+
 test "LLVM erased callable explicit arguments exclude capture and reuse" {
     try std.testing.expectEqual(@as(usize, 3), try MonoLlvmCodeGen.explicitProcParamCount(.erased_callable, 5));
     try std.testing.expectEqual(@as(usize, 5), try MonoLlvmCodeGen.explicitProcParamCount(.roc, 5));
     try std.testing.expectError(error.CompilationFailed, MonoLlvmCodeGen.explicitProcParamCount(.erased_callable, 1));
+}
+
+test "LLVM fixed stack slots dominate entry and loop uses" {
+    const allocator = std.testing.allocator;
+    const byte_alignment = LlvmBuilder.Alignment.fromByteUnits(@alignOf(u8));
+    var store = lir.LirStore.init(allocator);
+    defer store.deinit();
+    var codegen = MonoLlvmCodeGen.init(allocator, &store, &.{}, &.{}, &.{});
+    defer codegen.deinit();
+    var builder = try codegen.createBuilder("stack_slots");
+    defer builder.deinit();
+    codegen.builder = &builder;
+    const function = try builder.addFunction(try builder.fnType(.void, &.{}, .normal), try builder.strtabString("slots"), .default);
+    var wip = try LlvmBuilder.WipFunction.init(&builder, .{ .function = function, .strip = true });
+    defer wip.deinit();
+    codegen.wip = &wip;
+    const entry = try wip.block(0, "entry");
+    const loop = try wip.block(1, "loop");
+    wip.cursor = .{ .block = entry };
+    const first = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "first");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 1), first, byte_alignment);
+    const second = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "second");
+    _ = try wip.store(.normal, try builder.intValue(.i8, 2), second, byte_alignment);
+    const branch = try wip.br(loop);
+    wip.cursor = .{ .block = loop };
+    const loop_slot = try codegen.allocEntryBlockSlot(.i8, 1, byte_alignment, "loop_slot");
+    try std.testing.expectEqual(loop, wip.cursor.block);
+    try std.testing.expectEqual(@as(u32, 0), wip.cursor.instruction);
+    _ = try wip.store(.normal, try builder.intValue(.i8, 3), loop_slot, byte_alignment);
+    _ = try wip.br(loop);
+    try wip.flushEntryAllocas();
+    const instructions = entry.ptrConst(&wip).instructions.items;
+    try std.testing.expectEqual(loop_slot, instructions[0].toValue());
+    try std.testing.expectEqual(second, instructions[1].toValue());
+    try std.testing.expectEqual(first, instructions[2].toValue());
+    try std.testing.expectEqual(branch, instructions[instructions.len - 1]);
+    const expected = [_]LlvmBuilder.Function.Instruction.Tag{ .alloca, .alloca, .alloca, .store, .store, .br };
+    for (instructions, expected) |instruction, tag| {
+        try std.testing.expectEqual(tag, wip.instructions.get(@intFromEnum(instruction)).tag);
+    }
+    try codegen.finishCurrentWipFunction();
+}
+
+test "issue 11132: scratch clearing follows proc inventories and survives module reuse" {
+    const gpa = std.testing.allocator;
+    var store = lir.LirStore.init(gpa);
+    defer store.deinit();
+    var layouts = try layout.Store.init(gpa, .u64);
+    defer layouts.deinit();
+
+    // Most of the global ID space does not belong to these procedures.
+    for (0..4096) |_| _ = try store.addLocal(.{ .layout_idx = .i64 });
+    const shared = try store.addLocal(.{ .layout_idx = .i64 });
+    const args = try store.addLocalSpan(&.{shared});
+    const body = try store.addCFStmt(.{ .ret = .{ .value = shared } });
+    const proc_count = 32;
+    var procs: [proc_count]LirProcSpecId = undefined;
+    for (&procs, 0..) |*proc, i| {
+        proc.* = try store.addProcSpec(.{
+            .name = lir.LIR.Symbol.fromRaw(i),
+            .args = args,
+            .frame_locals = args,
+            .body = body,
+            .ret_layout = .i64,
+        });
+    }
+    var codegen = MonoLlvmCodeGen.initForLinkedObject(gpa, &store, &.{}, &.{}, &.{}, builtin.target);
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+
+    var first = try codegen.generateEntrypointModule("scratch_reuse", &.{});
+    defer first.deinit();
+    // Each column is initialized once; each proc invalidates its argument and
+    // frame inventory. No clearing work may scale with procs * global locals.
+    const proc_work = 2 * proc_count;
+    try std.testing.expectEqual(2 * store.localCount() + proc_work, codegen.local_scratch_rows_visited);
+    for (codegen.local_slot_storage.items) |slot_value| try std.testing.expect(!slot_value.allocated);
+    const slots_ptr = codegen.local_slot_storage.items.ptr;
+    const captures_ptr = codegen.deferred_str_capture_storage.items.ptr;
+
+    const before = codegen.local_scratch_rows_visited;
+    var second = try codegen.generateEntrypointModule("scratch_reuse", &.{});
+    defer second.deinit();
+    try std.testing.expectEqual(proc_work, codegen.local_scratch_rows_visited - before);
+    try std.testing.expectEqual(slots_ptr, codegen.local_slot_storage.items.ptr);
+    try std.testing.expectEqual(captures_ptr, codegen.deferred_str_capture_storage.items.ptr);
+    try std.testing.expectEqualSlices(u32, first.bitcode, second.bitcode);
+
+    // A failure after slots were allocated must leave the instance reusable.
+    store.setProcSpecBody(procs[0], null);
+    try std.testing.expectError(error.CompilationFailed, codegen.generateEntrypointModule("scratch_reuse", &.{}));
+    try std.testing.expect(codegen.local_slots.len == 0);
+    for (codegen.local_slot_storage.items) |slot_value| try std.testing.expect(!slot_value.allocated);
+    try std.testing.expectEqual(@as(usize, 0), codegen.deferred_str_capture_count);
+    store.setProcSpecBody(procs[0], body);
+    var after_failure = try codegen.generateEntrypointModule("scratch_reuse", &.{});
+    defer after_failure.deinit();
+    try std.testing.expectEqualSlices(u32, first.bitcode, after_failure.bitcode);
+}
+
+test "issue 11132: scratch allocation failure and store growth initialize only new rows" {
+    const gpa = std.testing.allocator;
+    var store = lir.LirStore.init(gpa);
+    defer store.deinit();
+    _ = try store.addLocal(.{ .layout_idx = .str });
+    // Fail the capture table allocation after the slot table succeeds.
+    var failing = std.testing.FailingAllocator.init(gpa, .{ .fail_index = 1 });
+    var codegen = MonoLlvmCodeGen.init(failing.allocator(), &store, &.{}, &.{}, &.{});
+    defer codegen.deinit();
+    try std.testing.expectError(error.OutOfMemory, codegen.ensureLocalScratch());
+    try std.testing.expectEqual(@as(usize, 1), codegen.local_scratch_rows_visited);
+    try std.testing.expect(!codegen.local_slot_storage.items[0].allocated);
+    failing.fail_index = std.math.maxInt(usize);
+    try codegen.ensureLocalScratch();
+    try std.testing.expectEqual(@as(usize, 2), codegen.local_scratch_rows_visited);
+    _ = try store.addLocal(.{ .layout_idx = .str });
+    try codegen.ensureLocalScratch();
+    try std.testing.expectEqual(@as(usize, 4), codegen.local_scratch_rows_visited);
+    for (codegen.local_slot_storage.items) |slot_value| try std.testing.expect(!slot_value.allocated);
+    for (codegen.deferred_str_capture_storage.items) |capture| try std.testing.expect(capture == null);
+}
+
+test "issue 11132: installed and propagated deferred captures are counted and cleared" {
+    const gpa = std.testing.allocator;
+    var store = lir.LirStore.init(gpa);
+    defer store.deinit();
+    var layouts = try layout.Store.init(gpa, .u64);
+    defer layouts.deinit();
+    const source = try store.addLocal(.{ .layout_idx = .str });
+    const first = try store.addLocal(.{ .layout_idx = .str });
+    const second = try store.addLocal(.{ .layout_idx = .str });
+    var codegen = MonoLlvmCodeGen.init(gpa, &store, &.{}, &.{}, &.{});
+    defer codegen.deinit();
+    codegen.layout_store = &layouts;
+    try codegen.ensureLocalScratch();
+    codegen.deferred_str_captures = codegen.deferred_str_capture_storage.items;
+    const capture = MonoLlvmCodeGen.DeferredStrCapture{
+        .source_local = source,
+        // No materialization occurs here; only the source identity is read.
+        .source = undefined,
+        .start_ptr = undefined,
+        .end_ptr = undefined,
+        .pending_rc_count = 0,
+        .pending_rc_atomicity = .atomic,
+    };
+    try codegen.installDeferredStrCapture(first, capture);
+    try std.testing.expectEqual(@as(usize, 1), codegen.deferred_str_capture_count);
+    try std.testing.expect(try codegen.propagateDeferredStrCapture(second, first));
+    try std.testing.expectEqual(@as(usize, 2), codegen.deferred_str_capture_count);
+    try std.testing.expectEqual(@as(usize, 2), codegen.deferred_str_capture_actives.items.len);
+    try std.testing.expect(try codegen.propagateDeferredStrCapture(first, first));
+    try std.testing.expectEqual(@as(usize, 2), codegen.deferred_str_capture_count);
+    codegen.clearDeferredStrCapture(first);
+    try std.testing.expectEqual(@as(usize, 1), codegen.deferred_str_capture_count);
+    try codegen.installDeferredStrCapture(first, capture);
+    try std.testing.expectEqual(@as(usize, 2), codegen.deferred_str_capture_count);
+    codegen.clearDeferredStrCaptures();
+    try std.testing.expectEqual(@as(usize, 0), codegen.deferred_str_capture_count);
+    try std.testing.expectEqual(@as(usize, 0), codegen.deferred_str_capture_actives.items.len);
+    try std.testing.expect(codegen.deferredStrCapture(first) == null);
+    try std.testing.expect(codegen.deferredStrCapture(second) == null);
+    // Reusing the same IDs in another procedure starts with empty capture state.
+    try codegen.installDeferredStrCapture(second, capture);
+    try std.testing.expectEqual(@as(usize, 1), codegen.deferred_str_capture_count);
+    codegen.clearDeferredStrCaptures();
 }

@@ -30,6 +30,9 @@ const binaryen_available = if (@import("builtin").is_test) false else @import("c
 const RocBinaryenOptimizeConfig = extern struct {
     optimize_level: c_int,
     shrink_level: c_int,
+    /// Null selects Binaryen's default pipeline; otherwise run exactly this list.
+    passes: ?[*]const [*:0]const u8,
+    pass_count: c_uint,
     zero_filled_memory: u8,
     debug_info: u8,
     strip_debug: u8,
@@ -987,6 +990,21 @@ fn binaryenStatusName(status: c_int) []const u8 {
     };
 }
 
+// LLVM has already optimized the app and builtins. These passes clean up
+// final wasm instructions, table calls, duplicate functions, and data after
+// linking. Do not use the default pipeline for speed builds: even level zero
+// runs local coalescing, and the optimizing inliner can run it again.
+const wasm_speed_passes = [_][*:0]const u8{
+    "directize",
+    "remove-unused-brs",
+    "optimize-instructions",
+    "dce",
+    "vacuum",
+    "duplicate-function-elimination",
+    "remove-unused-module-elements",
+    "memory-packing",
+};
+
 fn binaryenConfig(config: LinkConfig) RocBinaryenOptimizeConfig {
     const Levels = struct {
         optimize: c_int,
@@ -1000,6 +1018,8 @@ fn binaryenConfig(config: LinkConfig) RocBinaryenOptimizeConfig {
     return .{
         .optimize_level = levels.optimize,
         .shrink_level = levels.shrink,
+        .passes = if (config.wasm_optimize == .speed) &wasm_speed_passes else null,
+        .pass_count = if (config.wasm_optimize == .speed) wasm_speed_passes.len else 0,
         .zero_filled_memory = @intFromBool(config.wasm_zero_filled_memory),
         .debug_info = @intFromBool(config.wasm_debug_info),
         .strip_debug = @intFromBool(!config.wasm_debug_info),

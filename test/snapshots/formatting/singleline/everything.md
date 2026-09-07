@@ -264,17 +264,17 @@ EndOfFile,
 			(ty-var (raw "a"))
 			(where
 				(method (mod-of "a") (name "a1")
-					(args
+					(ty-fn
 						(ty-tuple
 							(ty-var (raw "a"))
-							(ty-var (raw "a"))))
-					(ty (name "Str")))
+							(ty-var (raw "a")))
+						(ty (name "Str"))))
 				(method (mod-of "a") (name "a2")
-					(args
+					(ty-fn
 						(ty-tuple
 							(ty-var (raw "a"))
-							(ty-var (raw "a"))))
-					(ty (name "Str")))))
+							(ty-var (raw "a")))
+						(ty (name "Str"))))))
 		(s-type-decl
 			(header (name "B")
 				(args
@@ -282,17 +282,17 @@ EndOfFile,
 			(ty-var (raw "b"))
 			(where
 				(method (mod-of "b") (name "b1")
-					(args
+					(ty-fn
 						(ty-tuple
 							(ty-var (raw "b"))
-							(ty-var (raw "b"))))
-					(ty (name "Str")))
+							(ty-var (raw "b")))
+						(ty (name "Str"))))
 				(method (mod-of "b") (name "b2")
-					(args
+					(ty-fn
 						(ty-tuple
 							(ty-var (raw "b"))
-							(ty-var (raw "b"))))
-					(ty (name "Str")))))
+							(ty-var (raw "b")))
+						(ty (name "Str"))))))
 		(s-type-decl
 			(header (name "C")
 				(args

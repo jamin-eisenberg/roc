@@ -711,6 +711,11 @@ pub const SchemeUseRecord = extern struct {
         /// The edge shares the definition's vars, so its record has no copy
         /// pairs but still names the exact scheme root used by checking.
         shared_value_use,
+        /// A fully concrete recursive dispatch reuses an ancestor's selected
+        /// method instance. `slot_data` identifies this constraint, and
+        /// `scheme_root` names the reused instance; no fresh pairs are minted.
+        /// Its requirements are determined by the target's callable paths.
+        recursive_dispatch_target,
         /// Producer-authored provenance for a reference to a definition in an
         /// on-stack recursive binding group. This record carries no evidence
         /// or substitution of its own; an accompanying value/shared use owns
@@ -4661,8 +4666,15 @@ pub fn recordNumeralDispatchPlan(
     node_idx: Node.Idx,
     target_var: TypeVar,
     fn_var: TypeVar,
+    pattern_failure_expr: ?CIR.Expr.Idx,
 ) std.mem.Allocator.Error!void {
-    try self.store.recordLiteralDispatchPlan(node_idx, .numeral, target_var, fn_var);
+    try self.store.recordLiteralDispatchPlan(
+        node_idx,
+        .numeral,
+        target_var,
+        fn_var,
+        if (pattern_failure_expr) |expr_idx| @intFromEnum(expr_idx) else null,
+    );
 }
 
 /// Return the checked `from_numeral` function for a numeric expression.
@@ -4686,8 +4698,15 @@ pub fn recordQuoteDispatchPlan(
     node_idx: Node.Idx,
     target_var: TypeVar,
     fn_var: TypeVar,
+    pattern_failure_expr: ?CIR.Expr.Idx,
 ) std.mem.Allocator.Error!void {
-    try self.store.recordLiteralDispatchPlan(node_idx, .quote, target_var, fn_var);
+    try self.store.recordLiteralDispatchPlan(
+        node_idx,
+        .quote,
+        target_var,
+        fn_var,
+        if (pattern_failure_expr) |expr_idx| @intFromEnum(expr_idx) else null,
+    );
 }
 
 /// Record a constrained-scheme use for static-dispatch evidence.

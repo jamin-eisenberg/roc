@@ -1009,7 +1009,7 @@ fn openNominalBacking(
         return opened;
     }
 
-    var var_map = std.AutoHashMap(Var, Var).init(type_store.gpa);
+    var var_map = collections.DenseMap(Var, Var).init(type_store.gpa);
     defer var_map.deinit();
     const opened = try types.instantiate.instantiateNominalBacking(
         type_store,

@@ -59,9 +59,9 @@ EndOfFile,
 								(ty (name "Str")))
 							(where
 								(method (mod-of "a") (name "show")
-									(args
-										(ty-var (raw "a")))
-									(ty (name "Str")))))
+									(ty-fn
+										(ty-var (raw "a"))
+										(ty (name "Str"))))))
 						(s-decl
 							(p-ident (raw "inner"))
 							(e-lambda
