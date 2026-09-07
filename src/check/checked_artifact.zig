@@ -11001,6 +11001,8 @@ pub const CheckedExpr = struct {
 /// Publication-only origin for checked expressions synthesized while building
 /// the checked artifact.
 pub const SyntheticExprOrigin = union(enum) {
+    /// A checked error constant for a rejected destructure binder.
+    pattern_error: u32,
     pattern_extraction_result_lookup: struct {
         selected_root_index: u32,
         result_pattern: CheckedPatternId,
@@ -15969,7 +15971,7 @@ fn appendSyntheticLocalLookupRefs(
                 });
                 by_checked_expr[raw_expr] = id;
             },
-            .pattern_validation_result => {},
+            .pattern_validation_result, .pattern_error => {},
             .pattern_extraction_wrapper, .pattern_validation_wrapper => {
                 const raw_expr = @intFromEnum(origin_record.expr);
                 if (raw_expr >= checked_bodies.exprCount()) {
@@ -25759,7 +25761,7 @@ fn exhaustivenessReplacingRootForSource(
                 const base_expr, const exact_pattern = switch (body) {
                     .pattern_extraction => |extraction| .{ extraction.base_expr, extraction.scrutinee_pattern },
                     .pattern_validation => |validation| .{ validation.base_expr, validation.scrutinee_pattern },
-                    .expr => unreachable,
+                    .expr, .pattern_error => unreachable,
                 };
                 if (source == .destructure_pattern and source.destructure_pattern == exact_pattern) return root;
 
@@ -25781,7 +25783,7 @@ fn exhaustivenessReplacingRootForSource(
                 if (base_contains) return root;
                 continue;
             },
-            .expr => {},
+            .expr, .pattern_error => {},
         };
         const contains = switch (source) {
             .match_expr => |source_expr| blk: {
@@ -26175,6 +26177,7 @@ fn syntheticExprCapacityForHoistedRoots(selected_hoisted_roots: []const hoist_ro
             .expr => 0,
             .pattern_extraction => 2,
             .pattern_validation => 2,
+            .pattern_error => 1,
         };
     }
     return count;
@@ -26210,6 +26213,15 @@ fn checkedBodyForSelectedHoistedRoot(
             .expr = checkedExprIdForSource(checked_bodies, selected.expr),
             .pattern = if (selected.pattern) |pattern| checkedPatternIdForSource(checked_bodies, pattern) else null,
             .checked_type = try checkedTypeIdForVar(allocator, module, checked_types, if (selected.pattern) |pattern| ModuleEnv.varFrom(pattern) else module.exprType(selected.expr)),
+        },
+        .pattern_error => blk: {
+            const pattern = selected.pattern orelse unreachable;
+            const checked_type = try checkedTypeIdForVar(allocator, module, checked_types, ModuleEnv.varFrom(pattern));
+            break :blk .{
+                .expr = try checked_body_builder.appendSyntheticExpr(allocator, .{ .pattern_error = selected_index }, checked_type, module.regionAt(ModuleEnv.nodeIdxFrom(pattern)), .runtime_error),
+                .pattern = checkedPatternIdForSource(checked_bodies, pattern),
+                .checked_type = checked_type,
+            };
         },
         .pattern_extraction => |extraction| blk: {
             const checked_type = try checkedTypeIdForVar(allocator, module, checked_types, ModuleEnv.varFrom(extraction.result_pattern));
@@ -26679,7 +26691,7 @@ pub const HoistedConstTable = struct {
                 ModuleEnv.varFrom(source_expr);
             const source_scheme = if (root.hoisted_body) |body| switch (body) {
                 .pattern_validation => try checked_types.ensureSchemeForRoot(allocator, root.checked_type),
-                .expr, .pattern_extraction => checked_type_publication.schemeForSourceVar(module, source_var),
+                .expr, .pattern_extraction, .pattern_error => checked_type_publication.schemeForSourceVar(module, source_var),
             } else checked_type_publication.schemeForSourceVar(module, source_var);
             const const_ref = try const_templates.reserveHoisted(
                 allocator,

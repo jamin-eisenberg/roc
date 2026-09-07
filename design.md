@@ -2990,20 +2990,37 @@ Every live literal-origin record leaves checking with one explicit resolution:
   checked `runtime_error` expression is the failure.
 
 Literal-pattern deferred static-dispatch constraint groups are owned by the
-enclosing match. The checker passes that owner through recursive pattern
-checking and records it in the literal node's checked dispatch plan at
-creation. When the literal's deferred conversion-and-equality group is
-processed, the conversion constraint's raw callable identity selects its exact
-plan and therefore the group's failure owner. If unification merged equivalent
-literal relations, the failure path uses the merged callable class to enumerate
-every explicit occurrence plan and invalidates every owner; a receiver root by
+enclosing match, lambda, loop, binding statement, or top-level definition.
+Pattern polarity and failure ownership are independent: an annotated parameter
+still belongs to its function. A captured lambda records its executable closure
+wrapper as the owner; function errors enter the existing erroneous-value sweep
+so checking finishes the lambda before replacing its structure. The checker
+passes the exact owner node through recursive pattern checking and records it
+in the literal node's checked dispatch plan at creation. When the literal's
+deferred conversion-and-equality group is processed, the conversion constraint's
+raw callable identity selects its exact plan and therefore the group's failure
+owner. If unification merged equivalent literal relations, the failure path
+uses the merged callable class to enumerate every explicit occurrence plan and invalidates every owner; a receiver root by
 itself is never an occurrence identity. If either constraint is rejected,
-diagnostic recovery replaces the whole match with the checked `runtime_error`;
+diagnostic recovery replaces the owning expression or statement with a checked
+`runtime_error`. A rejected top-level destructure retains its binder identities,
+replaces its literal leaves and RHS with checked errors, marks every name it
+bound erroneous, and invalidates its compile-time extraction/validation work.
+Each bound name keeps an explicit `pattern_error` selected root that publishes
+a typed runtime-error constant, including callable-valued names. This preserves
+the exported binding identity without evaluating the rejected pattern;
 a reachable `checked_error` literal pattern may not enter a checked body. A
 later scheme instantiation still owns failure of its copied static-dispatch
 constraint at the use expression. Ownership is explicit producer data and must
 not be reconstructed from pattern structure. The plan packs its kind and
 resolution into one word, so recording the owner does not increase plan size.
+Discarding a subtree retires its pattern evidence as well as its expression
+evidence. Finalization queues owners of late-rejected patterns and invalidates
+them after sealing the dense plan array, so retirement cannot invalidate its
+iteration. Repeated owners are deduplicated before invalidation. This worklist
+allocates only on failure. `pattern_error` reuses the selected-root body union
+and the existing binder index; it adds no root storage on successful programs.
+No persistent reverse index or owner table is maintained for successful checking.
 
 `unresolved` is construction-only and may not cross the checked boundary.
 Checking finalizes each live record exactly once after constraint solving;
