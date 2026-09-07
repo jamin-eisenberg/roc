@@ -8,6 +8,7 @@
 const std = @import("std");
 const backend = @import("backend");
 const base = @import("base");
+const check = @import("check");
 const layout_mod = @import("layout");
 const lir = @import("lir");
 const builtins = @import("builtins");
@@ -318,21 +319,30 @@ test "issue 11170 boxy record inspect reborrows descriptor refs after a custom m
         .{ .index = 0, .layout = .u64x2 },
         .{ .index = 1, .layout = .u64x2 },
     });
-    const descs = [_]BoxyTypeDesc{
-        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(0) },
-        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(1) },
-    };
-    const refs = [_]LIR.BoxyDescRef{.{ .static = @enumFromInt(0) }};
-    const slots = [_]LirProgram.BoxyMethodSlot{
-        .{ .method = @enumFromInt(0), .proc = @enumFromInt(0), .adapter = .{
+    var names = check.CanonicalNames.CanonicalNameStore.init(allocator);
+    defer names.deinit();
+    const inspect_method = try names.internMethodName("to_inspect");
+    // Fill every fixture entry before installing the tables in the runtime.
+    var descs: [2]BoxyTypeDesc = undefined;
+    var refs: [2]LIR.BoxyDescRef = undefined;
+    var slots: [2]LirProgram.BoxyMethodSlot = undefined;
+    for (&descs, &refs, &slots, 0..) |*desc, *ref, *slot, index| {
+        const proc = try setup.store.addProcSpec(.{
+            .name = setup.store.freshSyntheticSymbol(),
+            .args = LIR.LocalSpan.empty(),
+            .ret_layout = .str,
+        });
+        slot.* = .{ .method = inspect_method, .proc = proc, .adapter = .{
             .arg_layouts = .{ .start = 0, .len = 1 },
             .arg_descs = .{ .start = 0, .len = 1 },
-        } },
-        .{ .method = @enumFromInt(0), .proc = @enumFromInt(1), .adapter = .{
-            .arg_layouts = .{ .start = 0, .len = 1 },
-            .arg_descs = .{ .start = 0, .len = 1 },
-        } },
-    };
+        } };
+        desc.* = .{
+            .payload_layout = .u64x2,
+            .contains_refcounted = false,
+            .inspect_method = @enumFromInt(index),
+        };
+        ref.* = .{ .static = @enumFromInt(index) };
+    }
     const runtime = try boxy_abi.createRuntimeFromStores(allocator, &setup.store, &setup.layouts, .{
         .type_descs = &descs,
         .desc_refs = &refs,
@@ -347,6 +357,7 @@ test "issue 11170 boxy record inspect reborrows descriptor refs after a custom m
     const State = struct {
         runtime: *boxy_abi.GlobalBoxyRuntime,
         old_refs: std.ArrayList(LIR.BoxyDescRef) = .empty,
+        stale_ref: LIR.BoxyDescRef,
 
         fn current(ops: *builtins.host_abi.RocOps, context: ?*anyopaque, _: [*]const ?*const anyopaque, ret: ?*anyopaque, ret_desc: *?*const anyopaque) callconv(.c) void {
             const state: *@This() = @ptrCast(@alignCast(context.?));
@@ -358,7 +369,7 @@ test "issue 11170 boxy record inspect reborrows descriptor refs after a custom m
                 replacement.appendSlice(state.runtime.gpa, state.runtime.runtime_boxy_desc_refs.items) catch @panic("OOM");
                 state.old_refs = state.runtime.runtime_boxy_desc_refs;
                 state.runtime.runtime_boxy_desc_refs = replacement;
-                state.old_refs.items[1] = .{ .static = @enumFromInt(1) };
+                state.old_refs.items[1] = state.stale_ref;
             }
             const out: *align(1) builtins.str.RocStr = @ptrCast(ret.?);
             out.* = builtins.str.RocStr.fromSlice("current", ops);
@@ -371,10 +382,10 @@ test "issue 11170 boxy record inspect reborrows descriptor refs after a custom m
             ret_desc.* = null;
         }
     };
-    var state = State{ .runtime = runtime };
+    var state = State{ .runtime = runtime, .stale_ref = refs[1] };
     defer state.old_refs.deinit(allocator);
-    boxy_abi.roc_boxy_register_proc(0, &State.current, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
-    boxy_abi.roc_boxy_register_proc(1, &State.stale, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    boxy_abi.roc_boxy_register_proc(@intFromEnum(slots[0].proc), &State.current, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    boxy_abi.roc_boxy_register_proc(@intFromEnum(slots[1].proc), &State.stale, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
     const aggregate_desc = BoxyTypeDesc{
         .payload_layout = aggregate_layout,
         .contains_refcounted = false,
