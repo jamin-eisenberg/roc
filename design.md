@@ -1682,7 +1682,8 @@ callable variable. Checking declares that identity before completing owned
 constraints, then generates its type through ordinary annotation generation and
 unification. It allocates no second callable placeholder or bridging relation.
 Inference holes retain the existing body-checking and generalization rules, and
-the named method obligation is preserved even when its type is incomplete.
+the named method's static-dispatch constraint is preserved even when its type
+is incomplete.
 
 ## Nominal Constructor Backing Relation
 
