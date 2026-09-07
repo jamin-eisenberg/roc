@@ -9557,7 +9557,7 @@ they retain a distinct checked descriptor identity when they carry an inspect
 method. Nested vector values retain descriptors even though they contain no
 reference-counted data: their inspection method is part of the descriptor
 contract. Descriptor producers and structural consumers use the same nested
-slot ordering for these vector fields, list elements, and payloads.
+slot ordering for these vector fields, list items, and payloads.
 Runtime recursive inspection checks this slot before opaque or structural
 rendering, adapts the borrowed value into the worker argument representation,
 and invokes the worker through the registered-procedure ABI. The prepared call
