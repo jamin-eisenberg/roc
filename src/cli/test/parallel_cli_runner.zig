@@ -457,6 +457,7 @@ const CustomCase = enum {
     glue_rust_box_payload_alignment,
     glue_rust_returned_list_elements,
     glue_zig_bang_record_fields,
+    glue_zig_keyword_tag_names,
     glue_package_nominal_api_alias,
     glue_nominal_canonical_field,
     glue_unlisted_hosted_declaration,
@@ -928,6 +929,7 @@ const glue_cases = [_]CliCase{
     .{ .id = 0, .suite = .glue, .name = "glue regression: RustGlue decrefs non-refcounted boxed payloads with payload alignment", .body = .{ .custom = .glue_rust_box_payload_alignment } },
     .{ .id = 0, .suite = .glue, .name = "issue 10451: RustGlue releases list elements returned from a provided entrypoint", .body = .{ .custom = .glue_rust_returned_list_elements } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: ZigGlue quotes bang record fields", .body = .{ .custom = .glue_zig_bang_record_fields } },
+    .{ .id = 0, .suite = .glue, .name = "issue 11196: ZigGlue emits parseable Zig for tags named after Zig keywords", .body = .{ .custom = .glue_zig_keyword_tag_names } },
     .{ .id = 0, .suite = .glue, .name = "issue 9865: RustGlue does not panic for package nominal record API alias", .body = .{ .custom = .glue_package_nominal_api_alias } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: nominal scalar field resolves canonical backing", .body = .{ .custom = .glue_nominal_canonical_field } },
     .{ .id = 0, .suite = .glue, .name = "glue regression: platform hosted declaration missing from the hosted section stops without panic", .body = .{ .custom = .glue_unlisted_hosted_declaration } },
@@ -2961,6 +2963,7 @@ fn runCustomCase(
         .glue_rust_box_payload_alignment => customGlueRustBoxPayloadAlignment(io, allocator, &env, &timer, timeout_ms),
         .glue_rust_returned_list_elements => customGlueRustReturnedListElements(io, allocator, &env, &timer, timeout_ms),
         .glue_zig_bang_record_fields => customGlueZigBangRecordFieldNames(io, allocator, &env, &timer, timeout_ms),
+        .glue_zig_keyword_tag_names => customGlueZigKeywordTagNames(io, allocator, &env, &timer, timeout_ms),
         .glue_package_nominal_api_alias => customGluePackageNominalApiAlias(io, allocator, &env, &timer, timeout_ms),
         .glue_nominal_canonical_field => customGlueNominalCanonicalField(io, allocator, &env, &timer, timeout_ms),
         .glue_unlisted_hosted_declaration => customGlueUnlistedHostedDeclaration(io, allocator, &env, &timer, timeout_ms),
@@ -9462,7 +9465,7 @@ fn customGlueTryBoxModelUnknownPayload(io: std.Io, allocator: Allocator, env: *c
     // generated comptime checks. A zero-sized unknown payload would collapse the
     // tag offset to 0 at both widths, so these needles pin the fix in place.
     for ([_][]const u8{
-        "        ok: RocBox,",
+        "        @\"ok\": RocBox,",
         "if (@sizeOf(Init_for_hostResult) != 16) @compileError",
         "if (@offsetOf(Init_for_hostResult, \"tag\") != 8) @compileError",
         "if (@sizeOf(Init_for_hostResult) != 8) @compileError",
@@ -10270,6 +10273,30 @@ fn customGlueZigBangRecordFieldNames(io: std.Io, allocator: Allocator, env: *con
         return customInfraFailure(allocator, timer, "failed to allocate emit flag: {}", .{err});
 
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{ "zig", "build-obj", generated_path, emit_flag }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    return null;
+}
+
+fn customGlueZigKeywordTagNames(io: std.Io, allocator: Allocator, env: *const CaseEnv, timer: *harness.Timer, timeout_ms: u64) ?TestResult {
+    const output_dir = createWorkSubdir(io, allocator, env, "glue-keyword-tags-out") catch |err|
+        return customInfraFailure(allocator, timer, "failed to create glue output dir: {}", .{err});
+    if (runRocAndCheck(io, allocator, env, timer, timeout_ms, .{
+        .args = &.{ "glue", "src/glue/src/ZigGlue.roc", output_dir, "test/glue/zig-keyword-tags/main.roc" },
+        .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "invariant violated" } },
+    })) |failure| return failure;
+
+    const generated_path = std.fs.path.join(allocator, &.{ output_dir, "roc_platform_abi.zig" }) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Zig path: {}", .{err});
+    const abi_module_arg = std.fmt.allocPrint(allocator, "-Mabi={s}", .{generated_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate generated Zig ABI module arg: {}", .{err});
+
+    // Exports force analysis of accessor bodies, including the native union
+    // representation and the 32-bit byte-storage representation.
+    for ([_][]const u8{ "x86_64-linux-musl", "wasm32-freestanding" }) |target| {
+        if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
+            "zig",   "build-obj", "-fno-emit-bin",                                      "-target",      target,
+            "--dep", "abi",       "-Mroot=test/glue/zig_keyword_tags_compile_lock.zig", abi_module_arg,
+        }, project_root_path, .{ .args = &.{} })) |failure| return failure;
+    }
     return null;
 }
 
