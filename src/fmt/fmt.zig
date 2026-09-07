@@ -1821,7 +1821,7 @@ const Formatter = struct {
                 const items = fmt.ast.store.exprSlice(t.items);
                 const layout = fmt.ast.store.getCollectionLayout(ei);
                 if (items.len == 1 and layout == .compact) {
-                    const group_multiline = fmt.regionHasInteriorComment(t.region) or fmt.groupedExprWillBeMultiline(items[0]);
+                    const group_multiline = fmt.tupleWillBeMultiline(ei, t);
                     _ = try fmt.formatParenthesizedExpr(t.region, items[0], group_multiline);
                 } else {
                     try fmt.formatCollection(region, layout, .round, AST.Expr.Idx, items, Formatter.formatExpr);
@@ -3964,6 +3964,18 @@ const Formatter = struct {
         };
     }
 
+    // Compact singleton tuples are grouping parentheses. Predict their emitted
+    // layout, which discards source-only line breaks inside the grouped expression.
+    fn tupleWillBeMultiline(fmt: *Formatter, idx: AST.Expr.Idx, tuple: @FieldType(AST.Expr, "tuple")) bool {
+        const items = fmt.ast.store.exprSlice(tuple.items);
+        const layout = fmt.ast.store.getCollectionLayout(idx);
+        if (items.len == 1 and layout == .compact) {
+            return fmt.regionHasInteriorComment(tuple.region) or fmt.groupedExprWillBeMultiline(items[0]);
+        }
+        return layout == .expanded or fmt.regionHasInteriorComment(tuple.region) or
+            fmt.nodesWillBeMultiline(AST.Expr.Idx, items);
+    }
+
     fn groupedExprWillBeMultiline(fmt: *Formatter, expr_idx: AST.Expr.Idx) bool {
         const expr = fmt.ast.store.getExpr(expr_idx);
         if (expr == .method_call) {
@@ -3984,8 +3996,7 @@ const Formatter = struct {
             .block, .multiline_string, .typed_multiline_string => true,
             .list => |l| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
                 fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(l.items)),
-            .tuple => |t| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
-                fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(t.items)),
+            .tuple => |t| fmt.tupleWillBeMultiline(expr_idx, t),
             .apply => |a| fmt.ast.store.getCollectionLayout(expr_idx) == .expanded or
                 fmt.groupedExprWillBeMultiline(a.@"fn") or
                 fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(a.args)),
@@ -4070,8 +4081,7 @@ const Formatter = struct {
                         fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(l.items));
                 },
                 .tuple => |t| {
-                    return fmt.ast.store.getCollectionLayout(item) == .expanded or
-                        fmt.nodesWillBeMultiline(AST.Expr.Idx, fmt.ast.store.exprSlice(t.items));
+                    return fmt.tupleWillBeMultiline(item, t);
                 },
                 .apply => |a| {
                     if (fmt.ast.store.getCollectionLayout(item) == .expanded) return true;
@@ -5508,6 +5518,22 @@ test "trailing commas explicitly control collection layout" {
         },
     };
 
+    for (cases) |case| {
+        const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
+        defer std.testing.allocator.free(result);
+        try std.testing.expectEqualStrings(case.expected, result);
+    }
+}
+
+test "issue 11176: grouped expression layout follows formatted children" {
+    const cases = [_]struct { input: []const u8, expected: []const u8 }{
+        .{ .input = "a=(||||||(0\n.0))", .expected = "a = (|| || || ((0).0))\n" },
+        .{ .input = "a=((0\n.0))", .expected = "a = (((0).0))\n" },
+        .{ .input = "a=[(0\n.0)]", .expected = "a = [((0).0)]\n" },
+        .{ .input = "a=f((0\n.0))", .expected = "a = f(((0).0))\n" },
+        .{ .input = "a=((# comment\n0))", .expected = "a = (\n\t( # comment\n\t\t0\n\t)\n)\n" },
+        .{ .input = "a=((0,))", .expected = "a = (\n\t(\n\t\t0,\n\t)\n)\n" },
+    };
     for (cases) |case| {
         const result = try moduleFmtsStable(std.testing.allocator, case.input, false);
         defer std.testing.allocator.free(result);
