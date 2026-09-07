@@ -4367,7 +4367,10 @@ pub const Coordinator = struct {
             .type_check => |err| err,
         };
         const title = switch (failure.cause) {
-            .read_source => |err| if (err == error.FileNotFound) "File Not Found" else "Parsing Failed",
+            .read_source => |err| switch (err) {
+                error.FileNotFound => "File Not Found",
+                else => "Parsing Failed",
+            },
             .type_check => "Type Checking Failed",
         };
         const headline = try std.fmt.allocPrint(self.gpa, "{s}: {s}.", .{ mod.path, @errorName(operation_error) });
@@ -7750,7 +7753,10 @@ test "Coordinator read errors abort single and multi-worker loops" {
             try coord.start();
             try std.testing.expectError(read_error, coord.coordinatorLoop());
             const mod = pkg.getModule(module_id).?;
-            const expected_state: watch_inputs.State = if (read_error == error.FileNotFound) .missing else .unreadable;
+            const expected_state: watch_inputs.State = switch (read_error) {
+                error.FileNotFound => .missing,
+                else => .unreadable,
+            };
             try std.testing.expectEqual(expected_state, mod.source_file_state.?);
             try std.testing.expectEqual(@as(usize, 1), mod.reports.items.len);
             try std.testing.expect(!coord.frontend_complete);
