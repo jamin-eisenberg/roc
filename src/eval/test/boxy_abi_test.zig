@@ -388,6 +388,135 @@ test "issue 11170 boxy record inspect reborrows descriptor refs after a custom m
     try setup.env.checkForLeaks();
 }
 
+test "boxy residual tags preserve runtime source and target spans while growing" {
+    const allocator = std.testing.allocator;
+    var setup = try TestSetup.init(allocator);
+    defer setup.deinit();
+    const union_layout = try setup.layouts.putTagUnion(&.{ .u64, .u64, .u64, .u64 });
+    const runtime = try boxy_abi.createRuntimeFromStores(allocator, &setup.store, &setup.layouts, .{}, setup.env.get_ops());
+    defer boxy_abi.deinitRuntime(runtime);
+    // Fill an exact allocation so producing even the first residual variant
+    // must grow the table. Both input spans point into that allocation.
+    const variants = try allocator.alloc(LirProgram.BoxyTagVariant, 4);
+    for (variants, 0..) |*variant, index| variant.* = .{
+        .name = @enumFromInt(index),
+        .discriminant = @intCast(index),
+        .payload_layout = .u64,
+        .payload_count = 1,
+    };
+    runtime.runtime_boxy_tag_variants = .{ .items = variants, .capacity = variants.len };
+    const source = BoxyTypeDesc{
+        .payload_layout = union_layout,
+        .contains_refcounted = false,
+        .tag_variants = boxy_runtime.makeRuntimeBoxySpan(0, 4),
+    };
+    const target = BoxyTypeDesc{
+        .payload_layout = union_layout,
+        .contains_refcounted = false,
+        .tag_variants = boxy_runtime.makeRuntimeBoxySpan(1, 1),
+    };
+    const residual = try runtime.runtime.materializeTagResidualBoxyDescValues(&source, &target);
+    const actual = runtime.runtime.requireBoxyTagVariants(residual.tag_variants);
+    try std.testing.expectEqual(@as(usize, 3), actual.len);
+    for (actual, [_]u16{ 0, 2, 3 }) |variant, index| {
+        try std.testing.expectEqual(index, variant.discriminant);
+        try std.testing.expectEqual(@as(u32, index), @intFromEnum(variant.name));
+        try std.testing.expectEqual(layout_mod.Idx.u64, variant.payload_layout);
+    }
+}
+
+test "boxy tag inspect preserves variant metadata across a custom method" {
+    const allocator = std.testing.allocator;
+    var setup = try TestSetup.init(allocator);
+    defer setup.deinit();
+    const aggregate_layout = try setup.layouts.putStructFields(&.{
+        .{ .index = 0, .layout = .u64x2 },
+        .{ .index = 1, .layout = .u64x2 },
+    });
+    const union_layout = try setup.layouts.putTagUnion(&.{aggregate_layout});
+    const tag_name = try setup.store.insertBoxyName("Pair");
+    const descs = [_]BoxyTypeDesc{
+        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(0) },
+        .{ .payload_layout = .u64x2, .contains_refcounted = false, .inspect_method = @enumFromInt(1) },
+    };
+    const refs = [_]LIR.BoxyDescRef{.{ .static = @enumFromInt(0) }};
+    const slots = [_]LirProgram.BoxyMethodSlot{
+        .{ .method = @enumFromInt(0), .proc = @enumFromInt(0), .adapter = .{
+            .arg_layouts = .{ .start = 0, .len = 1 },
+            .arg_descs = .{ .start = 0, .len = 1 },
+        } },
+        .{ .method = @enumFromInt(0), .proc = @enumFromInt(1), .adapter = .{
+            .arg_layouts = .{ .start = 0, .len = 1 },
+            .arg_descs = .{ .start = 0, .len = 1 },
+        } },
+    };
+    const runtime = try boxy_abi.createRuntimeFromStores(allocator, &setup.store, &setup.layouts, .{
+        .type_descs = &descs,
+        .desc_refs = &refs,
+        .method_slots = &slots,
+        .method_arg_layouts = &.{.u64x2},
+    }, setup.env.get_ops());
+    defer boxy_abi.deinitRuntime(runtime);
+    const previous = boxy_abi.swapActiveRuntime(runtime);
+    defer _ = boxy_abi.swapActiveRuntime(previous);
+    try runtime.runtime_boxy_tag_variants.append(allocator, .{
+        .name = tag_name,
+        .discriminant = 0,
+        .payload_layout = aggregate_layout,
+        .payload_count = 2,
+        .payload_descs = boxy_runtime.makeRuntimeBoxySpan(0, 2),
+    });
+    try runtime.runtime_boxy_tag_payload_descs.appendSlice(allocator, &.{
+        .{ .payload_index = 0, .desc = refs[0] },
+        .{ .payload_index = 1, .desc = refs[0] },
+        .{ .payload_index = 0, .desc = .{ .static = @enumFromInt(1) } },
+        .{ .payload_index = 1, .desc = .{ .static = @enumFromInt(1) } },
+    });
+
+    const State = struct {
+        runtime: *boxy_abi.GlobalBoxyRuntime,
+        old_variants: std.ArrayList(LirProgram.BoxyTagVariant) = .empty,
+
+        fn current(ops: *builtins.host_abi.RocOps, context: ?*anyopaque, _: [*]const ?*const anyopaque, ret: ?*anyopaque, ret_desc: *?*const anyopaque) callconv(.c) void {
+            const state: *@This() = @ptrCast(@alignCast(context.?));
+            if (state.old_variants.items.len == 0) {
+                // Force relocation while the old allocation is still live.
+                // Keep and poison it so a stale read deterministically renders
+                // the wrong method instead of depending on allocator behavior.
+                var replacement: std.ArrayList(LirProgram.BoxyTagVariant) = .empty;
+                replacement.appendSlice(state.runtime.gpa, state.runtime.runtime_boxy_tag_variants.items) catch @panic("OOM");
+                state.old_variants = state.runtime.runtime_boxy_tag_variants;
+                state.runtime.runtime_boxy_tag_variants = replacement;
+                state.old_variants.items[0].payload_descs = boxy_runtime.makeRuntimeBoxySpan(2, 2);
+            }
+            const out: *align(1) builtins.str.RocStr = @ptrCast(ret.?);
+            out.* = builtins.str.RocStr.fromSlice("current", ops);
+            ret_desc.* = null;
+        }
+
+        fn stale(ops: *builtins.host_abi.RocOps, _: ?*anyopaque, _: [*]const ?*const anyopaque, ret: ?*anyopaque, ret_desc: *?*const anyopaque) callconv(.c) void {
+            const out: *align(1) builtins.str.RocStr = @ptrCast(ret.?);
+            out.* = builtins.str.RocStr.fromSlice("stale", ops);
+            ret_desc.* = null;
+        }
+    };
+    var state = State{ .runtime = runtime };
+    defer state.old_variants.deinit(allocator);
+    boxy_abi.roc_boxy_register_proc(0, &State.current, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    boxy_abi.roc_boxy_register_proc(1, &State.stale, @intFromEnum(layout_mod.Idx.str), 1, false, 0);
+    const aggregate_desc = BoxyTypeDesc{
+        .payload_layout = union_layout,
+        .contains_refcounted = false,
+        .tag_variants = boxy_runtime.makeRuntimeBoxySpan(0, 1),
+    };
+    var values: [4]u64 align(16) = .{ 1, 2, 3, 4 };
+    var rendered: builtins.str.RocStr = undefined;
+    boxy_abi.roc_boxy_inspect(@ptrCast(&rendered), @ptrCast(&state), @ptrCast(&values), @intFromEnum(union_layout), &aggregate_desc);
+    try std.testing.expectEqualStrings("Pair(current, current)", rendered.asSlice());
+    rendered.decref(setup.env.get_ops());
+    try setup.env.checkForLeaks();
+}
+
 test "boxy abi custom inspect preserves a full descriptor across a payload-shaped borrowed boundary" {
     const allocator = std.testing.allocator;
     var setup = try TestSetup.init(allocator);

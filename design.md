@@ -9567,6 +9567,10 @@ releases an owned returned `Str` after appending its bytes. Backends do not
 resolve method names or select this behavior. Record inspection retains
 nested-descriptor spans across custom method calls and reborrows each reference;
 a reentrant method can grow and relocate the runtime descriptor-reference table.
+Tag variant lookups return metadata by value so recursive inspection and value
+adaptation cannot retain pointers into the growable variant table. Residual tag
+construction reserves output capacity before borrowing its source and target
+spans, which may belong to that same table.
 
 For every checked direct call to a known procedure, the lowerer
 emits a direct LIR call to the corresponding private boxy worker and supplies
