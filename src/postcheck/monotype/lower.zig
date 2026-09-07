@@ -55159,6 +55159,14 @@ test "record destructure treats a scheme-interior field as required" {
 
 test "draft specialization lookup preserves family evidence and request identity" {
     const allocator = std.testing.allocator;
+    var type_store = Type.Store.init(allocator);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(allocator);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(allocator, &type_store, &name_store);
+    defer graph.destroy();
+    const first_node = try graph.newNode(.{ .primitive = .bool });
+    const second_node = try graph.newNode(.{ .primitive = .str });
     inline for (.{ DraftTemplateFamilyAddress, DraftNestedFamilyAddress }) |Family| {
         const Lookup = DraftSpecLookup(Family);
         var lookup = Lookup.init(allocator);
@@ -55172,9 +55180,9 @@ test "draft specialization lookup preserves family evidence and request identity
         // or an open shape. Those request domains must remain disjoint.
         const addresses = [_]Lookup.Address{
             .{ .digest = .{ .prefix = prefix, .kind = .closed, .digest = @splat(0) } },
-            .{ .open = .{ .prefix = prefix, .node = @enumFromInt(0) } },
+            .{ .open = .{ .prefix = prefix, .node = first_node } },
             .{ .digest = .{ .prefix = prefix, .kind = .open_shape, .digest = @splat(0) } },
-            .{ .open = .{ .prefix = prefix, .node = @enumFromInt(1) } },
+            .{ .open = .{ .prefix = prefix, .node = second_node } },
         };
         for (addresses, 0..) |address, raw_spec| {
             try std.testing.expect(lookup.get(address) == null);
@@ -55233,14 +55241,23 @@ test "draft specialization lookup preserves family evidence and request identity
 
 test "draft specialization candidates retain insertion order across overflow growth and allocation failure" {
     const Scenario = struct {
-        fn run(allocator: Allocator) !void {
+        fn run(allocator: Allocator) (Allocator.Error || error{TestUnexpectedResult})!void {
+            var type_store = Type.Store.init(allocator);
+            defer type_store.deinit();
+            var name_store = names.NameStore.init(allocator);
+            defer name_store.deinit();
+            const graph = try InstGraph.create(allocator, &type_store, &name_store);
+            defer graph.destroy();
+            const request_node = try graph.newNode(.{ .primitive = .bool });
+            var other_nodes: [20]NodeId = undefined;
+            for (&other_nodes) |*node| node.* = try graph.newNode(.{ .primitive = .str });
             inline for (.{ DraftTemplateFamilyAddress, DraftNestedFamilyAddress }) |Family| {
                 const Lookup = DraftSpecLookup(Family);
                 var lookup = Lookup.init(allocator);
                 defer lookup.deinit();
                 const prefix = try lookup.internPrefix(std.mem.zeroes(Family), @splat(0));
                 const addresses = [_]Lookup.Address{
-                    .{ .open = .{ .prefix = prefix, .node = @enumFromInt(0) } },
+                    .{ .open = .{ .prefix = prefix, .node = request_node } },
                     .{ .digest = .{ .prefix = prefix, .kind = .closed, .digest = @splat(0) } },
                     .{ .digest = .{ .prefix = prefix, .kind = .open_shape, .digest = @splat(0) } },
                 };
@@ -55257,7 +55274,7 @@ test "draft specialization candidates retain insertion order across overflow gro
                         // between appends to the bucket being checked.
                         const other: Lookup.Address = .{ .open = .{
                             .prefix = prefix,
-                            .node = @enumFromInt(i + 100),
+                            .node = other_nodes[i],
                         } };
                         try lookup.add(other, raw_spec);
                         try lookup.add(other, std.math.maxInt(u32));
@@ -55269,7 +55286,7 @@ test "draft specialization candidates retain insertion order across overflow gro
                     for (0..20) |i| {
                         var other = lookup.get(.{ .open = .{
                             .prefix = prefix,
-                            .node = @enumFromInt(i + 100),
+                            .node = other_nodes[i],
                         } }).?;
                         try std.testing.expect(other.next().? == i);
                         try std.testing.expect(other.next().? == std.math.maxInt(u32));

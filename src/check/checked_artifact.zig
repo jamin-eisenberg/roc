@@ -21459,14 +21459,16 @@ test "nested type bindings are sparse, lexical, transitive, and cycle safe" {
     defer builder.deinitAll();
     try builder.enterTypeScope(&vars);
     try builder.addSite(.default_root, .local_function, null, null);
-    try builder.beginTypeCaptures(@enumFromInt(0));
+    const outer_site = builder.sites.items[builder.sites.items.len - 1].site;
+    try builder.beginTypeCaptures(outer_site);
     const mark = builder.binding_undo.items.len;
     builder.evidence_depth = 1;
     try builder.enterTypeScope(&.{vars[1]});
     // addSite consumes checked scope metadata, which this type-only test
     // does not need: both sites use a root declaration for construction.
     try builder.addSite(.default_root, .local_function, null, null);
-    try builder.beginTypeCaptures(@enumFromInt(1));
+    const inner_site = builder.sites.items[builder.sites.items.len - 1].site;
+    try builder.beginTypeCaptures(inner_site);
     try builder.captureType(vars[1]);
     try builder.captureType(cycle);
     try builder.captureType(cycle);
@@ -21474,12 +21476,12 @@ test "nested type bindings are sparse, lexical, transitive, and cycle safe" {
     builder.evidence_depth = 0;
     try builder.finishTypeCaptures();
     try builder.finishTypeCaptures();
-    const inner = builder.sites.items[1].type_bindings;
+    const inner = builder.sites.items[@intFromEnum(inner_site)].type_bindings;
     try std.testing.expectEqualSlices(NestedProcTypeBinding, &.{
         .{ .ty = vars[1], .depth = 0, .slot = 0 },
         .{ .ty = vars[0], .depth = 1, .slot = 0 },
     }, builder.type_binding_pool.items[inner.start .. inner.start + inner.len]);
-    const outer = builder.sites.items[0].type_bindings;
+    const outer = builder.sites.items[@intFromEnum(outer_site)].type_bindings;
     try std.testing.expectEqualSlices(NestedProcTypeBinding, &.{
         .{ .ty = vars[0], .depth = 0, .slot = 0 },
         .{ .ty = vars[1], .depth = 0, .slot = 1 },
