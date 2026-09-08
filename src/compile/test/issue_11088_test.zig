@@ -10,7 +10,7 @@ const testing = std.testing;
 
 /// An app that parses one record of `field_count` optional string fields, the
 /// shape reported in https://github.com/roc-lang/roc/issues/11088.
-fn optionalFieldRecordApp(gpa: std.mem.Allocator, field_count: usize) ![]u8 {
+fn optionalFieldRecordApp(gpa: std.mem.Allocator, field_count: usize) (std.mem.Allocator.Error || std.Io.Writer.Error)![]u8 {
     var source: std.Io.Writer.Allocating = .init(gpa);
     errdefer source.deinit();
     const writer = &source.writer;
@@ -34,7 +34,7 @@ fn optionalFieldRecordApp(gpa: std.mem.Allocator, field_count: usize) ![]u8 {
     return source.toOwnedSlice();
 }
 
-fn derivedRecordParseArcWork(field_count: usize) !u64 {
+fn derivedRecordParseArcWork(field_count: usize) (harness.LowerToLirHarnessError || std.Io.Writer.Error)!u64 {
     const gpa = testing.allocator;
     const source = try optionalFieldRecordApp(gpa, field_count);
     defer gpa.free(source);
@@ -69,7 +69,7 @@ test "ARC work for a derived record parser grows with the record's field count" 
     try testing.expect(wide <= narrow * 4);
 }
 
-fn derivedRecordParseSparseWork(field_count: usize) !u64 {
+fn derivedRecordParseSparseWork(field_count: usize) (harness.LowerToLirHarnessError || std.Io.Writer.Error)!u64 {
     const before = lir.ArcCertify.ownership_entries_certified + lir.ArcCertify.join_constraint_steps;
     const queries = try derivedRecordParseArcWork(field_count);
     return queries + lir.ArcCertify.ownership_entries_certified + lir.ArcCertify.join_constraint_steps - before;

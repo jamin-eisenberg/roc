@@ -11292,7 +11292,7 @@ the certifier, never by weakening what it checks.
 
 Certification boundary checks enumerate the current path's nonzero balances
 and nonempty claim sets, never the procedure's history of abstract value
-identities. Claims remain obligations at zero balance and after rebinding has
+identities. Claims still require certification at zero balance and after rebinding has
 removed a value's last local name. A persistent sign index records exactly the
 negative balances and changes only on sign transitions. Deferred claims settle
 in value order; claiming can increase a container balance or spend a positive
