@@ -2330,7 +2330,9 @@ const Solver = struct {
     /// shape into its producer-authored generated-private representation.
     /// Monotype has already sealed both representations, so this relation
     /// deliberately preserves every composite and named root. Only callable
-    /// slots (and still-open Lambda Solved slots) are unified.
+    /// slots (and still-open Lambda Solved slots) are unified. A checked-public
+    /// inspectable named type may correspond to its structural backing in the
+    /// private witness; walk through that backing without linking either root.
     fn relateGeneratedPrivateEvidence(
         self: *Solver,
         public_ty: Type.TypeVarId,
@@ -2445,7 +2447,15 @@ const Solver = struct {
                 try self.relateGeneratedPrivateEvidence(public_fn.ret, private_fn.ret);
             },
             .named => |public_named| {
-                if (private_content_tag != .named) Common.invariant("generated-private evidence relation received different type structure");
+                if (private_content_tag != .named) {
+                    const public_backing = public_named.backing orelse
+                        Common.invariant("generated-private evidence relation could not traverse a public named type without backing");
+                    if (public_backing.authority != .checked_public or public_backing.use != .inspectable) {
+                        Common.invariant("generated-private evidence relation could not traverse an opaque public named type");
+                    }
+                    try self.relateGeneratedPrivateEvidence(public_backing.ty, private_root);
+                    return;
+                }
                 const private_named = private.named;
                 const same_identity = public_named.kind == private_named.kind and
                     std.meta.eql(public_named.def, private_named.def) and
@@ -3531,6 +3541,60 @@ test "inspectable backing unification never redirects an owned backing to its no
     try std.testing.expect(program.types.root(backing) != program.types.root(named));
     try std.testing.expect(program.types.isOwnedNamedBacking(backing));
     try std.testing.expectEqual(Type.Content{ .primitive = .u64 }, program.types.rootContent(backing));
+}
+
+test "generated-private evidence traverses a public inspectable named backing" {
+    const allocator = std.testing.allocator;
+    var lifted = emptyLiftedProgramForTest(allocator);
+    var program = Ast.Program.init(allocator, lifted);
+    lifted = undefined;
+    defer program.deinit();
+
+    const field_name = try program.lifted.names.internRecordFieldLabel("step");
+    const ret_ty = try program.types.add(.zst);
+    const public_callable = try program.types.add(.unbound);
+    const private_callable = try program.types.add(.{ .lambda_set = try program.types.addMembers(&.{.{
+        .lambda = @enumFromInt(1),
+        .captures = .empty(),
+    }}) });
+    const public_fn = try program.types.add(.{ .func = .{
+        .args = .empty(),
+        .callable = public_callable,
+        .ret = ret_ty,
+    } });
+    const private_fn = try program.types.add(.{ .func = .{
+        .args = .empty(),
+        .callable = private_callable,
+        .ret = ret_ty,
+    } });
+    const public_backing = try program.types.add(.{ .record = try program.types.addFields(&.{.{
+        .name = field_name,
+        .ty = public_fn,
+        .default = null,
+    }}) });
+    const private_record = try program.types.add(.{ .record = try program.types.addFields(&.{.{
+        .name = field_name,
+        .ty = private_fn,
+        .default = null,
+    }}) });
+    const public_named = try program.types.add(.{ .named = .{
+        .named_type = undefined,
+        .def = undefined,
+        .kind = .nominal,
+        .args = .empty(),
+        .backing = .{ .ty = public_backing, .use = .inspectable },
+    } });
+
+    var solver = try Solver.init(allocator, &program);
+    defer solver.deinit();
+    try solver.relateGeneratedPrivateEvidence(public_named, private_record);
+
+    try std.testing.expectEqual(
+        program.types.rootCompressed(public_callable),
+        program.types.rootCompressed(private_callable),
+    );
+    try std.testing.expect(program.types.rootCompressed(public_named) != program.types.rootCompressed(private_record));
+    try std.testing.expect(program.types.rootCompressed(public_backing) != program.types.rootCompressed(private_record));
 }
 
 test "lambda solved solve declarations are referenced" {
