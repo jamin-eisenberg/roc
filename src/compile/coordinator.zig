@@ -6500,7 +6500,7 @@ fn hashPatternExtractionRegionsForView(
         const extraction = switch (body) {
             .expr => continue,
             .pattern_extraction => |payload| payload,
-            .pattern_validation => continue,
+            .pattern_validation, .pattern_error => continue,
         };
         count.* += 1;
 
