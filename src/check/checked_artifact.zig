@@ -20144,6 +20144,14 @@ pub const NestedProcSiteOwner = union(enum) {
     default_root,
 };
 
+/// A quantified checked identity used by a nested body. The lexical depth
+/// and slot address its exact specialization substitution.
+pub const NestedProcTypeBinding = struct {
+    ty: CheckedTypeId,
+    depth: u32,
+    slot: u32,
+};
+
 /// Public `NestedProcSite` declaration.
 pub const NestedProcSite = struct {
     site: canonical.NestedProcSiteId,
@@ -20155,6 +20163,8 @@ pub const NestedProcSite = struct {
     /// Exact range in `StaticDispatchPlanTable.evidence_refs` when
     /// `evidence_source == .checked_site`; empty otherwise.
     evidence: artifact_serialize.Span,
+    /// Exact used scheme slots, sorted from the innermost lexical frame out.
+    type_bindings: artifact_serialize.Span = .{},
     /// Range into the owning `NestedProcSiteTable.path_components` pool. Stored as
     /// a POD `(start,len)` (transform B) instead of an embedded slice so the
     /// element relocates with a single fixup.
@@ -20173,6 +20183,7 @@ pub const NestedProcSite = struct {
 /// Public `NestedProcSiteTable` declaration.
 pub const NestedProcSiteTable = struct {
     sites: []NestedProcSite = &.{},
+    type_bindings: []NestedProcTypeBinding = &.{},
     template_refs: []canonical.NestedProcSiteId = &.{},
     /// Flat pool of all sites' path components (transform-B side list). Each site
     /// holds a `(path_start, path_len)` range into this.
@@ -20180,6 +20191,7 @@ pub const NestedProcSiteTable = struct {
 
     pub const Serialized = extern struct {
         sites: SerializedSlice(NestedProcSite) = .{},
+        type_bindings: SerializedSlice(NestedProcTypeBinding) = .{},
         template_refs: SerializedSlice(canonical.NestedProcSiteId) = .{},
         path_components: SerializedSlice(NestedProcPathComponent) = .{},
         const Serde = artifact_serialize.SliceStoreSerde(NestedProcSiteTable, @This());
@@ -20190,6 +20202,7 @@ pub const NestedProcSiteTable = struct {
     pub fn fromTemplates(
         allocator: Allocator,
         checked_bodies: *const CheckedBodyStore,
+        checked_types: *const CheckedTypeStore,
         static_dispatch_plans: *const static_dispatch.StaticDispatchPlanTable,
         method_registry: *const static_dispatch.MethodRegistry,
         entry_wrappers: *const EntryWrapperTable,
@@ -20200,6 +20213,8 @@ pub const NestedProcSiteTable = struct {
         var builder = NestedProcSiteBuilder.init(
             allocator,
             checked_bodies,
+            checked_types,
+            templates,
             static_dispatch_plans,
             method_registry,
             templates.dispatch_scopes,
@@ -20241,8 +20256,11 @@ pub const NestedProcSiteTable = struct {
         const path_components = try builder.path_pool.toOwnedSlice(allocator);
         errdefer allocator.free(path_components);
 
+        const type_bindings = try builder.type_binding_pool.toOwnedSlice(allocator);
+        errdefer allocator.free(type_bindings);
         return .{
             .sites = sites,
+            .type_bindings = type_bindings,
             .template_refs = try builder.template_refs.toOwnedSlice(allocator),
             .path_components = path_components,
         };
@@ -20250,6 +20268,7 @@ pub const NestedProcSiteTable = struct {
 
     pub fn deinit(self: *NestedProcSiteTable, allocator: Allocator) void {
         allocator.free(self.sites);
+        allocator.free(self.type_bindings);
         allocator.free(self.template_refs);
         allocator.free(@constCast(self.path_components));
         self.* = .{};
@@ -20846,6 +20865,15 @@ fn nestedProcLexicalScope(
 const NestedProcSiteBuilder = struct {
     allocator: Allocator,
     checked_bodies: *const CheckedBodyStore,
+    checked_types: *const CheckedTypeStore,
+    templates: *const CheckedProcedureTemplateTable,
+    lexical_bindings: collections.DenseMap(CheckedTypeId, NestedProcTypeBinding),
+    binding_undo: std.ArrayList(struct { ty: CheckedTypeId, previous: ?NestedProcTypeBinding }),
+    type_binding_pool: std.ArrayList(NestedProcTypeBinding),
+    capture_frames: std.ArrayList(TypeCaptureFrame),
+    capture_depth: usize = 0,
+    evidence_depth: u32 = 0,
+
     static_dispatch_plans: *const static_dispatch.StaticDispatchPlanTable,
     method_registry: *const static_dispatch.MethodRegistry,
     dispatch_scopes: []const DispatchRefScope,
@@ -20857,9 +20885,18 @@ const NestedProcSiteBuilder = struct {
     /// Accumulated flat pool of every site's path; moved into the finished table.
     path_pool: std.ArrayList(NestedProcPathComponent),
 
+    const TypeCaptureFrame = struct {
+        site: canonical.NestedProcSiteId,
+        evidence_depth: u32 = 0,
+        visited: collections.DenseMap(CheckedTypeId, void),
+        bindings: std.ArrayList(NestedProcTypeBinding) = .empty,
+    };
+
     fn init(
         allocator: Allocator,
         checked_bodies: *const CheckedBodyStore,
+        checked_types: *const CheckedTypeStore,
+        templates: *const CheckedProcedureTemplateTable,
         static_dispatch_plans: *const static_dispatch.StaticDispatchPlanTable,
         method_registry: *const static_dispatch.MethodRegistry,
         dispatch_scopes: []const DispatchRefScope,
@@ -20868,6 +20905,12 @@ const NestedProcSiteBuilder = struct {
         return .{
             .allocator = allocator,
             .checked_bodies = checked_bodies,
+            .checked_types = checked_types,
+            .templates = templates,
+            .lexical_bindings = collections.DenseMap(CheckedTypeId, NestedProcTypeBinding).init(allocator),
+            .binding_undo = .empty,
+            .type_binding_pool = .empty,
+            .capture_frames = .empty,
             .static_dispatch_plans = static_dispatch_plans,
             .method_registry = method_registry,
             .dispatch_scopes = dispatch_scopes,
@@ -20882,41 +20925,147 @@ const NestedProcSiteBuilder = struct {
 
     fn deinitScratch(self: *NestedProcSiteBuilder) void {
         self.path.deinit(self.allocator);
+        self.lexical_bindings.deinit();
+        self.binding_undo.deinit(self.allocator);
+        for (self.capture_frames.items) |*frame| {
+            frame.visited.deinit();
+            frame.bindings.deinit(self.allocator);
+        }
+        self.capture_frames.deinit(self.allocator);
     }
 
     fn deinitAll(self: *NestedProcSiteBuilder) void {
         self.sites.deinit(self.allocator);
         self.template_refs.deinit(self.allocator);
-        self.path.deinit(self.allocator);
         self.path_pool.deinit(self.allocator);
-        self.* = NestedProcSiteBuilder.init(
+        self.type_binding_pool.deinit(self.allocator);
+    }
+
+    fn enterTypeScope(self: *NestedProcSiteBuilder, vars: []const CheckedTypeId) Allocator.Error!void {
+        for (vars, 0..) |ty, slot| {
+            const entry = try self.lexical_bindings.getOrPut(ty);
+            try self.binding_undo.append(self.allocator, .{ .ty = ty, .previous = if (entry.found_existing) entry.value_ptr.* else null });
+            entry.value_ptr.* = .{ .ty = ty, .depth = self.evidence_depth, .slot = @intCast(slot) };
+        }
+    }
+
+    fn leaveTypeScope(self: *NestedProcSiteBuilder, mark: usize) void {
+        while (self.binding_undo.items.len > mark) {
+            const undo = self.binding_undo.pop().?;
+            if (undo.previous) |previous| {
+                self.lexical_bindings.getPtr(undo.ty).?.* = previous;
+            } else {
+                _ = self.lexical_bindings.remove(undo.ty);
+            }
+        }
+    }
+
+    fn beginTypeCaptures(self: *NestedProcSiteBuilder, site: canonical.NestedProcSiteId) Allocator.Error!void {
+        if (self.capture_depth == self.capture_frames.items.len) {
+            try self.capture_frames.append(self.allocator, .{
+                .site = site,
+                .visited = collections.DenseMap(CheckedTypeId, void).init(self.allocator),
+            });
+        }
+        const frame = &self.capture_frames.items[self.capture_depth];
+        frame.site = site;
+        frame.evidence_depth = self.evidence_depth;
+        frame.visited.clearRetainingCapacity();
+        frame.bindings.clearRetainingCapacity();
+        self.capture_depth += 1;
+    }
+
+    fn finishTypeCaptures(self: *NestedProcSiteBuilder) Allocator.Error!void {
+        self.capture_depth -= 1;
+        const frame = &self.capture_frames.items[self.capture_depth];
+        for (frame.bindings.items) |*binding| binding.depth = frame.evidence_depth - binding.depth;
+        std.mem.sort(NestedProcTypeBinding, frame.bindings.items, {}, struct {
+            fn lessThan(_: void, a: NestedProcTypeBinding, b: NestedProcTypeBinding) bool {
+                return if (a.depth == b.depth) a.slot < b.slot else a.depth < b.depth;
+            }
+        }.lessThan);
+        self.sites.items[@intFromEnum(frame.site)].type_bindings = try artifact_serialize.appendSpan(
+            artifact_serialize.Span,
+            NestedProcTypeBinding,
+            &self.type_binding_pool,
             self.allocator,
-            self.checked_bodies,
-            self.static_dispatch_plans,
-            self.method_registry,
-            self.dispatch_scopes,
-            self.scope_by_checked_expr,
+            frame.bindings.items,
         );
+        // A descendant can need an enclosing binding without its parent
+        // mentioning that type in any runtime value.
+        for (frame.bindings.items) |binding| try self.captureType(binding.ty);
+    }
+
+    fn captureType(self: *NestedProcSiteBuilder, ty: CheckedTypeId) Allocator.Error!void {
+        if (self.capture_depth == 0 or !self.checked_types.rootContainsIdentityVariables(ty)) return;
+        const frame = &self.capture_frames.items[self.capture_depth - 1];
+        if ((try frame.visited.getOrPut(ty)).found_existing) return;
+        if (self.lexical_bindings.get(ty)) |binding| {
+            try frame.bindings.append(self.allocator, binding);
+            return;
+        }
+        switch (self.checked_types.payload(ty)) {
+            .pending => checkedArtifactInvariant("pending type in nested procedure binding inventory", .{}),
+            .err, .flex, .rigid, .empty_record, .empty_tag_union => {},
+            .alias => |alias| {
+                for (alias.args) |arg| try self.captureType(arg);
+                try self.captureType(alias.backing);
+            },
+            .record => |record| {
+                try self.captureFields(record.fields);
+                try self.captureType(record.ext);
+            },
+            .record_unbound => |fields| try self.captureFields(fields),
+            .tuple => |items| for (items) |item| {
+                try self.captureType(item);
+            },
+            .nominal => |nominal| for (nominal.args) |arg| {
+                try self.captureType(arg);
+            },
+            .function => |function| {
+                for (function.args) |arg| try self.captureType(arg);
+                try self.captureType(function.ret);
+            },
+            .tag_union => |tags| {
+                for (tags.tags) |tag| for (tag.argsSlice(self.checked_types)) |arg| {
+                    try self.captureType(arg);
+                };
+                try self.captureType(tags.ext);
+            },
+        }
+    }
+
+    fn captureFields(self: *NestedProcSiteBuilder, fields: []const CheckedRecordField) Allocator.Error!void {
+        for (fields) |field| {
+            if (field.kind.undeterminedVariable()) |variable| try self.captureType(variable);
+            try self.captureType(field.ty);
+        }
     }
 
     fn scanCheckedBody(
         self: *NestedProcSiteBuilder,
         body_id: CheckedBodyId,
-        _: *const CheckedProcedureTemplate,
+        template: *const CheckedProcedureTemplate,
     ) Allocator.Error!void {
         const body = self.checked_bodies.body(body_id);
         self.path.clearRetainingCapacity();
         self.current_scope = .root;
+        const mark = self.binding_undo.items.len;
+        defer self.leaveTypeScope(mark);
+        try self.enterTypeScope(self.templates.templateSchemeVars(template));
         try self.scanExpr(body.root_expr, .{ .template = body.owner_template }, true);
     }
 
     fn scanEntryWrapper(
         self: *NestedProcSiteBuilder,
         wrapper: EntryWrapper,
-        _: *const CheckedProcedureTemplate,
+        template: *const CheckedProcedureTemplate,
     ) Allocator.Error!void {
         self.path.clearRetainingCapacity();
         self.current_scope = .root;
+        const mark = self.binding_undo.items.len;
+        defer self.leaveTypeScope(mark);
+        try self.enterTypeScope(self.templates.templateSchemeVars(template));
         try self.scanExpr(wrapper.body_expr, .{ .template = wrapper.template }, false);
     }
 
@@ -20986,18 +21135,34 @@ const NestedProcSiteBuilder = struct {
             self.dispatch_scopes,
         );
         defer self.current_scope = previous_scope;
-
+        const capture_mark = self.capture_depth;
         const expr = self.checked_bodies.expr(expr_id);
+        try self.captureType(expr.ty);
+        const binding_mark = self.binding_undo.items.len;
+        const previous_evidence_depth = self.evidence_depth;
+        defer self.leaveTypeScope(binding_mark);
+        defer self.evidence_depth = previous_evidence_depth;
+        if (!std.meta.eql(self.current_scope, previous_scope)) switch (self.current_scope) {
+            .generalized => |scope| {
+                self.evidence_depth += 1;
+                try self.enterTypeScope(self.templates.scopeSchemeVars(&self.dispatch_scopes[@intFromEnum(scope)]));
+            },
+            .root => unreachable,
+        };
         switch (expr.data) {
             .closure => |closure| {
                 if (!suppress_current_site) {
                     try self.addSite(owner, .closure, expr_id, null);
+                    try self.beginTypeCaptures(@enumFromInt(@as(u32, @intCast(self.sites.items.len - 1))));
+                    try self.captureType(expr.ty);
                 }
                 try self.scanExpr(closure.lambda, owner, true);
             },
             .lambda => |lambda| {
                 if (!suppress_current_site) {
                     try self.addSite(owner, .local_function, expr_id, null);
+                    try self.beginTypeCaptures(@enumFromInt(@as(u32, @intCast(self.sites.items.len - 1))));
+                    try self.captureType(expr.ty);
                 }
                 for (lambda.args) |arg| try self.scanPattern(arg, owner);
                 try self.scanExpr(lambda.body, owner, false);
@@ -21081,17 +21246,21 @@ const NestedProcSiteBuilder = struct {
             .hosted_lambda => |hosted| {
                 if (!suppress_current_site) {
                     try self.addSite(owner, .local_function, expr_id, null);
+                    try self.beginTypeCaptures(@enumFromInt(@as(u32, @intCast(self.sites.items.len - 1))));
+                    try self.captureType(expr.ty);
                 }
                 for (hosted.args) |arg| try self.scanPattern(arg, owner);
             },
             .run_low_level => |run| {
                 for (run.args) |arg| try self.scanExpr(arg, owner, false);
             },
+            .lookup_local, .lookup_external, .lookup_required => {
+                if (self.static_dispatch_plans.siteSubstitution(expr_id)) |substitution| {
+                    for (substitution) |ty| try self.captureType(ty);
+                }
+            },
             .str_segment,
             .bytes_literal,
-            .lookup_local,
-            .lookup_external,
-            .lookup_required,
             .empty_list,
             .empty_record,
             .zero_argument_tag,
@@ -21101,6 +21270,10 @@ const NestedProcSiteBuilder = struct {
             .anno_only,
             .pending,
             => {},
+        }
+        if (self.capture_depth > capture_mark) {
+            self.leaveTypeScope(binding_mark);
+            try self.finishTypeCaptures();
         }
     }
 
@@ -21114,6 +21287,8 @@ const NestedProcSiteBuilder = struct {
             checkedArtifactInvariant("checked template static-dispatch plan id was outside the plan table", .{});
         }
         const plan = self.static_dispatch_plans.plans[raw];
+        try self.captureType(plan.dispatcher_ty);
+        try self.captureType(plan.callable_ty);
         for (plan.argsSlice(self.static_dispatch_plans)) |arg| switch (arg) {
             .checked_expr => |expr| try self.scanExpr(expr, owner, false),
             .generated_interpolation_iter => |expr| try self.scanGeneratedInterpolationIter(expr, owner),
@@ -21146,6 +21321,7 @@ const NestedProcSiteBuilder = struct {
         defer self.path.items.len -= 1;
 
         const pattern = self.checked_bodies.pattern(pattern_id);
+        try self.captureType(pattern.ty);
         switch (pattern.data) {
             .as => |as| try self.scanPattern(as.pattern, owner),
             .applied_tag => |tag| {
@@ -21266,6 +21442,53 @@ const NestedProcSiteBuilder = struct {
         }
     }
 };
+
+test "nested type bindings are sparse, lexical, transitive, and cycle safe" {
+    const allocator = std.testing.allocator;
+    var store = CheckedTypeStore{};
+    defer store.deinit(allocator);
+    var vars: [4]CheckedTypeId = undefined;
+    for (&vars, 0..) |*var_, i| {
+        var_.* = try store.reserveSyntheticTypeRoot(allocator, testCanonicalTypeKey(@intCast(i + 190)), true);
+        try store.fillSyntheticTypeRoot(allocator, var_.*, .{ .flex = .{} });
+    }
+    const cycle = try store.reserveSyntheticTypeRoot(allocator, testCanonicalTypeKey(194), true);
+    try store.fillSyntheticTypeRoot(allocator, cycle, .{ .tuple = try allocator.dupe(CheckedTypeId, &.{ vars[0], cycle }) });
+    var scopes = collections.DenseMap(CheckedExprId, DispatchScopeId).init(allocator);
+    defer scopes.deinit();
+    var builder = NestedProcSiteBuilder.init(allocator, undefined, &store, undefined, undefined, undefined, &.{}, &scopes);
+    defer builder.deinitScratch();
+    defer builder.deinitAll();
+    try builder.enterTypeScope(&vars);
+    try builder.addSite(.default_root, .local_function, null, null);
+    const outer_site = builder.sites.items[builder.sites.items.len - 1].site;
+    try builder.beginTypeCaptures(outer_site);
+    const mark = builder.binding_undo.items.len;
+    builder.evidence_depth = 1;
+    try builder.enterTypeScope(&.{vars[1]});
+    // addSite consumes checked scope metadata, which this type-only test
+    // does not need: both sites use a root declaration for construction.
+    try builder.addSite(.default_root, .local_function, null, null);
+    const inner_site = builder.sites.items[builder.sites.items.len - 1].site;
+    try builder.beginTypeCaptures(inner_site);
+    try builder.captureType(vars[1]);
+    try builder.captureType(cycle);
+    try builder.captureType(cycle);
+    builder.leaveTypeScope(mark);
+    builder.evidence_depth = 0;
+    try builder.finishTypeCaptures();
+    try builder.finishTypeCaptures();
+    const inner = builder.sites.items[@intFromEnum(inner_site)].type_bindings;
+    try std.testing.expectEqualSlices(NestedProcTypeBinding, &.{
+        .{ .ty = vars[1], .depth = 0, .slot = 0 },
+        .{ .ty = vars[0], .depth = 1, .slot = 0 },
+    }, builder.type_binding_pool.items[inner.start .. inner.start + inner.len]);
+    const outer = builder.sites.items[@intFromEnum(outer_site)].type_bindings;
+    try std.testing.expectEqualSlices(NestedProcTypeBinding, &.{
+        .{ .ty = vars[0], .depth = 0, .slot = 0 },
+        .{ .ty = vars[1], .depth = 0, .slot = 1 },
+    }, builder.type_binding_pool.items[outer.start .. outer.start + outer.len]);
+}
 
 /// Public `HostedProc` declaration.
 pub const HostedProc = struct {
@@ -30337,7 +30560,7 @@ pub const CheckedModuleArtifact = struct {
             // independent of stored data size. The optional-field body tables
             // add three pointers beyond the current-main count, and the
             // record-unset label pool one more.
-            std.debug.assert(artifact_serialize.relocatablePointerCount(Serialized) == 217);
+            std.debug.assert(artifact_serialize.relocatablePointerCount(Serialized) == 218);
         }
 
         /// Append every sub-store's bytes to `writer` in field order, recording
@@ -30566,7 +30789,8 @@ pub const CheckedModuleArtifact = struct {
     // Version 86 admits checker-proven concrete recursive dispatch recipes
     // and preserves eager structural method selections.
     // Version 87 persists the checked scheme's key-to-ID probing index.
-    const serialized_layout_version: u32 = 87;
+    // Version 88 records nested procedures' lexical type bindings.
+    const serialized_layout_version: u32 = 88;
 
     /// Comptime fingerprint of `Serialized`'s layout, mirroring
     /// `cache_module.MODULE_ENV_VERSION_HASH`. It is appended to the baked builtin
@@ -31844,6 +32068,24 @@ pub const CheckedModuleArtifact = struct {
             std.debug.assert(@intFromEnum(site.site) == i);
             std.debug.assert(site.path_len > 0);
             std.debug.assert(site.path_start + site.path_len <= self.nested_proc_sites.path_components.len);
+            const type_span = site.type_bindings;
+            std.debug.assert(type_span.start <= self.nested_proc_sites.type_bindings.len);
+            std.debug.assert(type_span.len <= self.nested_proc_sites.type_bindings.len - type_span.start);
+            var binding_scope = site.lexical_scope;
+            var binding_depth: u32 = 0;
+            for (self.nested_proc_sites.type_bindings[type_span.start .. type_span.start + type_span.len]) |binding| {
+                std.debug.assert(binding.depth >= binding_depth);
+                while (binding_depth < binding.depth) : (binding_depth += 1) {
+                    const scope = self.checked_procedure_templates.dispatch_scopes[@intFromEnum(binding_scope.generalized)];
+                    binding_scope = if (scope.parent) |parent| .{ .generalized = parent } else .root;
+                }
+                const vars = switch (binding_scope) {
+                    .root => self.checked_procedure_templates.templateSchemeVars(&self.checked_procedure_templates.templates.items[@intFromEnum(site.owner.template.template)]),
+                    .generalized => |scope| self.checked_procedure_templates.scopeSchemeVars(&self.checked_procedure_templates.dispatch_scopes[@intFromEnum(scope)]),
+                };
+                std.debug.assert(binding.slot < vars.len);
+                std.debug.assert(vars[binding.slot] == binding.ty);
+            }
             switch (site.owner) {
                 .template => |owner_template| std.debug.assert(@intFromEnum(owner_template.template) < self.checked_procedure_templates.templates.items.len),
                 // A default-root site always names its checked lambda/closure
@@ -34476,7 +34718,7 @@ pub fn publishFromTypedModule(
     );
     errdefer root_requests.deinit(allocator);
 
-    var nested_proc_sites = try NestedProcSiteTable.fromTemplates(allocator, checked_bodies, &static_dispatch_plans, &method_registry, &entry_wrappers, &checked_procedure_templates);
+    var nested_proc_sites = try NestedProcSiteTable.fromTemplates(allocator, checked_bodies, checked_types, &static_dispatch_plans, &method_registry, &entry_wrappers, &checked_procedure_templates);
     errdefer nested_proc_sites.deinit(allocator);
 
     sealConstEvalTemplatesForRoots(
@@ -37044,8 +37286,8 @@ test "SERIALIZED_VERSION_HASH golden value" {
     // change, bump `serialized_layout_version` and replace the golden bytes below with
     // the ones this assertion prints.
     const golden: [32]u8 = .{
-        0xEB, 0x63, 0x17, 0xE5, 0x70, 0xA1, 0x49, 0x48, 0x9C, 0xAD, 0x92, 0x0D, 0x3D, 0x3B, 0xDB, 0xC1,
-        0x51, 0xD0, 0x52, 0x96, 0x0E, 0xF5, 0xC9, 0x82, 0x11, 0x6B, 0x18, 0x72, 0x84, 0x7C, 0xC0, 0x10,
+        0x59, 0x9B, 0xCD, 0xDA, 0xC8, 0x10, 0x27, 0xA2, 0x50, 0xCB, 0x19, 0x84, 0xD7, 0x78, 0x15, 0xE5,
+        0x54, 0x24, 0x64, 0xC2, 0x5A, 0xAE, 0x64, 0xD6, 0x45, 0x67, 0x7E, 0x9E, 0xA3, 0x9E, 0xB3, 0xBE,
     };
     try std.testing.expectEqualSlices(u8, &golden, &CheckedModuleArtifact.SERIALIZED_VERSION_HASH);
 }
