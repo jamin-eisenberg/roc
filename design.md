@@ -9567,6 +9567,10 @@ releases an owned returned `Str` after appending its bytes. Backends do not
 resolve method names or select this behavior. Record inspection retains
 nested-descriptor spans across custom method calls and reborrows each reference;
 a reentrant method can grow and relocate the runtime descriptor-reference table.
+Tag variant lookups return metadata by value so recursive inspection and value
+adaptation cannot retain pointers into the growable variant table. Residual tag
+construction reserves output capacity before borrowing its source and target
+spans, which may belong to that same table.
 
 For every checked direct call to a known procedure, the lowerer
 emits a direct LIR call to the corresponding private boxy worker and supplies
@@ -14027,6 +14031,12 @@ its planned inspect workers and descriptor method slots. Inspectable nominal
 wrappers are explicitly destructured before calling a backing vector's method.
 Statically known SIMD inspection is an ordinary direct procedure call, with
 normal specialization reuse and inlining decisions.
+
+SIMD inspection appends lane text directly into the result string without
+materializing lane or string lists. Eight- and sixteen-lane results always
+exceed inline string capacity and reserve their maximum decimal size once.
+Two- and four-lane formatters retain the scalar strings, reserve their exact
+combined size, and preserve inline storage whenever the complete result fits.
 
 The exhaustive bit-level SIMD evaluator in `src/builtins/simd.zig` is the
 correctness oracle for the interpreter, Lambda Mono evaluator, and differential

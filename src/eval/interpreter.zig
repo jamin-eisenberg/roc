@@ -9581,7 +9581,7 @@ pub const Interpreter = struct {
         self: *const LirInterpreter,
         desc: *const LirProgram.BoxyTypeDesc,
         tag_name: LIR.BoxyNameId,
-    ) ?*const LirProgram.BoxyTagVariant {
+    ) ?LirProgram.BoxyTagVariant {
         return self.boxy_runtime.findLocalBoxyTagVariant(desc, tag_name);
     }
 
@@ -9597,7 +9597,7 @@ pub const Interpreter = struct {
         self: *const LirInterpreter,
         desc: *const LirProgram.BoxyTypeDesc,
         discriminant: u16,
-    ) *const LirProgram.BoxyTagVariant {
+    ) LirProgram.BoxyTagVariant {
         return self.boxy_runtime.requireBoxyTagVariantByDiscriminant(desc, discriminant);
     }
 
@@ -9605,7 +9605,7 @@ pub const Interpreter = struct {
         self: *const LirInterpreter,
         desc: *const LirProgram.BoxyTypeDesc,
         discriminant: u16,
-    ) ?*const LirProgram.BoxyTagVariant {
+    ) ?LirProgram.BoxyTagVariant {
         return self.boxy_runtime.findBoxyTagVariantByDiscriminant(desc, discriminant);
     }
 
@@ -9681,7 +9681,7 @@ pub const Interpreter = struct {
 
     fn findBoxyPayloadDesc(
         self: *const LirInterpreter,
-        variant: *const LirProgram.BoxyTagVariant,
+        variant: LirProgram.BoxyTagVariant,
         payload_index: u32,
     ) ?LIR.BoxyDescRef {
         return self.boxy_runtime.findBoxyPayloadDesc(variant, payload_index);
