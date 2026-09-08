@@ -262,6 +262,8 @@ pub const CliCtx = struct {
     /// headers use the detected width, capped by the renderer at 120 columns.
     fn baseReportConfig(self: *const Self) ReportingConfig {
         var config = ReportingConfig.initColorTerminal();
+        // Reporting must still work if the working directory is inaccessible.
+        config.source_path_base = self.coreCtx().canonicalize(".", self.arena) catch null;
         if (self.coreCtx().terminalWidth()) |cols| {
             if (cols > 0) config.max_line_width = cols;
         }
