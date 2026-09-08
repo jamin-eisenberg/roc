@@ -2477,6 +2477,15 @@ right-hand side and complete scrutinee pattern. Those roots are emitted in
 dependency-first order and later lookups resolve through the selected binder,
 never as runtime-local pattern references.
 
+These top-level extraction roots are required binding definitions, not optional
+runtime-body hoists. Post-solve pruning must retain every well-checked top-level
+extraction independently of the optional-hoist dependency predicate. Its full
+checked body uses ordinary top-level constant/callable evaluation rules,
+including `expect`, `dbg`, loops, and mutable intermediate values. Publication
+retains each binder's own source scheme and independently decides whether its
+result is context-free or requires specialization; retaining a definition does
+not force its type to be concrete or make a runtime-body expression hoistable.
+
 A non-exhaustive destructure in an unguarded runtime position is itself a strict
 compile-time demand when its right-hand side is top-level-equivalent. This demand
 does not depend on whether the pattern contains a binder or whether any binder is
