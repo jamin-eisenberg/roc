@@ -11312,6 +11312,30 @@ summary representative. Release builds compile the certifier away entirely,
 so only debug compiler builds pay, and any certifier slowness is fixed inside
 the certifier, never by weakening what it checks.
 
+Certification boundary checks enumerate the current path's nonzero balances
+and nonempty claim sets, never the procedure's history of abstract value
+identities. Claims still require certification at zero balance and after rebinding has
+removed a value's last local name. A persistent sign index records exactly the
+negative balances and changes only on sign transitions. Deferred claims settle
+in value order; claiming can increase a container balance or spend a positive
+surplus, but cannot create another negative balance. Sparse iteration borrows
+an immutable root and skips empty subtrees; it adds no metadata or update cost
+to the shared snapshot implementation's other consumers.
+
+The certifier's final-LIR read-before-rebind graph also supplies forward
+control-flow components for join scheduling. Pending paths contribute their
+arrivals before queued join bodies run, and loop components reach their fixed
+point before downstream join components run. Changes arriving before a group's
+queued walk are absorbed into that one state. Within a component, queued groups
+run in arrival order and strict refinements continue to schedule checks.
+This changes scheduling, not the entry-state abstraction or checked paths.
+Joins whose alias partitions are unchanged compare their exact balances
+directly. A changed partition creates one variable per class intersection;
+each variable belongs to exactly one sum constraint from each input partition.
+Remaining totals, unknown counts, and the exact two incidence edges propagate
+each solution once. Ambiguous or inconsistent attribution cannot merge the
+entry states. Temporary constraint storage retains capacity between meets.
+
 ### Mode Specialization
 
 This section describes ARC mode specialization, not the user-facing
