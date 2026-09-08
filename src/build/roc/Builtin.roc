@@ -2226,6 +2226,23 @@ Builtin :: [].{
 			is_eq : Utf8Problem, Utf8Problem -> Bool
 		}
 
+		## Returns guidance about string length instead of a number.
+		##
+		## A string can have different lengths depending on what you count: UTF-8
+		## bytes, Unicode code points, or grapheme clusters (an approximation of
+		## user-perceived characters). For example, `é` can be represented as one
+		## code point or as `e` followed by a combining accent. These representations
+		## use different numbers of bytes and code points, but each is one grapheme
+		## cluster. A grapheme cluster's display width also depends on how it is rendered.
+		##
+		## Use `Str.count_utf8_bytes` when you need the byte count, or `Str.is_empty`
+		## to check whether a string is empty. For other measurements, choose a
+		## Unicode library that supports the unit you need. For text known to be
+		## ASCII, each code point occupies one byte; this does not hold for arbitrary
+		## Unicode text.
+		len : Str -> [LearnAboutStringsInRoc(Str)]
+		len = |_str| LearnAboutStringsInRoc("String length depends on what you count: UTF-8 bytes, Unicode code points, or grapheme clusters (an approximation of user-perceived characters). A single grapheme cluster can contain multiple code points, and a code point can occupy multiple UTF-8 bytes. Display width also depends on how the text is rendered. Use Str.count_utf8_bytes for the byte count, or Str.is_empty to check whether a string is empty. For other measurements, choose a Unicode library that supports the unit you need. For text known to be ASCII, each code point occupies one byte; this does not hold for arbitrary Unicode text.")
+
 		is_empty : Str -> Bool
 		is_empty = |str| Str.count_utf8_bytes(str) == 0
 
@@ -2515,12 +2532,12 @@ Builtin :: [].{
 		iter_utf8 : Str -> Iter(U8)
 		iter_utf8 = |str| {
 			make = |index| {
-				len = Str.count_utf8_bytes(str)
+				byte_count = Str.count_utf8_bytes(str)
 
 				iter_from_step(
-					Known(len - index),
+					Known(byte_count - index),
 					||
-						if index == len {
+						if index == byte_count {
 							Done
 						} else {
 							One({ item: str_get_utf8_byte_unsafe(str, index), rest: make(index + 1) })
@@ -2553,11 +2570,11 @@ Builtin :: [].{
 			if count == 0 {
 				Ok(str)
 			} else {
-				len = Str.count_utf8_bytes(str)
-				if count >= len {
+				byte_count = Str.count_utf8_bytes(str)
+				if count >= byte_count {
 					Ok("")
 				} else {
-					end = len - count
+					end = byte_count - count
 					byte = str_get_utf8_byte_unsafe(str, end)
 					if byte >= 128 and byte < 192 {
 						Err(BadUtf8)
