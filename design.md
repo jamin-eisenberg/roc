@@ -3510,6 +3510,13 @@ pool ranges. Schemes whose checker-authored codec requirements require
 instantiation have no concrete template-root evidence. Selecting one as a root
 requires an explicit instantiated root edge with its own evidence.
 
+Constant-evaluation entry wrappers retain the evaluated value's quantified type
+variables without accepting its dispatch requirements as wrapper arguments.
+Procedure definitions and hoisted source-pattern roots bind evidence chains;
+constant and expression wrappers resolve their bodies without caller-supplied
+evidence. CheckedModule construction and use-site enumeration consume the same
+explicit root classification.
+
 Completed generated codec proof graphs also carry a producer-proven identity
 for specialization reuse. Type-role keys and call metadata select candidates; equality
 compares all source and frozen roles, every method selection and conditional

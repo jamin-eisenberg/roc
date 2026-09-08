@@ -17479,9 +17479,16 @@ const EvidencePass = struct {
         // evidence classification must still consume a complete producer
         // schema rather than depend on visitation order.
         for (self.templates.templates.items) |*template| {
-            const schema = try self.publishScheme(self.templateSchemeVar(template.*, &template_defs));
-            template.scheme_vars = schema.vars;
-            template.evidence_params = schema.params;
+            if (self.templateEvidenceSchemeVar(template.*, &template_defs)) |scheme_var| {
+                const schema = try self.publishScheme(scheme_var);
+                template.scheme_vars = schema.vars;
+                template.evidence_params = schema.params;
+            } else {
+                // Constant-evaluation wrappers retain the value's type variables,
+                // but have no caller-supplied dispatch parameters of their own.
+                template.scheme_vars = try self.appendSchemeVars(self.templateSchemeVar(template.*, &template_defs));
+                template.evidence_params = .{};
+            }
         }
         for (self.templates.dispatch_scopes) |*scope| {
             const schema = try self.publishScheme(scope.scheme_var);
@@ -17778,6 +17785,24 @@ const EvidencePass = struct {
         return .{ .start = start, .len = @intCast(identity_vars.len) };
     }
 
+    /// Only procedure definitions and hoisted source-pattern roots bind an
+    /// evidence chain. Constant and expression entry wrappers evaluate their
+    /// values without receiving the value's dispatch parameters as arguments.
+    fn templateEvidenceSchemeVar(
+        self: *EvidencePass,
+        template: CheckedProcedureTemplate,
+        template_defs: *const std.AutoHashMap(u32, CIR.Def.Idx),
+    ) ?Var {
+        if (template_defs.get(@intFromEnum(template.template_id))) |def_idx| return ModuleEnv.varFrom(def_idx);
+        return switch (template.body) {
+            .entry_wrapper => |wrapper_id| blk: {
+                const root = self.compile_time_roots.root(self.entry_wrappers.get(wrapper_id).root);
+                break :blk if (root.source_pattern) |pattern| ModuleEnv.varFrom(pattern) else null;
+            },
+            .checked_body, .intrinsic_wrapper, .unimplemented => null,
+        };
+    }
+
     fn enumerateTemplateParams(
         self: *EvidencePass,
         template: CheckedProcedureTemplate,
@@ -17785,24 +17810,8 @@ const EvidencePass = struct {
         params: *std.ArrayListUnmanaged(EvidenceParam),
     ) Allocator.Error!void {
         params.clearRetainingCapacity();
-        if (template_defs.get(@intFromEnum(template.template_id))) |def_idx| {
-            try self.enumerateParams(ModuleEnv.varFrom(def_idx), params);
-            return;
-        }
-        switch (template.body) {
-            // An entry wrapper evaluates a compile-time root; plans inside the
-            // root's body resolve against the root definition's own scheme.
-            .entry_wrapper => |wrapper_id| {
-                const wrapper = self.entry_wrappers.get(wrapper_id);
-                const root = self.compile_time_roots.root(wrapper.root);
-                if (root.source_pattern) |source_pattern| {
-                    try self.enumerateParams(ModuleEnv.varFrom(source_pattern), params);
-                }
-                // Constant roots resolve every obligation inside their own
-                // body; expression roots (REPL lines, eval snippets) have no
-                // callers. Both are chain-free.
-            },
-            .checked_body, .intrinsic_wrapper, .unimplemented => {},
+        if (self.templateEvidenceSchemeVar(template, template_defs)) |scheme_var| {
+            try self.enumerateParams(scheme_var, params);
         }
     }
 
