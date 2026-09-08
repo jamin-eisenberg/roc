@@ -740,8 +740,8 @@ test "Monotype open specialization lookup covers the complete function interface
         "fn lowerExprAtTypeCell(",
     );
     inline for (.{ template_source, nested_source }) |lookup_source| {
-        try expectContains(lookup_source, "functionInterfaceIterator(request_fn_node)");
-        try expectContains(lookup_source, "classMemberIterator(interface_node)");
+        try expectContains(lookup_source, "functionInterfaceClassIterator(request_fn_node)");
+        try expectContains(lookup_source, "classMemberIterator(interface_class)");
         try expectContains(lookup_source, "seen_specs.getOrPut(raw_spec)");
         try expectContains(lookup_source, "draftOpenCandidateQualifies(");
         try expectContains(lookup_source, "spec.runtime_demand_guard_frames");
@@ -760,7 +760,7 @@ test "Monotype open specialization lookup covers the complete function interface
         "fn draftNestedSpecRequestNode(",
     );
     try expectContains(interface_registration, "indexed_nodes.getOrPut(interface_node)");
-    try expectContains(interface_registration, "draftOpenRequestKey(interface_node)");
+    try expectContains(interface_registration, ".node = interface_node");
     try expectContains(nested_source, "std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)");
 }
 

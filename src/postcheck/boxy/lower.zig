@@ -1822,6 +1822,9 @@ const ProcedureBuilder = struct {
         }
 
         const resolved = self.resolved_workers.items[@intFromEnum(worker_id)];
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             resolved.module,
@@ -3391,6 +3394,9 @@ const ProcedureBuilder = struct {
         }
 
         const source_rep = self.plan.representations.items[@intFromEnum(rep_id)];
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             procedureModuleById(self.modules, source_rep.source_type.module),
@@ -3450,6 +3456,9 @@ const ProcedureBuilder = struct {
             boxyLowerInvariant("unreachable dictionary method was emitted without a worker layout context");
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             procedureModuleById(self.modules, fn_type.module),
@@ -4706,6 +4715,9 @@ const ProcedureBuilder = struct {
             => {},
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.init(self, resolved.module, self.layout_plan.workerLayoutFor(worker_id));
         defer proc.deinit();
 
@@ -4725,6 +4737,9 @@ const ProcedureBuilder = struct {
             .stack_probe = self.stackProbeForProc(args_span, LIR.LocalSpan.empty(), ret_layout),
         });
         self.worker_procs[index] = proc_id;
+        var tail_builder = lir_core.TailCallBuilder.init(self.allocator, proc_id);
+        defer tail_builder.deinit();
+        self.result.store.tail_call_builder = &tail_builder;
         try self.setProcDebugName(proc_id, resolved);
         const ret_stmt = try self.result.store.addCFStmt(.{ .ret = .{ .value = ret_local } });
         var body_stmt = try self.lowerWorkerBodyInto(resolved, &proc, body_source, ret_local, ret_stmt);
@@ -4746,6 +4761,11 @@ const ProcedureBuilder = struct {
         proc_spec.runtime_ret_desc = return_desc.runtime_local;
         proc_spec.stack_probe = self.stackProbeForProc(args_span, frame_span, ret_layout);
         self.resolvePendingDirectCallDescriptorAbis(proc_id, return_desc.runtime_local != null);
+        // All self-call ABI fixups are resolved with this worker's signature.
+        // Later descriptor capture finalization does not change continuations.
+        tail_builder.adapters = self.result.boxy_adapters.items;
+        const tail_sites = try tail_builder.finish(&self.result.store);
+        self.result.store.getProcSpecPtr(proc_id).tail_calls = tail_sites;
         return proc_id;
     }
 
@@ -4769,6 +4789,9 @@ const ProcedureBuilder = struct {
             => {},
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.init(self, resolved.module, self.layout_plan.workerLayoutFor(worker_id));
         defer proc.deinit();
 
@@ -18295,7 +18318,7 @@ const ProcBodyBuilder = struct {
             hidden_dict_args,
             continuation,
         );
-        self.parent.result.store.getCFStmtPtr(call_placeholder).* = self.parent.result.store.getCFStmt(call_entry);
+        try self.parent.result.store.replaceCFStmt(call_placeholder, self.parent.result.store.getCFStmt(call_entry));
         for (self.parent.pending_direct_call_descriptor_abis.items) |*pending| {
             if (pending.provisional_call == call_entry) {
                 pending.provisional_call = call_placeholder;
@@ -30637,6 +30660,9 @@ const ProcBodyBuilder = struct {
 
         const source_closure_layout = self.workerRuntimeLayoutForRep(source_function.rep).layoutIdx();
         const capture_layout = try self.callableAdapterCaptureLayout(source_closure_layout, descriptor_captures.len);
+        const saved_tail_builder = self.parent.result.store.tail_call_builder;
+        self.parent.result.store.tail_call_builder = null;
+        defer self.parent.result.store.tail_call_builder = saved_tail_builder;
         var adapter_proc = ProcBodyBuilder.initSyntheticAdapter(self.parent, self.module, self.worker_layout);
         defer adapter_proc.deinit();
 
@@ -30764,7 +30790,7 @@ const ProcBodyBuilder = struct {
             },
         });
         const call_entry = try adapter_proc.prependDescriptorArgMaterializations(arg_desc_initializers.items, call_stmt);
-        self.parent.result.store.getCFStmtPtr(call_placeholder).* = self.parent.result.store.getCFStmt(call_entry);
+        try self.parent.result.store.replaceCFStmt(call_placeholder, self.parent.result.store.getCFStmt(call_entry));
         continuation = call_with_args;
 
         continuation = try adapter_proc.prependWorkerArgumentDescriptorInitializers(continuation);
