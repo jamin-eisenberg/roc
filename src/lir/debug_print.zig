@@ -339,6 +339,7 @@ const Printer = struct {
                     try self.writeLocals(s.args, writer);
                     try writer.writeAll(")");
                     if (s.unique_args != 0) try writer.print(" unique=0x{x}", .{s.unique_args});
+                    if (s.simd_concat_count) |count| try writer.print(" concat_count={d}", .{count});
                     try writer.writeAll("\n");
                     current = s.next;
                 },
