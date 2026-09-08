@@ -30790,7 +30790,8 @@ pub const CheckedModuleArtifact = struct {
     // and preserves eager structural method selections.
     // Version 87 persists the checked scheme's key-to-ID probing index.
     // Version 88 records nested procedures' lexical type bindings.
-    const serialized_layout_version: u32 = 88;
+    // Version 89 records checked error constants for rejected pattern binders.
+    const serialized_layout_version: u32 = 89;
 
     /// Comptime fingerprint of `Serialized`'s layout, mirroring
     /// `cache_module.MODULE_ENV_VERSION_HASH`. It is appended to the baked builtin
@@ -37286,8 +37287,8 @@ test "SERIALIZED_VERSION_HASH golden value" {
     // change, bump `serialized_layout_version` and replace the golden bytes below with
     // the ones this assertion prints.
     const golden: [32]u8 = .{
-        0x59, 0x9B, 0xCD, 0xDA, 0xC8, 0x10, 0x27, 0xA2, 0x50, 0xCB, 0x19, 0x84, 0xD7, 0x78, 0x15, 0xE5,
-        0x54, 0x24, 0x64, 0xC2, 0x5A, 0xAE, 0x64, 0xD6, 0x45, 0x67, 0x7E, 0x9E, 0xA3, 0x9E, 0xB3, 0xBE,
+        0xEF, 0x4D, 0xC9, 0xAE, 0x4C, 0x6F, 0x82, 0x77, 0x18, 0xDB, 0x70, 0x98, 0xE3, 0xF6, 0x37, 0x7E,
+        0x39, 0xDB, 0x9A, 0x65, 0xF2, 0x47, 0xEC, 0xCA, 0x9A, 0x9A, 0x3C, 0xAF, 0x17, 0x4B, 0x5E, 0x08,
     };
     try std.testing.expectEqualSlices(u8, &golden, &CheckedModuleArtifact.SERIALIZED_VERSION_HASH);
 }

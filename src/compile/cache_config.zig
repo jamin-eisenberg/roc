@@ -180,7 +180,9 @@ pub const Constants = struct {
     /// 82: Literal dispatch plans retain their enclosing pattern-failure
     ///     expression without increasing the serialized plan size.
     /// 83: Where methods retain their complete type annotation in CIR.
-    pub const CACHE_VERSION = 83;
+    /// 84: Literal patterns record their exact failure owner, including
+    ///     statements and definitions as well as expressions.
+    pub const CACHE_VERSION = 84;
 };
 
 /// Configuration for the Roc cache system.
