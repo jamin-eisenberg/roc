@@ -1238,4 +1238,152 @@ pub const tests = [_]TestCase{
         ,
         .expected = .{ .inspect_str = "\"hi!\"" },
     },
+    .{
+        // https://github.com/roc-lang/roc/issues/11189
+        .name = "issue 11189: namespaced comparison helper called from a nested fold_with_index",
+        .source_kind = .module,
+        .source =
+        \\Point : { x : F64, y : F64 }
+        \\
+        \\Internals := {}.{
+        \\    proper = |a, b, c, d| {
+        \\        if a.x == b.x and c.y == d.y {
+        \\            c.x > a.x.min(b.x) and c.x < a.x.max(b.x) and a.y > c.y.min(d.y) and a.y < c.y.max(d.y)
+        \\        } else if a.y == b.y and c.x == d.x {
+        \\            a.x > c.x.min(d.x) and a.x < c.x.max(d.x) and c.y > a.y.min(b.y) and c.y < a.y.max(b.y)
+        \\        } else if a.x == b.x and c.x == d.x and a.x == c.x {
+        \\            a.y.min(b.y) < c.y.max(d.y) and a.y.max(b.y) > c.y.min(d.y)
+        \\        } else {
+        \\            False
+        \\        }
+        \\    }
+        \\
+        \\    simple = |points| points.fold_with_index(
+        \\        True,
+        \\        |simple, a, i| match points.get(i + 1) {
+        \\            Err(_) => simple
+        \\            Ok(b) => points.fold_with_index(
+        \\                simple,
+        \\                |clear, c, j| if j <= i + 1 {
+        \\                    clear
+        \\                } else {
+        \\                    match points.get(j + 1) {
+        \\                        Ok(d) => clear and !Internals.proper(a, b, c, d)
+        \\                        Err(_) => clear
+        \\                    }
+        \\                },
+        \\            )
+        \\        },
+        \\    )
+        \\}
+        \\
+        \\valid : List(Point) -> Bool
+        \\valid = |points| Internals.simple(points)
+        \\
+        \\main = valid([])
+        ,
+        .expected = .{ .inspect_str = "True" },
+    },
+    .{
+        .name = "issue 11189: comparison branches execute at independent F64 and F32 specializations",
+        .source_kind = .module,
+        .source =
+        \\Point : { x : F64, y : F64 }
+        \\
+        \\Internals := {}.{
+        \\    proper = |a, b, c, d| {
+        \\        if a.x == b.x and c.y == d.y {
+        \\            c.x > a.x.min(b.x) and c.x < a.x.max(b.x) and a.y > c.y.min(d.y) and a.y < c.y.max(d.y)
+        \\        } else if a.y == b.y and c.x == d.x {
+        \\            a.x > c.x.min(d.x) and a.x < c.x.max(d.x) and c.y > a.y.min(b.y) and c.y < a.y.max(b.y)
+        \\        } else if a.x == b.x and c.x == d.x and a.x == c.x {
+        \\            a.y.min(b.y) < c.y.max(d.y) and a.y.max(b.y) > c.y.min(d.y)
+        \\        } else {
+        \\            False
+        \\        }
+        \\    }
+        \\
+        \\    simple = |points| points.fold_with_index(
+        \\        True,
+        \\        |simple, a, i| match points.get(i + 1) {
+        \\            Err(_) => simple
+        \\            Ok(b) => points.fold_with_index(
+        \\                simple,
+        \\                |clear, c, j| if j <= i + 1 {
+        \\                    clear
+        \\                } else {
+        \\                    match points.get(j + 1) {
+        \\                        Ok(d) => clear and !Internals.proper(a, b, c, d)
+        \\                        Err(_) => clear
+        \\                    }
+        \\                },
+        \\            )
+        \\        },
+        \\    )
+        \\}
+        \\
+        \\valid : List(Point) -> Bool
+        \\valid = |points| Internals.simple(points)
+        \\
+        \\valid32 : List({ x : F32, y : F32 }) -> Bool
+        \\valid32 = |points| Internals.simple(points)
+        \\
+        \\main = (
+        \\    valid([]),
+        \\    valid([{ x: 0, y: 0 }, { x: 0, y: 3 }, { x: 0, y: 1 }, { x: 0, y: 2 }]),
+        \\    valid32([{ x: 0, y: 0 }, { x: 0, y: 3 }, { x: 0, y: 1 }, { x: 0, y: 2 }]),
+        \\    valid([{ x: 0, y: 0 }, { x: 0, y: 2 }, { x: -1, y: 1 }, { x: 1, y: 1 }]),
+        \\    valid([{ x: 0, y: 0 }, { x: 2, y: 0 }, { x: 1, y: -1 }, { x: 1, y: 1 }]),
+        \\)
+        ,
+        .expected = .{ .inspect_str = "(True, False, False, True, True)" },
+    },
+    .{
+        .name = "issue 11189: hidden comparison receivers cross three nested folds",
+        .source_kind = .module,
+        .source =
+        \\Helpers := {}.{
+        \\    ordered = |a, b| a.min(b) <= a.max(b)
+        \\    run = |xs| xs.fold(True, |ok, a|
+        \\        xs.fold(ok, |yes, b|
+        \\            xs.fold(yes, |still, _| still and Helpers.ordered(a, b))))
+        \\}
+        \\
+        \\main = {
+        \\    xs : List(F64)
+        \\    xs = [2, 1]
+        \\    ys : List(I64)
+        \\    ys = [3, 1]
+        \\    (Helpers.run(xs), Helpers.run(ys))
+        \\}
+        ,
+        .expected = .{ .inspect_str = "(True, True)" },
+    },
+    .{
+        .name = "issue 11189: stored functions restore hidden comparison bindings independently",
+        .source_kind = .module,
+        .source =
+        \\Factory := {}.{
+        \\    ordered = |a, b| a.min(b) < a.max(b)
+        \\    make = |a, b| |{}| Factory.ordered(a, b)
+        \\}
+        \\
+        \\p : {} -> Bool
+        \\p = {
+        \\    a : F64
+        \\    a = 1
+        \\    Factory.make(a, 2)
+        \\}
+        \\
+        \\q : {} -> Bool
+        \\q = {
+        \\    a : I64
+        \\    a = 3
+        \\    Factory.make(a, 3)
+        \\}
+        \\
+        \\main = (p({}), q({}))
+        ,
+        .expected = .{ .inspect_str = "(True, False)" },
+    },
 };
