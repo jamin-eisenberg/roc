@@ -9691,23 +9691,35 @@ call site's expected descriptor. ARC and every consumer use the descriptor
 output attached to the returned value; they do not treat the expected descriptor
 as evidence about bytes returned by a compiler worker.
 
-Checked direct and function-value uses of the generic `Str.inspect` intrinsic
-produce inspect-method demands in the Boxy plan. Each demanded nominal
-representation records its exact `to_inspect` worker, owning checked module,
-and module-local `MethodNameId`. Descriptor construction consumes that identity
+Checked direct and function-value uses of the generic `Str.inspect` intrinsic,
+`dbg`, and `expect_err` produce inspect-method demands in the Boxy plan. Demands
+propagate through the recorded worker/call/operand type substitutions and
+callable-use interfaces before descriptor construction. Each representation is
+marked once; recursive type relations are visited by representation pair. Each
+demanded nominal or SIMD representation records its exact `to_inspect` worker,
+owning checked module, and module-local `MethodNameId`. Descriptor construction consumes that identity
 directly; it does not rediscover a method from the representation's source
 module. It turns the plan into a method slot carrying the worker procedure,
 concrete argument layout and descriptor, hidden descriptor sources, and nested
 dictionaries. Transparent nominals may share their backing storage layout, but
 they retain a distinct checked descriptor identity when they carry an inspect
-method.
+method. Nested vector values retain descriptors even though they contain no
+reference-counted data: their inspection method is part of the descriptor
+contract. Descriptor producers and structural consumers use the same nested
+slot ordering for these vector fields, list items, and payloads.
 Runtime recursive inspection checks this slot before opaque or structural
 rendering, adapts the borrowed value into the worker argument representation,
 and invokes the worker through the registered-procedure ABI. The prepared call
 marks each adapted argument as borrowed or owned so the runtime preserves a
 borrowed source, releases an owned temporary when the worker borrows it, and
 releases an owned returned `Str` after appending its bytes. Backends do not
-resolve method names or select this behavior.
+resolve method names or select this behavior. Record inspection retains
+nested-descriptor spans across custom method calls and reborrows each reference;
+a reentrant method can grow and relocate the runtime descriptor-reference table.
+Tag variant lookups return metadata by value so recursive inspection and value
+adaptation cannot retain pointers into the growable variant table. Residual tag
+construction reserves output capacity before borrowing its source and target
+spans, which may belong to that same table.
 
 For every checked direct call to a known procedure, the lowerer
 emits a direct LIR call to the corresponding private boxy worker and supplies
@@ -14221,6 +14233,22 @@ streaming. Every compiler-backed operation is implemented by LLVM, both native
 dev backends, wasm, the interpreter, and the Lambda Mono evaluator. Compile-time
 evaluation uses the same vector layouts and dev lowering as runtime dev code,
 and `ConstStore` preserves all 16 vector bytes under the checked vector type.
+
+Primitive storage does not imply scalar inspection. The shared primitive
+inspection classification selects scalar low-level formatting, the Bool tag
+union, or a checked builtin `to_inspect` body. Both lowering strategies consume
+that classification. Monotype prepares SIMD method callees before relation
+freeze and consumes those reservations during deferred inspection; Boxy uses
+its planned inspect workers and descriptor method slots. Inspectable nominal
+wrappers are explicitly destructured before calling a backing vector's method.
+Statically known SIMD inspection is an ordinary direct procedure call, with
+normal specialization reuse and inlining decisions.
+
+SIMD inspection appends lane text directly into the result string without
+materializing lane or string lists. Eight- and sixteen-lane results always
+exceed inline string capacity and reserve their maximum decimal size once.
+Two- and four-lane formatters retain the scalar strings, reserve their exact
+combined size, and preserve inline storage whenever the complete result fits.
 
 The exhaustive bit-level SIMD evaluator in `src/builtins/simd.zig` is the
 correctness oracle for the interpreter, Lambda Mono evaluator, and differential

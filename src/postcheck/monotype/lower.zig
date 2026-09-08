@@ -18263,7 +18263,11 @@ const BodyContext = struct {
         str_ty: Type.TypeId,
     ) Allocator.Error!DraftExprId {
         return switch (self.typeStore().get(shape_ty)) {
-            .primitive => |primitive| try self.primitiveInspect(value, primitive, str_ty),
+            .primitive => |primitive| switch (Common.primitiveInspectLowering(primitive)) {
+                .low_level => |op| try self.lowLevelExpr(op, &.{value}, str_ty),
+                .builtin_method => try self.inspectPrimitiveMethod(value, value_ty, shape_ty, str_ty),
+                .bool_tag_union => Common.invariant("Bool must lower as an ordinary tag union before Str.inspect"),
+            },
             .named => |named| blk: {
                 if (named.builtin_owner) |owner| {
                     switch (owner) {
@@ -18298,6 +18302,32 @@ const BodyContext = struct {
         };
     }
 
+    fn inspectPrimitiveMethod(
+        self: *BodyContext,
+        value: DraftExprId,
+        value_ty: Type.TypeId,
+        shape_ty: Type.TypeId,
+        str_ty: Type.TypeId,
+    ) Allocator.Error!DraftExprId {
+        if (value_ty == shape_ty) {
+            return (try self.toInspectCall(value, shape_ty, str_ty)) orelse
+                Common.invariant("primitive inspect had no checked to_inspect method");
+        }
+
+        // Structural inspection may have traversed inspectable nominal backing
+        // edges. A method call needs the backing value at its own type, with
+        // each nominal layer explicitly destructured in the IR.
+        const backing_local = try self.addLocal(self.builder.symbols.fresh(), shape_ty);
+        const backing_value = try self.localExpr(backing_local, shape_ty);
+        const body = (try self.toInspectCall(backing_value, shape_ty, str_ty)) orelse
+            Common.invariant("primitive inspect backing had no checked to_inspect method");
+        const pat = try self.addConstructorPat(value_ty, .{ .bind = backing_local });
+        return try self.addExpr(.{ .ty = str_ty, .data = .{ .match_ = .{
+            .scrutinee = value,
+            .branches = try self.addBranchSpan(&.{.{ .pat = pat, .body = body }}),
+        } } });
+    }
+
     fn toInspectCall(self: *BodyContext, value: DraftExprId, value_ty: Type.TypeId, str_ty: Type.TypeId) Allocator.Error!?DraftExprId {
         const owner = methodOwnerFromType(self.typeStore(), value_ty) orelse return null;
         const lookup = try self.withLocalProcContext((try self.lookupMethodTargetByName(owner, "to_inspect")) orelse return null);
@@ -18330,26 +18360,21 @@ const BodyContext = struct {
         if (entry.found_existing) return false;
 
         switch (self.graph.content(node)) {
+            .primitive => |primitive| switch (Common.primitiveInspectLowering(primitive)) {
+                .builtin_method => return (try self.prepareToInspectMethodAtNode(
+                    node,
+                    str_ty,
+                    .{ .builtin = checked.builtinOwnerForPrimitive(primitive) },
+                )) orelse Common.invariant("primitive inspect had no checked to_inspect method"),
+                .low_level, .bool_tag_union => return false,
+            },
             .named => |named| {
                 if (named.builtin_owner == .list) {
                     if (named.args.len != 1) Common.invariant("List inspect graph node did not have one type argument");
                     return try self.prepareInspectMethodsAtNode(named.args[0], str_ty, seen);
                 }
                 if (self.methodOwnerFromNode(node)) |owner| {
-                    if (try self.lookupMethodTargetByName(owner, "to_inspect")) |raw_lookup| {
-                        const lookup = try self.withLocalProcContext(raw_lookup);
-                        for (self.draft.prepared_inspect_methods.items) |prepared| {
-                            if (self.graph.sameClass(prepared.value_node, node)) return false;
-                        }
-                        const ret_node = try self.graph.importMono(str_ty);
-                        const request_node = try self.graphFunctionNode(&.{node}, ret_node);
-                        const callee = try self.methodTargetCalleeAtNode(lookup, request_node, null);
-                        try self.draft.prepared_inspect_methods.append(self.allocator, .{
-                            .value_node = node,
-                            .callee = callee,
-                        });
-                        return true;
-                    }
+                    if (try self.prepareToInspectMethodAtNode(node, str_ty, owner)) |added| return added;
                 }
                 const backing = named.backing orelse return false;
                 if (backing.use != .inspectable) return false;
@@ -18375,7 +18400,6 @@ const BodyContext = struct {
             },
             .redirect => unreachable,
             .unresolved,
-            .primitive,
             .func,
             .empty_tag_union,
             .empty_record,
@@ -18385,9 +18409,27 @@ const BodyContext = struct {
         }
     }
 
-    fn primitiveInspect(self: *BodyContext, value: DraftExprId, primitive: Type.Primitive, str_ty: Type.TypeId) Allocator.Error!DraftExprId {
-        const args = [_]DraftExprId{value};
-        return try self.lowLevelExpr(Common.primitiveInspectLowLevelOp(primitive), &args, str_ty);
+    /// Null means the owner has no custom method; false means it was already
+    /// prepared. Both immediate and deferred inspection use the checked target.
+    fn prepareToInspectMethodAtNode(
+        self: *BodyContext,
+        node: NodeId,
+        str_ty: Type.TypeId,
+        owner: static_dispatch.MethodOwner,
+    ) Allocator.Error!?bool {
+        const raw_lookup = (try self.lookupMethodTargetByName(owner, "to_inspect")) orelse return null;
+        const lookup = try self.withLocalProcContext(raw_lookup);
+        for (self.draft.prepared_inspect_methods.items) |prepared| {
+            if (self.graph.sameClass(prepared.value_node, node)) return false;
+        }
+        const ret_node = try self.graph.importMono(str_ty);
+        const request_node = try self.graphFunctionNode(&.{node}, ret_node);
+        const callee = try self.methodTargetCalleeAtNode(lookup, request_node, null);
+        try self.draft.prepared_inspect_methods.append(self.allocator, .{
+            .value_node = node,
+            .callee = callee,
+        });
+        return true;
     }
 
     fn inspectTuple(self: *BodyContext, value: DraftExprId, items: anytype, str_ty: Type.TypeId) Allocator.Error!DraftExprId {
