@@ -1172,7 +1172,7 @@ is_named_color = |str| {
 			(e-block
 				(s-let
 					(p-assign (ident "colors"))
-					(e-call (constraint-fn-var 1271)
+					(e-call (constraint-fn-var 1280)
 						(e-lookup-external
 							(builtin))
 						(e-list
@@ -1183,7 +1183,7 @@ is_named_color = |str| {
 									(e-literal (string "AntiqueWhite")))
 								(e-string
 									(e-literal (string "Aqua")))))))
-				(e-dispatch-call (method "contains") (constraint-fn-var 1273)
+				(e-dispatch-call (method "contains") (constraint-fn-var 1282)
 					(receiver
 						(e-lookup-local
 							(p-assign (ident "colors"))))
@@ -1223,9 +1223,9 @@ is_named_color = |str| {
 	(s-expect
 		(e-method-eq (negated "false")
 			(lhs
-				(e-dispatch-call (method "map_ok") (constraint-fn-var 1394)
+				(e-dispatch-call (method "map_ok") (constraint-fn-var 1409)
 					(receiver
-						(e-call (constraint-fn-var 1392)
+						(e-call (constraint-fn-var 1407)
 							(e-lookup-local
 								(p-assign (ident "hex")))
 							(e-string
@@ -1248,7 +1248,7 @@ is_named_color = |str| {
 		(patt (type "Str -> Try(Color, [InvalidHex(Str)])"))
 		(patt (type "Color -> Str"))
 		(patt (type "Str -> Try(Color, [UnknownColor(Str)])"))
-		(patt (type "a -> Bool where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)]), a.is_eq : a, a -> Bool]")))
+		(patt (type "a -> Bool where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)]), a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]")))
 	(type_decls
 		(nominal (type "Color")
 			(ty-header (name "Color"))))
@@ -1258,5 +1258,5 @@ is_named_color = |str| {
 		(expr (type "Str -> Try(Color, [InvalidHex(Str)])"))
 		(expr (type "Color -> Str"))
 		(expr (type "Str -> Try(Color, [UnknownColor(Str)])"))
-		(expr (type "a -> Bool where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)]), a.is_eq : a, a -> Bool]"))))
+		(expr (type "a -> Bool where [a.from_quote : Str -> Try(a, [BadQuotedBytes(Str)]), a.is_eq : a, a -> Bool, a.to_hash : a, Hasher -> Hasher]"))))
 ~~~
