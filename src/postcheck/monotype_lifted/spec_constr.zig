@@ -6434,7 +6434,7 @@ const Cloner = struct {
             index += 1;
         }
         if (plan.aggregate) |local| {
-            if (self.exit_tuple_items.contains(local)) Common.invariant("loop result projection rebound an active aggregate");
+            if (self.exit_tuple_items.contains(local)) Common.invariant("loop exit selection rebound an active aggregate");
             try self.exit_tuple_items.put(local, tuple_items.?);
         }
         defer if (plan.aggregate) |local| {
@@ -6497,7 +6497,7 @@ const Cloner = struct {
     /// Rewind a rejected loop attempt when all of its output is still private to
     /// that attempt. Callable workers and active let-of-case joins can retain
     /// or mutate references outside the append-only program suffix, so those
-    /// attempts keep their unreachable output. Exit projection never retries.
+    /// attempts keep their unreachable output. Exit selection never retries.
     fn rewindLoopAttempt(
         self: *Cloner,
         mark: LoopAttemptMark,
@@ -6533,7 +6533,7 @@ const Cloner = struct {
         selection: LoopExitSelection,
     ) Common.LowerError!Ast.ExprId {
         var bindings: BindingChain = .{};
-        // Projection discards construction, never strict work. Name every
+        // Exit selection discards tuple construction, never strict work. Name every
         // opaque leaf, including unselected components, in source order.
         const reusable = try self.cloneExprValueDemandingShapeInto(value_expr, &bindings);
         const args = try self.pass.allocator.alloc(Ast.ExprId, selection.kept_indices.len);
@@ -6544,8 +6544,8 @@ const Cloner = struct {
             }
             for (selection.kept_indices, args) |index, *out| out.* = try self.materialize(reusable.tuple.items[index]);
         } else {
-            // Runtime tuples and typed boundaries have an exact projection
-            // operation too. Keep their runtime representation boundary and
+            // Runtime tuples and typed boundaries have exact typed tuple reads
+            // too. Keep their runtime representation boundary and
             // evaluate the producer once, without building symbolic dead items.
             const receiver = try self.materialize(try self.makeReusableForMatch(
                 .{ .expr = try self.materialize(reusable) },
@@ -15089,7 +15089,7 @@ test "SpecConstr loop projection scan is stack safe on deep sequential expressio
 }
 
 // These fixtures exercise the exit ABI independently of front-end inlining.
-fn testExitProducer(program: *Ast.Program, ty: Type.TypeId, symbol: u32) !Ast.ExprId {
+fn testExitProducer(program: *Ast.Program, ty: Type.TypeId, symbol: u32) std.mem.Allocator.Error!Ast.ExprId {
     const fn_id = try program.addFn(.{
         .symbol = @enumFromInt(symbol),
         .args = .empty(),
@@ -15111,13 +15111,14 @@ test "loop exit projection evaluates an opaque producer once for multiple fields
     defer pass.deinit();
     var cloner = Cloner.initForLoopExitSelection(&pass);
     defer cloner.deinit();
+    const exit_join = pass.freshJoinPoint();
     const result = try cloner.cloneSelectedLoopExit(ty, producer, .{
         .source_ty = tuple_ty,
         .source_arity = 3,
         .kept_indices = &.{ 2, 0 },
         .kept_types = &.{ ty, ty },
         .transfer = .{ .jump = .{
-            .target = @enumFromInt(0),
+            .target = exit_join,
         } },
     });
     const block = program.getExpr(result).data.block;
@@ -15127,6 +15128,7 @@ test "loop exit projection evaluates an opaque producer once for multiple fields
     try std.testing.expectEqual(@as(u32, 0), program.getExpr(binding.value).data.call_proc.args.len);
     const local = program.getPat(binding.pat).data.bind;
     const jump = program.getExpr(block.final_expr).data.jump;
+    try std.testing.expectEqual(exit_join, jump.target);
     try std.testing.expectEqual(@as(u32, 2), jump.args.len);
     for ([_]u32{ 2, 0 }, 0..) |field, i| {
         const read = program.getExpr(GuardedList.at(program.exprSpan(jump.args), i));
