@@ -2,6 +2,7 @@
 
 const TestCase = @import("parallel_runner.zig").TestCase;
 
+/// Set API and storage regressions shared by the evaluator backends.
 pub const tests = [_]TestCase{
     .{
         .name = "Set.JSON parsing deduplicates and encoding preserves iteration order",
