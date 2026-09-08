@@ -802,6 +802,8 @@ const SpecEvidence = union(enum) {
         index: u32,
         independent_callable: bool,
     },
+    /// Abstract local scheme parameter, supplied by the checked use edge.
+    from_scheme: u32,
     /// The edge left the requirement's dispatcher unsolved: no value of that
     /// type can ever reach the dispatch. Monotype represents that non-returning
     /// path with an ordinary Roc runtime crash instead of a dispatch call.
@@ -1869,19 +1871,25 @@ fn specEvidenceEql(a: SpecEvidence, b: SpecEvidence) bool {
                 }
                 break :blk true;
             },
-            .structural, .from_callable, .unreachable_value, .checked_error => false,
+            .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => false,
         },
         .structural => |a_structural| switch (b) {
             .structural => |b_structural| specStructuralEvidenceEql(a_structural, b_structural),
-            .target, .from_callable, .unreachable_value, .checked_error => false,
+            .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => false,
         },
         .from_callable => |a_use| switch (b) {
             .from_callable => |b_use| std.meta.eql(a_use, b_use),
-            .target, .structural, .unreachable_value, .checked_error => false,
+            .target, .structural, .from_scheme, .unreachable_value, .checked_error => false,
         },
+        .from_scheme => |index| b == .from_scheme and b.from_scheme == index,
         .unreachable_value => b == .unreachable_value,
         .checked_error => b == .checked_error,
     };
+}
+
+fn codecEvidenceIdentity(evidence: CheckedSpecStructuralEvidence) ?static_dispatch.GeneratedCodecDerivationId {
+    const id = evidence.evidence.generated_codec_derivation orelse return null;
+    return evidence.view.static_dispatch_plans.generated_codec_derivations[@intFromEnum(id)].identity;
 }
 
 fn specStructuralEvidenceEql(left: SpecStructuralEvidence, right: SpecStructuralEvidence) bool {
@@ -1891,7 +1899,7 @@ fn specStructuralEvidenceEql(left: SpecStructuralEvidence, right: SpecStructural
     const left_checked = left.checked.?;
     const right_checked = right.checked.?;
     return moduleBytesEqual(left_checked.view.key.bytes, right_checked.view.key.bytes) and
-        left_checked.evidence.generated_codec_derivation == right_checked.evidence.generated_codec_derivation and
+        codecEvidenceIdentity(left_checked) == codecEvidenceIdentity(right_checked) and
         std.meta.eql(
             left_checked.view.types.rootKey(left_checked.evidence.dispatcher_ty),
             right_checked.view.types.rootKey(right_checked.evidence.dispatcher_ty),
@@ -1929,7 +1937,7 @@ fn specEvidenceRequiresLocalContext(evidence: []const SpecEvidence) bool {
                 .synthesize => {},
             }
         },
-        .structural, .from_callable, .unreachable_value, .checked_error => {},
+        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
     };
     return false;
 }
@@ -1941,7 +1949,7 @@ fn specEvidenceContainsStructural(evidence: []const SpecEvidence) bool {
             .synthesize => {},
         },
         .structural => return true,
-        .from_callable, .unreachable_value, .checked_error => {},
+        .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
     };
     return false;
 }
@@ -2017,7 +2025,7 @@ fn specEvidenceLocalOwner(
                 .synthesize => {},
             }
         },
-        .structural, .from_callable, .unreachable_value, .checked_error => {},
+        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
     };
     return owner;
 }
@@ -4551,6 +4559,7 @@ const Builder = struct {
                     .callable_key = checked_structural.view.types.rootKey(checked_structural.evidence.callable_ty),
                     .callable_ty = checked_structural.evidence.callable_ty,
                     .generated_codec_derivation = checked_structural.evidence.generated_codec_derivation,
+                    .generated_codec_identity = codecEvidenceIdentity(checked_structural),
                 } else null,
             } }),
             .from_callable => |use| {
@@ -4559,6 +4568,7 @@ const Builder = struct {
                     .independent_callable = use.independent_callable,
                 } });
             },
+            .from_scheme => |index| try nodes.append(self.allocator, .{ .from_scheme = index }),
             .unreachable_value => try nodes.append(self.allocator, .unreachable_value),
             .checked_error => try nodes.append(self.allocator, .checked_error),
         };
@@ -39852,6 +39862,12 @@ const BodyContext = struct {
                         {
                             Common.invariant("stored structural evidence checked type identity changed during restoration");
                         }
+                        const identity = if (stored_checked.generated_codec_derivation) |id|
+                            view.static_dispatch_plans.generated_codec_derivations[@intFromEnum(id)].identity
+                        else
+                            null;
+                        if (identity != stored_checked.generated_codec_identity)
+                            Common.invariant("stored codec proof identity changed during restoration");
                         break :restored .{
                             .view = view,
                             .evidence = static_dispatch.StructuralEvidence{
@@ -39871,6 +39887,7 @@ const BodyContext = struct {
                     .index = use.index,
                     .independent_callable = use.independent_callable,
                 } },
+                .from_scheme => |index| .{ .from_scheme = index },
                 .unreachable_value => .unreachable_value,
                 .checked_error => .checked_error,
             };
@@ -40014,7 +40031,7 @@ const BodyContext = struct {
                     );
                 }
             },
-            .target, .structural, .unreachable_value, .checked_error => {},
+            .target, .structural, .from_scheme, .unreachable_value, .checked_error => {},
         };
         return resolved;
     }
@@ -40374,7 +40391,7 @@ const BodyContext = struct {
                         .index = use.index,
                         .independent_callable = true,
                     } },
-                    .structural, .unreachable_value, .checked_error => entry,
+                    .structural, .from_scheme, .unreachable_value, .checked_error => entry,
                 };
             },
             .structural => |evidence| .{ .structural = .{
@@ -40383,7 +40400,7 @@ const BodyContext = struct {
             } },
             .unreachable_value => .unreachable_value,
             .checked_error => .checked_error,
-            .from_callable => Common.invariant("callable-derived checked evidence escaped a nested procedure construction recipe"),
+            .from_callable, .from_scheme => Common.invariant("symbolic checked evidence escaped a nested procedure construction recipe"),
         };
     }
 
@@ -40452,7 +40469,7 @@ const BodyContext = struct {
                 }
             },
             .structural => |structural| if (structural.checked != null) return true,
-            .from_callable => return true,
+            .from_callable, .from_scheme => return true,
             .unreachable_value, .checked_error => return true,
         };
         return false;
@@ -40489,9 +40506,9 @@ const BodyContext = struct {
                     merged.nested = contract_nested;
                     break :blk .{ .target = merged };
                 },
-                .structural, .from_callable, .unreachable_value, .checked_error => Common.invariant("checked target contract differed from substitution-derived evidence kind"),
+                .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("checked target contract differed from substitution-derived evidence kind"),
             },
-            .structural, .from_callable, .unreachable_value, .checked_error => contract,
+            .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => contract,
         };
     }
 
@@ -40517,7 +40534,17 @@ const BodyContext = struct {
         defer self.allocator.free(derived);
         @memset(derived, false);
         for (schema.params, 0..) |param, k| {
-            if (param.slot >= subst.len) Common.invariant("requirement receiver slot was outside the request substitution");
+            if (param.source == .scheme_requirement) {
+                if (param.slot != null) Common.invariant("composite requirement occupied a quantified-variable slot");
+                const refs = site_refs orelse Common.invariant("composite scheme requirement had no checked call-site evidence");
+                out[k] = if (refs[k].resolution == .from_scheme)
+                    .{ .from_scheme = @intCast(k) }
+                else
+                    try self.materializeCheckedEvidenceRef(site_view, refs[k], param, purpose);
+                derived[k] = true;
+                continue;
+            }
+            if (param.slot.? >= subst.len) Common.invariant("requirement receiver slot was outside the request substitution");
             const site_ref: ?static_dispatch.CheckedEvidence = if (site_refs) |refs| refs[k] else null;
             if (site_ref) |ref| switch (ref.resolution) {
                 .structural => |evidence| {
@@ -40535,6 +40562,7 @@ const BodyContext = struct {
                     out[k] = .checked_error;
                     derived[k] = true;
                 },
+                .from_scheme => Common.invariant("abstract scheme evidence named an ordinary callable parameter"),
                 .from_callable => {
                     out[k] = .{ .from_callable = .{
                         .index = @intCast(k),
@@ -40556,6 +40584,10 @@ const BodyContext = struct {
                         out[k] = .checked_error;
                         derived[k] = true;
                     },
+                    .from_scheme => |index| {
+                        out[k] = .{ .from_scheme = index };
+                        derived[k] = true;
+                    },
                     .from_callable => |use| {
                         out[k] = .{ .from_callable = .{
                             .index = use.index,
@@ -40567,7 +40599,7 @@ const BodyContext = struct {
                 },
                 .direct => {},
             };
-            if (subst[param.slot] == .checked_error) {
+            if (subst[param.slot.?] == .checked_error) {
                 out[k] = .checked_error;
                 derived[k] = true;
             }
@@ -40592,14 +40624,14 @@ const BodyContext = struct {
             progress = false;
             for (schema.params, 0..) |param, k| {
                 if (derived[k]) continue;
-                const node = subst[param.slot].node;
+                const node = subst[param.slot.?].node;
                 if (self.forwardedRequirement(node, param.method)) |forwarded| switch (forwarded) {
                     // Callable targets are selected again from this scheme's
                     // substitution below. Terminal evidence belongs to the
                     // enclosing requirement on this exact cell: structural
                     // codecs in particular carry their producer-authored
                     // checked contract only on that entry.
-                    .structural, .from_callable, .unreachable_value, .checked_error => {
+                    .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {
                         out[k] = forwarded;
                         derived[k] = true;
                         progress = true;
@@ -40628,14 +40660,14 @@ const BodyContext = struct {
                         }
                         try self.relateTargetToConstraint(target, &scheme_ctx.?, param);
                     },
-                    .structural, .from_callable, .unreachable_value, .checked_error => {},
+                    .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
                 }
             }
         }
 
         for (schema.params, 0..) |param, k| {
             if (derived[k]) continue;
-            out[k] = try self.deriveOpenRequirement(schema.view, param, subst[param.slot].node, purpose);
+            out[k] = try self.deriveOpenRequirement(schema.view, param, subst[param.slot.?].node, purpose);
         }
         if (site_refs) |refs| {
             for (refs, schema.params, out) |ref, param, *entry| switch (ref.resolution) {
@@ -40646,7 +40678,7 @@ const BodyContext = struct {
                         true,
                     );
                 },
-                .structural, .from_callable, .checked_error, .unreachable_value => {},
+                .structural, .from_callable, .from_scheme, .checked_error, .unreachable_value => {},
             };
         }
         return out;
@@ -40693,7 +40725,7 @@ const BodyContext = struct {
     /// carries the exact relation that closes it.
     fn evidenceParamRequiresConstraintRelation(param: static_dispatch.EvidenceParamRecord) bool {
         return switch (param.source) {
-            .constraint_callable, .use_site_only => true,
+            .scheme_requirement, .constraint_callable, .use_site_only => true,
             .scheme_callable, .explicit_default, .erased_row_remainder => false,
         };
     }
@@ -40743,7 +40775,8 @@ const BodyContext = struct {
             }
             for (schema.params, 0..) |param, k| {
                 if (param.method != method) continue;
-                const slot = switch (current.subst[param.slot]) {
+                const receiver_slot = param.slot orelse continue;
+                const slot = switch (current.subst[receiver_slot]) {
                     .node => |slot_node| slot_node,
                     .checked_error => continue,
                 };
@@ -40792,7 +40825,7 @@ const BodyContext = struct {
                     Common.invariant("dispatch target evidence was absent from its lexical chain");
                 const target = switch (entry) {
                     .target => |target| target,
-                    .structural, .from_callable, .unreachable_value, .checked_error => Common.invariant("dispatch target evidence was not a callable target"),
+                    .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("dispatch target evidence was not a callable target"),
                 };
                 if (dependent.independent_callable) break :blk .derive;
                 break :blk switch (target.nested) {
@@ -40857,7 +40890,7 @@ const BodyContext = struct {
                     Common.invariant("iterator target evidence was absent from its lexical chain");
                 const target = switch (entry) {
                     .target => |target| target,
-                    .structural, .from_callable, .unreachable_value, .checked_error => Common.invariant("iterator target evidence was not a callable target"),
+                    .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("iterator target evidence was not a callable target"),
                 };
                 if (dependent.independent_callable) break :blk .derive;
                 break :blk switch (target.nested) {
@@ -40908,7 +40941,7 @@ const BodyContext = struct {
                     .structural => |derivation| .{ .structural = derivation },
                     // Unreachable and checked-error dispatches crash before
                     // target resolution.
-                    .from_callable, .unreachable_value, .checked_error => null,
+                    .from_callable, .from_scheme, .unreachable_value, .checked_error => null,
                 };
             },
             .structural => |derivation| return .{ .structural = .{
@@ -41044,6 +41077,7 @@ const BodyContext = struct {
             .checked_error => .checked_error,
             .evidence_dependent => |dependent| if (self.evidence.at(dependent.index)) |entry| switch (entry) {
                 .from_callable, .unreachable_value => .unreachable_value,
+                .from_scheme => Common.invariant("abstract scheme requirement reached executable dispatch without use evidence"),
                 .checked_error => .checked_error,
                 .target, .structural => null,
             } else Common.invariant("dispatch runtime evidence was absent from its lexical chain"),
@@ -41636,7 +41670,7 @@ const BodyContext = struct {
                     if (!evidenceParamRequiresConstraintRelation(param)) continue;
                     switch (entry) {
                         .target => |target| try self.relateTargetToConstraint(target, target_ctx, param),
-                        .structural, .from_callable, .unreachable_value, .checked_error => {},
+                        .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => {},
                     }
                 }
                 const derived = try self.deriveEvidenceVector(
@@ -52466,7 +52500,7 @@ const BodyContext = struct {
                         target.instantiation,
                     .local_proc_context = target.local_proc_context,
                 },
-                .structural, .from_callable, .unreachable_value, .checked_error => Common.invariant("iterator dispatch evidence was not a resolved callable target"),
+                .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => Common.invariant("iterator dispatch evidence was not a resolved callable target"),
             } else Common.invariant("iterator method evidence was absent from its lexical chain"),
             .direct_pending => Common.invariant("unfinalized iterator direct call reached Monotype"),
             .structural, .checked_error, .@"unreachable" => Common.invariant("iterator dispatch plan resolution was not a callable target"),

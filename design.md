@@ -3396,6 +3396,50 @@ identity. Boxy and Monotype consume the identity directly; they must not find a
 derivation by comparing runtime types or resolve one of its calls by looking up
 the method name in a registry.
 
+The evidence schema of a binding includes its explicitly captured codec
+requirements as well as constraints attached to variables in its callable.
+Publication enumerates that complete schema once per owning scheme and reuses
+it for aliases and use sites. A captured codec requirement names its exact
+receiver and callable relation; a composite receiver is not a quantified
+variable and occupies no specialization-substitution slot. Such a requirement
+is supplied by checked use-site evidence, either a validated contract or an
+explicit reference to an enclosing requirement. Evidence resolution consults
+that relation before classifying a structural receiver. The receiver's known
+outer shape is not proof that its generic components have a concrete codec.
+Imported pristine schemes retain these requirements under the same substitution
+that copied their callable, including synthetic scheme roots without CIR nodes.
+
+When a local scheme leaves the solver's active lexical scope, its captured
+codec requirements are retained as publication records. Retiring solver work
+does not discard the contract of the local procedure's checked body. Synthetic
+imported schemes and ordinary source bindings retain their producer-authored
+classification through serialization and rechecking.
+
+A generic local declaration binds its own composite evidence parameters. Its
+construction recipe records those entries as `from_scheme`, separately from
+callable-path projections and captured enclosing evidence. Checked use edges
+supply those parameters before executable dispatch; neither publication nor
+lowering may derive a concrete codec from the declaration's generic shape.
+
+A forwarded composite requirement carries both its lexical evidence coordinate
+and the absolute index of its owner parameter in the checked module's evidence
+pool. Monotype uses the lexical coordinate; Boxy uses the owner index to bind
+and capture a dictionary without recovering ownership from a receiver type.
+These source identities transport checked evidence and do not add specialization
+key components. Publication caches the complete schema by its checker-authored
+owner; aliases and local scopes share the same evidence and quantified-variable
+pool ranges. Schemes whose checker-authored codec requirements require
+instantiation have no concrete template-root evidence. Selecting one as a root
+requires an explicit instantiated root edge with its own evidence.
+
+Completed generated codec proof graphs also carry a producer-proven identity
+for specialization reuse. Type-role keys and call metadata select candidates; equality
+compares all source and frozen roles, every method selection and conditional
+edge, and nested evidence and substitutions. One alpha-equivalence bijection
+covers all type roots, including cross-root sharing. Cycles are compared as
+finite proof graphs. Source contracts remain intact for replay; specialization
+equality uses the shared identity rather than the per-use derivation index.
+
 Monotype instantiates a generated-codec contract once at the codec boundary.
 While the specialization graph is mutable, codec preparation relates the
 contract's source and frozen constructor roles to that boundary, instantiates
@@ -8413,8 +8457,10 @@ own callable relation.
 
 **Edges supply substitutions.** A scheme's quantified variables are its
 identity variables in identity order (`scheme_vars` on the checked template
-or dispatch scope); each evidence parameter names the slot its dispatcher
-occupies. Checking persists every scheme edge: an ordinary instantiation
+or dispatch scope), with any additional identities from explicit scheme
+requirements appended under the same numbering. An evidence parameter on an
+identity variable names the slot its dispatcher occupies. A composite scheme
+requirement has no such slot and consumes its checked evidence directly. Checking persists every scheme edge: an ordinary instantiation
 records the (pristine var, fresh var) pair of every quantified variable it
 copied (an orphan copy of an annotation or expected type is not a use of any
 scheme: it records no edge of its own and leaves every pending record slot to

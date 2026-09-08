@@ -297,7 +297,7 @@ pub fn fnEvidenceDigest(
     head: ?u32,
 ) EvidenceDigest {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    writeBytes(&hasher, "roc.monotype.fn_evidence.v2");
+    writeBytes(&hasher, "roc.monotype.fn_evidence.v3");
     writeU32(&hasher, @intCast(evidence.len));
     for (evidence) |entry| {
         writeU8(&hasher, @intFromEnum(entry));
@@ -328,7 +328,7 @@ pub fn fnEvidenceDigest(
                     writeBytes(&hasher, &checked_structural.callable_key.bytes);
                     writeOptionalU32(
                         &hasher,
-                        if (checked_structural.generated_codec_derivation) |derivation|
+                        if (checked_structural.generated_codec_identity) |derivation|
                             @intFromEnum(derivation)
                         else
                             null,
@@ -339,6 +339,7 @@ pub fn fnEvidenceDigest(
                 writeU32(&hasher, use.index);
                 writeU8(&hasher, @intFromBool(use.independent_callable));
             },
+            .from_scheme => |index| writeU32(&hasher, index),
             .unreachable_value, .checked_error => {},
         }
     }
@@ -374,16 +375,17 @@ pub fn fnEvidenceEql(
                 .target => |right_target| {
                     if (!fnEvidenceTargetEql(left_target, right_target)) return false;
                 },
-                .structural, .from_callable, .unreachable_value, .checked_error => return false,
+                .structural, .from_callable, .from_scheme, .unreachable_value, .checked_error => return false,
             },
             .structural => |left_structural| switch (right) {
-                .structural => |right_structural| if (!std.meta.eql(left_structural, right_structural)) return false,
-                .target, .from_callable, .unreachable_value, .checked_error => return false,
+                .structural => |right_structural| if (!left_structural.identityEql(right_structural)) return false,
+                .target, .from_callable, .from_scheme, .unreachable_value, .checked_error => return false,
             },
             .from_callable => |left_use| switch (right) {
                 .from_callable => |right_use| if (!std.meta.eql(left_use, right_use)) return false,
-                .target, .structural, .unreachable_value, .checked_error => return false,
+                .target, .structural, .from_scheme, .unreachable_value, .checked_error => return false,
             },
+            .from_scheme => |index| if (right != .from_scheme or right.from_scheme != index) return false,
             .unreachable_value => if (right != .unreachable_value) return false,
             .checked_error => if (right != .checked_error) return false,
         }
@@ -2567,4 +2569,32 @@ fn testFnSource(mono_fn_ty: Type.TypeId) FnTemplate {
         .source_fn_key = .{},
         .mono_fn_ty = mono_fn_ty,
     };
+}
+
+test "codec function evidence identity excludes per-use replay addresses" {
+    const Evidence = check.ConstStore.ConstFnEvidence;
+    const frames = [_]check.ConstStore.ConstFnEvidenceFrame{
+        check.ConstStore.ConstFnEvidenceFrame.init(.root, null, 0, 1),
+    };
+    const left = [_]Evidence{.{ .structural = .{
+        .derivation = .encoder,
+        .checked = .{
+            .view = .{ .bytes = [_]u8{1} ** 32 },
+            .dispatcher_key = .{ .bytes = [_]u8{2} ** 32 },
+            .dispatcher_ty = @enumFromInt(0),
+            .callable_key = .{ .bytes = [_]u8{3} ** 32 },
+            .callable_ty = @enumFromInt(1),
+            .generated_codec_derivation = @enumFromInt(0),
+            .generated_codec_identity = @enumFromInt(0),
+        },
+    } }};
+    var right = left;
+    right[0].structural.checked.?.dispatcher_ty = @enumFromInt(7);
+    right[0].structural.checked.?.callable_ty = @enumFromInt(8);
+    right[0].structural.checked.?.generated_codec_derivation = @enumFromInt(1);
+    try std.testing.expect(fnEvidenceEql(&left, &frames, 0, &right, &frames, 0));
+    try std.testing.expectEqual(fnEvidenceDigest(&left, &frames, 0), fnEvidenceDigest(&right, &frames, 0));
+    right[0].structural.checked.?.generated_codec_identity = @enumFromInt(1);
+    try std.testing.expect(!fnEvidenceEql(&left, &frames, 0, &right, &frames, 0));
+    try std.testing.expect(!std.meta.eql(fnEvidenceDigest(&left, &frames, 0), fnEvidenceDigest(&right, &frames, 0)));
 }
