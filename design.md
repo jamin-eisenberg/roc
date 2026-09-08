@@ -13322,6 +13322,17 @@ is the data that separates them. `provides` follows the same rule: the
 exported symbol set is part of the platform relation, and two exports remain
 two exports even when they name the same Roc function.
 
+Host compilation selects only `provided_export` procedure roots before lowering.
+Platform requirements remain checked internal bindings reached through ordinary
+procedure references; their ABI category does not grant host visibility. Each
+provided root records its exact dense declaration ID in the checked export table.
+The existing LIR root order retains the checked root identity, and its position
+in the selected root sequence determines the host dispatch ordinal. Native output,
+shims, and images consume that same sequence without independently filtering it.
+Symbol lookup follows the declaration ID directly, never a source-name search.
+Run images copy names because they outlive checked modules; linked output borrows
+them while those modules remain alive.
+
 ### Sealed Roc Object Boundary
 
 Before any platform object participates in symbol resolution, every compiled
