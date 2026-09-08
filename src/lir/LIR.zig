@@ -926,6 +926,10 @@ pub const CFStmt = union(enum) {
         /// so the in-place branch is never taken there. Target-independent
         /// because both widths are stored; ignored by every other op.
         interchangeable: layout.WidthValues(bool) = layout.WidthValues(bool).both(true, true),
+        /// Exact in-range byte alignment count proved by range analysis.
+        /// Only `simd_concat_shift_bytes` uses this; null retains the dynamic
+        /// operation. Backends consume this fact without inspecting definitions.
+        simd_concat_count: ?u5 = null,
         args: LocalSpan,
         next: CFStmtId,
     },
