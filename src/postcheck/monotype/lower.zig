@@ -23297,12 +23297,19 @@ const BodyContext = struct {
         );
 
         var body_ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, view, self.method_scope, wrapper.template, self.graph, self.draft);
-        body_ctx.evidence = rootEvidence(wrapper.template, self.restore_evidence.vector);
+        defer body_ctx.deinit();
+        const entry_template = view.templates.get(wrapper.template.template);
+        const schema = templateSchemaIn(view, &entry_template);
+        const subst = try body_ctx.substitutionFromCheckedTypes(view, schema.scheme_vars);
+        body_ctx.evidence = rootEvidenceWithSubstitution(wrapper.template, schema, .{
+            .subst = subst,
+            .vector = self.restore_evidence.vector,
+        });
+        try body_ctx.seedSubstitution(schema, subst);
         body_ctx.frozen_sealed_emission = self.frozen_sealed_emission;
         body_ctx.frozen_type_finals = self.frozen_type_finals;
         body_ctx.frozen_codec_calls = self.frozen_codec_calls;
         body_ctx.frozen_field_defaults = self.frozen_field_defaults;
-        defer body_ctx.deinit();
         const root_fn_key = Ast.fnTemplateDigest(wrapper_template, self.typeStore(), self.nameStore());
         body_ctx.owner_context_fn_key = root_fn_key;
         body_ctx.current_fn_key = root_fn_key;
@@ -23354,12 +23361,19 @@ const BodyContext = struct {
             Common.invariant("callable eval template root had no checked entry wrapper");
 
         var body_ctx = try BodyContext.initWithMethodScope(self.allocator, self.builder, view, self.method_scope, wrapper.template, self.graph, self.draft);
-        body_ctx.evidence = rootEvidence(wrapper.template, self.restore_evidence.vector);
+        defer body_ctx.deinit();
+        const entry_template = view.templates.get(wrapper.template.template);
+        const schema = templateSchemaIn(view, &entry_template);
+        const subst = try body_ctx.substitutionFromCheckedTypes(view, schema.scheme_vars);
+        body_ctx.evidence = rootEvidenceWithSubstitution(wrapper.template, schema, .{
+            .subst = subst,
+            .vector = self.restore_evidence.vector,
+        });
+        try body_ctx.seedSubstitution(schema, subst);
         body_ctx.frozen_sealed_emission = self.frozen_sealed_emission;
         body_ctx.frozen_type_finals = self.frozen_type_finals;
         body_ctx.frozen_codec_calls = self.frozen_codec_calls;
         body_ctx.frozen_field_defaults = self.frozen_field_defaults;
-        defer body_ctx.deinit();
         const root_fn_key = view.types.rootKey(wrapper.checked_fn_root);
         body_ctx.owner_context_fn_key = root_fn_key;
         body_ctx.current_fn_key = root_fn_key;

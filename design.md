@@ -7416,7 +7416,9 @@ retained hidden method contracts. Descendant contexts then use ordinary live
 bindings; decoding stored evidence never attaches graph cells to durable data.
 Restoring a compile-time evaluation template installs its checked scheme and
 fresh substitution in the body context even when its method evidence is already
-supplied or empty. Nested bodies consume that frame's exact type bindings.
+supplied or empty. Pending callable evaluation wrappers install the same frame
+before lowering their bodies, whether the requested callable type is sealed or
+still a graph node. Nested bodies consume that frame's exact type bindings.
 
 Type-only instantiation state is separate from operational body-lowering state.
 Creating a fresh checked-type instance swaps only its exact scope, checked-node
