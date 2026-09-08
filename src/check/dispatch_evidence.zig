@@ -190,6 +190,8 @@ pub fn enumerateEvidenceParams(
     return enumerateEvidenceParamsWithRequirements(gpa, store, root, &.{}, scratch, out);
 }
 
+/// Captured codec requirement retaining its receiver, callable constraint, and
+/// checker-authored need for instantiation before selecting a concrete codec.
 pub const SchemeRequirement = struct {
     receiver: Var,
     constraint: StaticDispatchConstraint,

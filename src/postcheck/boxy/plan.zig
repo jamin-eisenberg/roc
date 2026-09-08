@@ -281,12 +281,13 @@ pub const WorkerEvidenceDescriptorParam = struct {
     hidden_desc_index: u32,
 };
 
-/// Hidden worker parameter that supplies one or more method dictionaries.
+/// Checked module and absolute evidence-pool index of a scheme requirement.
 pub const SchemeDictionaryKey = struct {
     module: checked.ModuleId,
     param: u32,
 };
 
+/// Hidden worker parameter that supplies one or more method dictionaries.
 pub const HiddenDictionaryParam = struct {
     scheme_param: ?SchemeDictionaryKey = null,
     /// Explicit scheme requirements have their own checked evidence slot.
