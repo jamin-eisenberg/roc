@@ -2481,8 +2481,8 @@ These top-level extraction roots are required binding definitions, not optional
 runtime-body hoists. Post-solve pruning must retain every well-checked top-level
 extraction independently of the optional-hoist dependency predicate. Its full
 checked body uses ordinary top-level constant/callable evaluation rules,
-including `expect`, `dbg`, loops, and mutable intermediate values. Publication
-retains each binder's own source scheme and independently decides whether its
+including `expect`, `dbg`, loops, and mutable intermediate values. CheckedModule
+construction retains each binder's own source scheme and independently decides whether its
 result is context-free or requires specialization; retaining a definition does
 not force its type to be concrete or make a runtime-body expression hoistable.
 
