@@ -2992,7 +2992,7 @@ Every live literal-origin record leaves checking with one explicit resolution:
 Literal-pattern deferred static-dispatch constraint groups are owned by the
 enclosing match, lambda, loop, binding statement, or top-level definition.
 Pattern polarity and failure ownership are independent: an annotated parameter
-still belongs to its function. A captured lambda records its executable closure
+still belongs to its function. A captured lambda records its CIR closure
 wrapper as the owner; function errors enter the existing erroneous-value sweep
 so checking finishes the lambda before replacing its structure. The checker
 passes the exact owner node through recursive pattern checking and records it
@@ -3006,7 +3006,7 @@ diagnostic recovery replaces the owning expression or statement with a checked
 `runtime_error`. A rejected top-level destructure retains its binder identities,
 replaces its literal leaves and RHS with checked errors, marks every name it
 bound erroneous, and invalidates its compile-time extraction/validation work.
-Each bound name keeps an explicit `pattern_error` selected root that publishes
+Each bound name keeps an explicit `pattern_error` selected root that outputs
 a typed runtime-error constant, including callable-valued names. This preserves
 the exported binding identity without evaluating the rejected pattern;
 a reachable `checked_error` literal pattern may not enter a checked body. A
