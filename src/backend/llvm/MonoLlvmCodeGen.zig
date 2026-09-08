@@ -3026,7 +3026,7 @@ pub const MonoLlvmCodeGen = struct {
                 try work.append(wa, .{ .node = assign.next });
             },
             .assign_low_level => |assign| {
-                try self.emitLowLevel(assign.target, assign.op, assign.args, assign.unique_args, assign.interchangeable);
+                try self.emitLowLevel(assign.target, assign.op, assign.args, assign.unique_args, assign.interchangeable, assign.simd_concat_count);
                 try work.append(wa, .{ .node = assign.next });
             },
             .assign_list => |assign| {
@@ -4212,7 +4212,7 @@ pub const MonoLlvmCodeGen = struct {
         }
     }
 
-    fn emitLowLevel(self: *MonoLlvmCodeGen, target: LocalId, op: lir.LowLevel, args: LocalSpan, unique_args: u64, interchangeable: layout.WidthValues(bool)) Error!void {
+    fn emitLowLevel(self: *MonoLlvmCodeGen, target: LocalId, op: lir.LowLevel, args: LocalSpan, unique_args: u64, interchangeable: layout.WidthValues(bool), simd_concat_count: ?u5) Error!void {
         try self.prepareLocalWrite(target);
         const arg_locals = self.store.getLocalSpan(args);
         if (!op.acceptsStrViewArgs()) {
@@ -4321,7 +4321,7 @@ pub const MonoLlvmCodeGen = struct {
             .simd_sum_lanes_wrap,
             .simd_clmul_lo,
             .simd_clmul_hi,
-            => try self.emitSimdLowLevel(target, op, arg_locals),
+            => try self.emitSimdLowLevel(target, op, arg_locals, simd_concat_count),
             .num_negate, .num_negate_checked => try self.emitNumericNegate(target, op, GuardedList.at(arg_locals, 0)),
             .num_abs, .num_abs_checked => try self.emitNumericAbs(target, op, GuardedList.at(arg_locals, 0)),
             .num_abs_diff => try self.emitNumericAbsDiff(target, arg_locals),
@@ -5636,7 +5636,7 @@ pub const MonoLlvmCodeGen = struct {
         return wip.select(.normal, above, high, at_least_low, "") catch return error.OutOfMemory;
     }
 
-    fn emitSimdLowLevel(self: *MonoLlvmCodeGen, target: LocalId, op: lir.LowLevel, args: anytype) Error!void {
+    fn emitSimdLowLevel(self: *MonoLlvmCodeGen, target: LocalId, op: lir.LowLevel, args: anytype, concat_count: ?u5) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
         const target_layout = self.localLayout(target);
@@ -5812,7 +5812,7 @@ pub const MonoLlvmCodeGen = struct {
             .simd_sum_lanes_wrap,
             .simd_clmul_lo,
             .simd_clmul_hi,
-            => try self.emitSimdComplex(target, op, args, vector, destination_vector),
+            => try self.emitSimdComplex(target, op, args, vector, destination_vector, concat_count),
         }
     }
 
@@ -5842,6 +5842,7 @@ pub const MonoLlvmCodeGen = struct {
         args: anytype,
         vector: layout.Vector,
         destination_vector: ?layout.Vector,
+        concat_count: ?u5,
     ) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
@@ -5990,7 +5991,7 @@ pub const MonoLlvmCodeGen = struct {
                 try self.storeSimdLocal(target, wip.shuffleVector(lhs, rhs, try self.simdShuffleMask(indices[0..count]), "") catch return error.OutOfMemory);
             },
             .simd_table_lookup => try self.emitSimdTableLookup(target, args),
-            .simd_concat_shift_bytes => try self.emitSimdConcatShift(target, args),
+            .simd_concat_shift_bytes => try self.emitSimdConcatShift(target, args, concat_count),
             .simd_widen_lo, .simd_widen_hi => {
                 const destination = destination_vector orelse return error.CompilationFailed;
                 const half = try self.simdShuffleHalf(try self.loadSimdLocal(GuardedList.at(args, 0)), vector, op == .simd_widen_hi);
@@ -6067,17 +6068,12 @@ pub const MonoLlvmCodeGen = struct {
         const wip = self.wip orelse return error.CompilationFailed;
         const value = try self.loadSimdLocal(GuardedList.at(args, 0));
         const result_ty = self.scalarType(self.localLayout(target));
-        var result = builder.intValue(result_ty, 0) catch return error.OutOfMemory;
-        for (0..vector.laneCount()) |i| {
-            const lane = wip.extractElement(value, builder.intValue(.i32, i) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
-            const sign = wip.bin(.lshr, lane, builder.intValue(lane.typeOfWip(wip), vector.laneBits() - 1) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
-            const bit = try self.coerceScalar(sign, result_ty, false);
-            const positioned = if (i == 0)
-                bit
-            else
-                wip.bin(.shl, bit, builder.intValue(result_ty, i) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
-            result = wip.bin(.@"or", result, positioned, "") catch return error.OutOfMemory;
-        }
+        // A packed predicate preserves exactly one MSB per lane, including
+        // arbitrary non-comparison inputs, without scalarizing the vector.
+        const signs = wip.icmp(.slt, value, builder.zeroInitValue(try self.simdType(vector)) catch return error.OutOfMemory, "") catch return error.OutOfMemory;
+        const mask_ty = builder.intType(vector.laneCount()) catch return error.OutOfMemory;
+        const mask = wip.cast(.bitcast, signs, mask_ty, "") catch return error.OutOfMemory;
+        const result = try self.coerceScalar(mask, result_ty, false);
         try self.storeScalar(self.slot(target).ptr, self.localLayout(target), result);
     }
 
@@ -6143,11 +6139,19 @@ pub const MonoLlvmCodeGen = struct {
         try self.storeSimdLocal(target, result);
     }
 
-    fn emitSimdConcatShift(self: *MonoLlvmCodeGen, target: LocalId, args: anytype) Error!void {
+    fn emitSimdConcatShift(self: *MonoLlvmCodeGen, target: LocalId, args: anytype, known_count: ?u5) Error!void {
         const builder = self.builder orelse return error.CompilationFailed;
         const wip = self.wip orelse return error.CompilationFailed;
         const lhs_vector = try self.loadSimdLocal(GuardedList.at(args, 0));
         const rhs_vector = try self.loadSimdLocal(GuardedList.at(args, 1));
+        if (known_count) |count| {
+            std.debug.assert(count <= 16);
+            var indices: [16]u32 = undefined;
+            for (&indices, 0..) |*index, i| index.* = @as(u32, count) + @as(u32, @intCast(i));
+            const result = wip.shuffleVector(lhs_vector, rhs_vector, try self.simdShuffleMask(&indices), "") catch return error.OutOfMemory;
+            try self.storeSimdLocal(target, result);
+            return;
+        }
         const count_arg = GuardedList.at(args, 2);
         const count = try self.coerceScalar(try self.loadScalar(self.slot(count_arg).ptr, self.localLayout(count_arg)), .i128, false);
         const zero = builder.intValue(.i128, 0) catch return error.OutOfMemory;
@@ -8035,7 +8039,7 @@ pub const MonoLlvmCodeGen = struct {
             // Symbol ABI: call the host's runtime symbol directly:
             // roc_dbg(bytes: [*]const u8, len: usize).
             const fn_ty = builder.fnType(.void, &.{ ptr_ty, self.ptrSizedIntType() }, .normal) catch return error.OutOfMemory;
-            const func = try self.declareExternSymbol("roc_dbg", fn_ty);
+            const func = try self.declareExternSymbol(shim_symbols.roc_dbg, fn_ty);
             _ = wip.call(.normal, .ccc, .none, fn_ty, func.toValue(builder), &.{
                 try self.staticBytes(msg),
                 builder.intValue(self.ptrSizedIntType(), msg.len) catch return error.OutOfMemory,
@@ -11369,9 +11373,9 @@ pub const MonoLlvmCodeGen = struct {
             };
         }
         return switch (callback) {
-            .dbg => @intCast(@offsetOf(builtins.host_abi.RocOps, "roc_dbg")),
-            .expect_failed => @intCast(@offsetOf(builtins.host_abi.RocOps, "roc_expect_failed")),
-            .crashed => @intCast(@offsetOf(builtins.host_abi.RocOps, "roc_crashed")),
+            .dbg => @intCast(@offsetOf(builtins.host_abi.RocOps, shim_symbols.roc_dbg)),
+            .expect_failed => @intCast(@offsetOf(builtins.host_abi.RocOps, shim_symbols.roc_expect_failed)),
+            .crashed => @intCast(@offsetOf(builtins.host_abi.RocOps, shim_symbols.roc_crashed)),
         };
     }
 

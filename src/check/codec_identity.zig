@@ -170,6 +170,9 @@ test "codec identity preserves cross-root sharing, conditional calls, and recurs
         variable.* = try types.reserveSyntheticTypeRoot(gpa, .{ .bytes = [_]u8{7} ** 32 }, true);
         try types.fillSyntheticTypeRoot(gpa, variable.*, .{ .flex = .{} });
     }
+    var names = @import("canonical_names.zig").CanonicalNameStore.init(gpa);
+    defer names.deinit();
+    const method = try names.internMethodName("to_encoder");
     var derivations: [5]dispatch.GeneratedCodecDerivation = undefined;
     var calls: [5]dispatch.GeneratedCodecCall = undefined;
     for (&derivations, &calls, 0..) |*derivation, *call, i| {
@@ -194,7 +197,7 @@ test "codec identity preserves cross-root sharing, conditional calls, and recurs
             .calls = .{ .start = @intCast(i), .len = 1 },
         };
         call.* = .{
-            .method = @enumFromInt(0),
+            .method = method,
             .method_role = 0,
             .dispatcher_ty = ty,
             .callable_ty = ty,
@@ -209,6 +212,6 @@ test "codec identity preserves cross-root sharing, conditional calls, and recurs
         .generated_codec_calls = &calls,
     };
     try intern(gpa, types.view(), &table);
-    try std.testing.expectEqual(@as(CodecId, @enumFromInt(0)), derivations[1].identity);
+    try std.testing.expectEqual(derivations[0].identity, derivations[1].identity);
     for (derivations[2..], 2..) |derivation, i| try std.testing.expectEqual(@as(CodecId, @enumFromInt(@as(u32, @intCast(i)))), derivation.identity);
 }

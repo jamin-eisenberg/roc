@@ -1822,6 +1822,9 @@ const ProcedureBuilder = struct {
         }
 
         const resolved = self.resolved_workers.items[@intFromEnum(worker_id)];
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             resolved.module,
@@ -3391,6 +3394,9 @@ const ProcedureBuilder = struct {
         }
 
         const source_rep = self.plan.representations.items[@intFromEnum(rep_id)];
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             procedureModuleById(self.modules, source_rep.source_type.module),
@@ -3450,6 +3456,9 @@ const ProcedureBuilder = struct {
             boxyLowerInvariant("unreachable dictionary method was emitted without a worker layout context");
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.initSyntheticAdapter(
             self,
             procedureModuleById(self.modules, fn_type.module),
@@ -3975,7 +3984,8 @@ const ProcedureBuilder = struct {
     }
 
     fn layoutNeedsNestedBoxyDesc(self: *const ProcedureBuilder, layout_idx: layout.Idx) bool {
-        return switch (self.result.layouts.getLayout(layout_idx).tag) {
+        const value_layout = self.result.layouts.getLayout(layout_idx);
+        return switch (value_layout.tag) {
             .box,
             .erased_box,
             .list,
@@ -3983,7 +3993,7 @@ const ProcedureBuilder = struct {
             .struct_,
             .tag_union,
             => true,
-            .scalar,
+            .scalar => value_layout.getScalar().tag == .vector,
             .box_of_zst,
             .closure,
             .erased_callable,
@@ -4162,10 +4172,10 @@ const ProcedureBuilder = struct {
             => true,
             .alias => self.repNeedsTagPayloadDesc(self.singleChildRepForDesc(rep_id, .alias_backing) orelse return true),
             .nominal => self.repNeedsTagPayloadDesc(self.singleChildRepForDesc(rep_id, .nominal_backing) orelse return true),
+            .primitive => |primitive| Common.primitiveInspectLowering(primitive) == .builtin_method,
             .in_progress,
             .dynamic,
             .erased_callable,
-            .primitive,
             .empty_record,
             .empty_tag_union,
             => false,
@@ -4705,6 +4715,9 @@ const ProcedureBuilder = struct {
             => {},
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.init(self, resolved.module, self.layout_plan.workerLayoutFor(worker_id));
         defer proc.deinit();
 
@@ -4724,6 +4737,9 @@ const ProcedureBuilder = struct {
             .stack_probe = self.stackProbeForProc(args_span, LIR.LocalSpan.empty(), ret_layout),
         });
         self.worker_procs[index] = proc_id;
+        var tail_builder = lir_core.TailCallBuilder.init(self.allocator, proc_id);
+        defer tail_builder.deinit();
+        self.result.store.tail_call_builder = &tail_builder;
         try self.setProcDebugName(proc_id, resolved);
         const ret_stmt = try self.result.store.addCFStmt(.{ .ret = .{ .value = ret_local } });
         var body_stmt = try self.lowerWorkerBodyInto(resolved, &proc, body_source, ret_local, ret_stmt);
@@ -4745,6 +4761,11 @@ const ProcedureBuilder = struct {
         proc_spec.runtime_ret_desc = return_desc.runtime_local;
         proc_spec.stack_probe = self.stackProbeForProc(args_span, frame_span, ret_layout);
         self.resolvePendingDirectCallDescriptorAbis(proc_id, return_desc.runtime_local != null);
+        // All self-call ABI fixups are resolved with this worker's signature.
+        // Later descriptor capture finalization does not change continuations.
+        tail_builder.adapters = self.result.boxy_adapters.items;
+        const tail_sites = try tail_builder.finish(&self.result.store);
+        self.result.store.getProcSpecPtr(proc_id).tail_calls = tail_sites;
         return proc_id;
     }
 
@@ -4768,6 +4789,9 @@ const ProcedureBuilder = struct {
             => {},
         }
 
+        const saved_tail_builder = self.result.store.tail_call_builder;
+        self.result.store.tail_call_builder = null;
+        defer self.result.store.tail_call_builder = saved_tail_builder;
         var proc = ProcBodyBuilder.init(self, resolved.module, self.layout_plan.workerLayoutFor(worker_id));
         defer proc.deinit();
 
@@ -18297,7 +18321,7 @@ const ProcBodyBuilder = struct {
             hidden_dict_args,
             continuation,
         );
-        self.parent.result.store.getCFStmtPtr(call_placeholder).* = self.parent.result.store.getCFStmt(call_entry);
+        try self.parent.result.store.replaceCFStmt(call_placeholder, self.parent.result.store.getCFStmt(call_entry));
         for (self.parent.pending_direct_call_descriptor_abis.items) |*pending| {
             if (pending.provisional_call == call_entry) {
                 pending.provisional_call = call_placeholder;
@@ -28010,7 +28034,7 @@ const ProcBodyBuilder = struct {
             => try self.assignStringBytesLiteral(target, "<opaque>", next),
             .list => try self.lowerListInspectLocalsInto(target, source, rep_id, next),
             .box => try self.lowerBoxInspectLocalsInto(target, source, rep_id, next),
-            .primitive => |primitive| try self.lowerPrimitiveInspectLocalsInto(target, source, primitive, next),
+            .primitive => |primitive| try self.lowerPrimitiveInspectLocalsInto(target, source, rep_id, primitive, next),
             .bool_tag_union => try self.lowerBoolInspectLocalsInto(target, source, next),
             .empty_record => try self.assignStringBytesLiteral(target, "{}", next),
             .empty_tag_union => try self.parent.result.store.addCFStmt(.{ .crash = .{
@@ -28051,6 +28075,16 @@ const ProcBodyBuilder = struct {
         next: LIR.CFStmtId,
     ) Allocator.Error!?LIR.CFStmtId {
         const worker_id = self.parent.methodWorkerForRepByName(rep_id, "to_inspect") orelse return null;
+        return try self.lowerToInspectWorkerInto(target, source, worker_id, next);
+    }
+
+    fn lowerToInspectWorkerInto(
+        self: *ProcBodyBuilder,
+        target: LIR.LocalId,
+        source: LIR.LocalId,
+        worker_id: Plan.WorkerPlanId,
+        next: LIR.CFStmtId,
+    ) Allocator.Error!LIR.CFStmtId {
         const worker = self.parent.plan.workers.items[@intFromEnum(worker_id)];
         if (worker.hidden_descs.len != 0 or worker.hidden_dicts.len != 0) {
             boxyLowerInvariant("boxy to_inspect method worker carried hidden parameters");
@@ -28120,13 +28154,19 @@ const ProcBodyBuilder = struct {
         self: *ProcBodyBuilder,
         target: LIR.LocalId,
         source: LIR.LocalId,
+        rep_id: Plan.TypeRepId,
         primitive: checked.CheckedPrimitive,
         next: LIR.CFStmtId,
     ) Allocator.Error!LIR.CFStmtId {
-        if (primitive == .bool) {
-            return try self.lowerBoolInspectLocalsInto(target, source, next);
-        }
-        const op = Common.primitiveInspectLowLevelOp(primitive);
+        const op = switch (Common.primitiveInspectLowering(primitive)) {
+            .low_level => |op| op,
+            .bool_tag_union => return try self.lowerBoolInspectLocalsInto(target, source, next),
+            .builtin_method => {
+                const method = self.parent.plan.inspectMethodForRep(rep_id) orelse
+                    boxyLowerInvariant("primitive inspect had no planned to_inspect worker");
+                return try self.lowerToInspectWorkerInto(target, source, method.worker, next);
+            },
+        };
         return try self.parent.result.store.addCFStmt(.{ .assign_low_level = .{
             .target = target,
             .op = op,
@@ -30623,6 +30663,9 @@ const ProcBodyBuilder = struct {
 
         const source_closure_layout = self.workerRuntimeLayoutForRep(source_function.rep).layoutIdx();
         const capture_layout = try self.callableAdapterCaptureLayout(source_closure_layout, descriptor_captures.len);
+        const saved_tail_builder = self.parent.result.store.tail_call_builder;
+        self.parent.result.store.tail_call_builder = null;
+        defer self.parent.result.store.tail_call_builder = saved_tail_builder;
         var adapter_proc = ProcBodyBuilder.initSyntheticAdapter(self.parent, self.module, self.worker_layout);
         defer adapter_proc.deinit();
 
@@ -30750,7 +30793,7 @@ const ProcBodyBuilder = struct {
             },
         });
         const call_entry = try adapter_proc.prependDescriptorArgMaterializations(arg_desc_initializers.items, call_stmt);
-        self.parent.result.store.getCFStmtPtr(call_placeholder).* = self.parent.result.store.getCFStmt(call_entry);
+        try self.parent.result.store.replaceCFStmt(call_placeholder, self.parent.result.store.getCFStmt(call_entry));
         continuation = call_with_args;
 
         continuation = try adapter_proc.prependWorkerArgumentDescriptorInitializers(continuation);

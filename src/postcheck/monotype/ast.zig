@@ -2572,6 +2572,40 @@ fn testFnSource(mono_fn_ty: Type.TypeId) FnTemplate {
 }
 
 test "codec function evidence identity excludes per-use replay addresses" {
+    const allocator = std.testing.allocator;
+    var types = checked.CheckedTypeStore{};
+    defer types.deinit(allocator);
+    // Allocate distinct replay addresses with the same checked root key.
+    var replay_types: [4]checked.CheckedTypeId = undefined;
+    for (&replay_types) |*ty| {
+        ty.* = try types.reserveSyntheticTypeRoot(allocator, .{ .bytes = [_]u8{2} ** 32 }, true);
+        try types.fillSyntheticTypeRoot(allocator, ty.*, .{ .flex = .{} });
+    }
+    // Fill the proof table and its indices before building stored evidence.
+    var derivations: [3]static_dispatch.GeneratedCodecDerivation = undefined;
+    var derivation_ids: [3]static_dispatch.GeneratedCodecDerivationId = undefined;
+    for (&derivations, &derivation_ids, 0..) |*derivation, *id, index| {
+        id.* = @enumFromInt(@as(u32, @intCast(index)));
+        const ty = replay_types[if (index == 1) 2 else 0];
+        derivation.* = .{
+            .identity = if (index == 1) derivation_ids[0] else id.*,
+            .kind = if (index == 2) .parser else .encoder,
+            .source_constructor_ty = ty,
+            .source_runtime_ty = ty,
+            .source_shape_ty = ty,
+            .source_body_shape_ty = ty,
+            .source_encoding_ty = ty,
+            .source_state_ty = ty,
+            .source_error_ty = ty,
+            .constructor_ty = ty,
+            .runtime_ty = ty,
+            .shape_ty = ty,
+            .body_shape_ty = ty,
+            .encoding_ty = ty,
+            .state_ty = ty,
+            .error_ty = ty,
+        };
+    }
     const Evidence = check.ConstStore.ConstFnEvidence;
     const frames = [_]check.ConstStore.ConstFnEvidenceFrame{
         check.ConstStore.ConstFnEvidenceFrame.init(.root, null, 0, 1),
@@ -2580,21 +2614,22 @@ test "codec function evidence identity excludes per-use replay addresses" {
         .derivation = .encoder,
         .checked = .{
             .view = .{ .bytes = [_]u8{1} ** 32 },
-            .dispatcher_key = .{ .bytes = [_]u8{2} ** 32 },
-            .dispatcher_ty = @enumFromInt(0),
-            .callable_key = .{ .bytes = [_]u8{3} ** 32 },
-            .callable_ty = @enumFromInt(1),
-            .generated_codec_derivation = @enumFromInt(0),
-            .generated_codec_identity = @enumFromInt(0),
+            .dispatcher_key = types.view().rootKey(replay_types[0]),
+            .dispatcher_ty = replay_types[0],
+            .callable_key = types.view().rootKey(replay_types[1]),
+            .callable_ty = replay_types[1],
+            .generated_codec_derivation = derivation_ids[0],
+            .generated_codec_identity = derivations[0].identity,
         },
     } }};
     var right = left;
-    right[0].structural.checked.?.dispatcher_ty = @enumFromInt(7);
-    right[0].structural.checked.?.callable_ty = @enumFromInt(8);
-    right[0].structural.checked.?.generated_codec_derivation = @enumFromInt(1);
+    right[0].structural.checked.?.dispatcher_ty = replay_types[2];
+    right[0].structural.checked.?.callable_ty = replay_types[3];
+    right[0].structural.checked.?.generated_codec_derivation = derivation_ids[1];
     try std.testing.expect(fnEvidenceEql(&left, &frames, 0, &right, &frames, 0));
     try std.testing.expectEqual(fnEvidenceDigest(&left, &frames, 0), fnEvidenceDigest(&right, &frames, 0));
-    right[0].structural.checked.?.generated_codec_identity = @enumFromInt(1);
+    right[0].structural.checked.?.generated_codec_derivation = derivation_ids[2];
+    right[0].structural.checked.?.generated_codec_identity = derivations[2].identity;
     try std.testing.expect(!fnEvidenceEql(&left, &frames, 0, &right, &frames, 0));
     try std.testing.expect(!std.meta.eql(fnEvidenceDigest(&left, &frames, 0), fnEvidenceDigest(&right, &frames, 0)));
 }
