@@ -4,6 +4,9 @@ const std = @import("std");
 
 const Allocator = std.mem.Allocator;
 
+/// Debug-only work counter for exact sparse range queries.
+pub var range_query_node_visits: u64 = 0;
+
 /// A bounded-depth radix tree whose absent entries have one caller-declared
 /// value. Copying a snapshot shares its root; changing one entry allocates
 /// only the nodes on that entry's path. Depth grows only as needed and is
@@ -65,6 +68,41 @@ pub fn Snapshot(comptime T: type, comptime empty: T) type {
             }
             const leaf: *const Leaf = @ptrCast(@alignCast(node));
             return leaf.values[index & radix_mask];
+        }
+
+        /// Whether a half-open index range contains a non-default entry.
+        /// Canonical empty subtrees are null, so fully covered subtrees need
+        /// no descent. Only the two range boundaries can descend at each
+        /// level, independently of the range's width or population.
+        pub fn hasNonEmptyInRange(self: *const Self, start: u32, end: u64) bool {
+            std.debug.assert(start <= end and end <= @as(u64, 1) << 32);
+            if (start == end) return false;
+            return rangeHasValue(self.root, self.depth, 0, start, end);
+        }
+
+        fn rangeHasValue(maybe_node: ?*const anyopaque, depth: u8, base: u64, start: u64, end: u64) bool {
+            if (@import("builtin").mode == .Debug) range_query_node_visits += 1;
+            const node = maybe_node orelse return false;
+            const width = @as(u64, 1) << @as(u6, @intCast(leaf_bits + @as(usize, depth) * radix_bits));
+            if (end <= base or start >= base + width) return false;
+            if (start <= base and base + width <= end) return true;
+            if (depth == 0) {
+                const leaf: *const Leaf = @ptrCast(@alignCast(node));
+                const first: usize = @intCast(@max(start, base) - base);
+                const last: usize = @intCast(@min(end, base + width) - base);
+                for (leaf.values[first..last]) |value| {
+                    if (!std.meta.eql(value, empty)) return true;
+                }
+                return false;
+            }
+            const branch: *const Branch = @ptrCast(@alignCast(node));
+            const child_width = width / radix;
+            const first: usize = @intCast((@max(start, base) - base) / child_width);
+            const last: usize = @intCast((@min(end, base + width) - 1 - base) / child_width + 1);
+            for (first..last) |slot| {
+                if (rangeHasValue(branch.children[slot], depth - 1, base + slot * child_width, start, end)) return true;
+            }
+            return false;
         }
 
         pub fn put(self: *Self, index: u32, value: T) Allocator.Error!void {
@@ -363,4 +401,42 @@ test "persistent sparse snapshots share forks and meet exactly" {
     try std.testing.expectEqual(@as(u32, 9), left.get(70_000));
     try std.testing.expectEqual(@as(u32, 0), left.get(90_000));
     try std.testing.expect(left.eql(&left.clone()));
+}
+
+test "sparse range queries are exact across tree boundaries and shared updates" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const Sparse = Snapshot(u32, 0);
+    var original = Sparse.init(arena.allocator(), 1);
+    const keys = [_]u32{ 0, 7, 8, 63, 64, 511, 512, 99999, std.math.maxInt(u32) };
+    for (keys) |key| try original.putUnique(key, 1);
+    var changed = original.clone();
+    for (keys, 0..) |key, i| {
+        if (i % 2 == 0) try changed.put(key, 0);
+    }
+    const boundaries = [_]u64{ 0, 1, 7, 8, 9, 63, 64, 65, 511, 512, 513, 99999, 100000, std.math.maxInt(u32), @as(u64, 1) << 32 };
+    for (boundaries[0 .. boundaries.len - 1]) |start| {
+        for (boundaries) |end| {
+            if (end < start) continue;
+            var original_expected = false;
+            var changed_expected = false;
+            for (keys, 0..) |key, i| {
+                if (start <= key and key < end) {
+                    original_expected = true;
+                    if (i % 2 != 0) changed_expected = true;
+                }
+            }
+            try std.testing.expectEqual(original_expected, original.hasNonEmptyInRange(@intCast(start), end));
+            try std.testing.expectEqual(changed_expected, changed.hasNonEmptyInRange(@intCast(start), end));
+        }
+    }
+    // A nearly full u32 range containing no entries must not scan its width.
+    const before = range_query_node_visits;
+    try std.testing.expect(!original.hasNonEmptyInRange(100000, std.math.maxInt(u32)));
+    if (@import("builtin").mode == .Debug) {
+        try std.testing.expect(range_query_node_visits - before <= 2 * 8 * 11);
+    }
+    for (keys) |key| try changed.put(key, 0);
+    try std.testing.expect(!changed.hasNonEmptyInRange(0, @as(u64, 1) << 32));
+    try std.testing.expect(original.hasNonEmptyInRange(0, @as(u64, 1) << 32));
 }

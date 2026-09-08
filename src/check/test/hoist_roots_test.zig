@@ -299,7 +299,7 @@ test "non-iterator methods sharing iterator producer names remain hoistable" {
 
 test "hoist roots are not selected for static dispatch requiring where evidence" {
     var test_env = try TestEnv.init("Test",
-        \\f : a -> _ where [a.f : {}]
+        \\f : a -> _ where [a.f : () -> {}]
         \\f = |_| {
         \\    A : a
         \\    A.f
@@ -1140,7 +1140,6 @@ fn countMatchExprRoots(test_env: *const TestEnv) usize {
             .e_nominal_external,
             .e_binop,
             .e_unary_minus,
-            .e_unary_not,
             .e_field_access,
             .e_interpolation,
             .e_structural_eq,

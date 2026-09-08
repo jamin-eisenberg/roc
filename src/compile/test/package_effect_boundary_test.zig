@@ -25,6 +25,7 @@ const eval = @import("eval");
 const roc_target = @import("roc_target");
 
 const Coordinator = @import("../coordinator.zig").Coordinator;
+const CoordinatorError = @import("../coordinator.zig").CoordinatorError;
 const CoreCtx = @import("ctx").CoreCtx;
 
 const File = struct {
@@ -43,11 +44,7 @@ const HarnessError = StageError ||
     Coordinator.AppDiscoveryError ||
     eval.BuiltinModules.InitError ||
     std.Thread.SpawnError ||
-    error{
-        BuiltinLowLevelAnnotationMustBeFunction,
-        LowLevelOperationsNotFound,
-        UnsupportedBuiltinAnnotationOnly,
-    };
+    CoordinatorError;
 
 /// Ways a fixture can fail its assertion.
 const AssertionError = error{

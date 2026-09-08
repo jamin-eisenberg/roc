@@ -21,6 +21,59 @@ const simd_tests = @import("eval_simd_tests.zig");
 /// Every value-producing test is observed solely through `Str.inspect(...)`.
 const core_tests = [_]TestCase{
     .{
+        .name = "issue 11024: implicit empty nominal records materialize defaults at every site",
+        .source_kind = .module,
+        .source =
+        \\Foo := { bar : U64 ?? 3, baz : U64 ?? 7 }
+        \\top : Foo
+        \\top = {}
+        \\make : U64 -> Foo
+        \\make = |n| if n == 0 {} else { bar: n }
+        \\main = {
+        \\    local : Foo
+        \\    local = {}
+        \\    xs : List(Foo)
+        \\    xs = [{}, {}]
+        \\    total = List.fold(xs, 0, |sum, foo| sum + foo.bar + foo.baz)
+        \\    top.bar + top.baz + local.bar + local.baz + make(0).bar + make(5).bar + total
+        \\}
+        ,
+        .expected = .{ .inspect_str = "48" },
+    },
+    .{
+        .name = "issue 11024: implicit empty record mixes missing optional and heap defaults",
+        .source_kind = .module,
+        .source =
+        \\Foo := { text : Str ?? "a heap-allocated default string longer than the inline capacity", count ?: U64 }
+        \\make : {} -> Foo
+        \\make = |_| {}
+        \\main = {
+        \\    first = make({})
+        \\    second = make({})
+        \\    if (first.text == second.text) and ((first.?count ?? 9) == 9) first.text else "wrong"
+        \\}
+        ,
+        .expected = .{ .inspect_str = "\"a heap-allocated default string longer than the inline capacity\"" },
+    },
+    .{
+        .name = "issue 11024: imported implicit empty records materialize callable defaults",
+        .source_kind = .module,
+        .imports = &.{.{ .name = "Cfg", .source = "Cfg := { f : U8 -> U8 ?? |n| n + 5 }\n" }},
+        .source =
+        \\import Cfg
+        \\cfg : Cfg.Cfg
+        \\cfg = {}
+        \\make : {} -> Cfg.Cfg
+        \\make = |_| {}
+        \\main = {
+        \\    first = cfg.f
+        \\    second = make({}).f
+        \\    first(1) + second(2)
+        \\}
+        ,
+        .expected = .{ .inspect_str = "13" },
+    },
+    .{
         .name = "defaulted record field: omitted at construction materializes the default",
         .source_kind = .module,
         .source =
@@ -1279,6 +1332,27 @@ const core_tests = [_]TestCase{
         .expected = .{ .inspect_str = "5" },
     },
     .{
+        .name = "pipe supplies the first explicit method argument",
+        .source_kind = .module,
+        .source =
+        \\Holder := { n : I64 }.{
+        \\    add : Holder, I64 -> I64
+        \\    add = |holder, value| holder.n + value
+        \\
+        \\    sum : Holder, I64, I64 -> I64
+        \\    sum = |holder, left, right| holder.n + left + right
+        \\
+        \\    make_adder : Holder -> (I64 -> I64)
+        \\    make_adder = |holder| |value| holder.n + value
+        \\}
+        \\
+        \\holder = Holder.{ n: 3 }
+        \\
+        \\main = (2 |> holder.add(), 2 |> holder.sum(4), 2 |> holder.sum(4) + 1, 2 |> holder.make_adder()())
+        ,
+        .expected = .{ .inspect_str = "(5, 9, 10, 5)" },
+    },
+    .{
         .name = "whitespace-separated postfix applies to completed pipe",
         .source_kind = .module,
         .source =
@@ -1591,6 +1665,31 @@ const core_tests = [_]TestCase{
     .{ .name = "inspect: decimal literal", .source = "1.5", .expected = .{ .inspect_str = "1.5" } },
     .{ .name = "inspect: boolean true", .source = "True", .expected = .{ .inspect_str = "True" } },
     .{ .name = "inspect: boolean false", .source = "False", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: unary not true", .source = "!True", .expected = .{ .inspect_str = "False" } },
+    .{ .name = "inspect: unary not false", .source = "!False", .expected = .{ .inspect_str = "True" } },
+    .{ .name = "inspect: unary not inferred parameter", .source = "{ negate = |value| !value\n (negate(True), negate(False)) }", .expected = .{ .inspect_str = "(False, True)" } },
+    .{
+        .name = "inspect: unary not mutable flag in loop issue 11157",
+        .source =
+        \\{
+        \\    run = |values| {
+        \\        var $swapped = False
+        \\        var $iterations = 0.U64
+        \\        while True {
+        \\            for value in values {
+        \\                if value > 0 and $iterations == 0 { $swapped = True }
+        \\            }
+        \\            $iterations = $iterations + 1
+        \\            if !$swapped { break }
+        \\            $swapped = False
+        \\        }
+        \\        $iterations
+        \\    }
+        \\    (run([0, 0]), run([1, 0]))
+        \\}
+        ,
+        .expected = .{ .inspect_str = "(1, 2)" },
+    },
     .{ .name = "inspect: string literal", .source = "\"hello\"", .expected = .{ .inspect_str = "\"hello\"" } },
     .{ .name = "inspect: standalone callable syntax", .source = "|value| value", .expected = .{ .inspect_str = "<function>" } },
     .{

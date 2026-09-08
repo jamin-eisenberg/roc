@@ -248,6 +248,10 @@ pub const OpenFunctionInterfaceShape = struct {
 /// `InstGraph.diagnostics` remains null unless detailed diagnostics were
 /// requested, so ordinary lowering does not count hot-path operations.
 pub const GraphDiagnostics = struct {
+    /// Node identities retained by argument-class snapshots.
+    argument_class_members_snapshotted: u64 = 0,
+    /// Visited-set slots initialized or touched by structural backing walks.
+    structural_backing_scan_slots: u64 = 0,
     nodes_created: u64 = 0,
     unify_requests: u64 = 0,
     class_unions: u64 = 0,
@@ -585,6 +589,7 @@ pub const InstGraph = struct {
     /// upstream generated-private arguments; retaining that producer node is
     /// what lets the callee instantiate those relations without reconstruction.
     request_source_interfaces: std.ArrayList(?NodeId),
+    constructor_evidence_requests: std.ArrayList(bool),
     /// Minted iterator roots whose relation graph proved that retaining the
     /// minted tier would create a recursive component identity. The raw node
     /// remains valid across later unions; finalization resolves it to the live
@@ -670,6 +675,7 @@ pub const InstGraph = struct {
             .nominal_backing_collisions = .empty,
             .processing_nominal_backing_collisions = false,
             .request_source_interfaces = .empty,
+            .constructor_evidence_requests = .empty,
             .forced_dynamic_iterator_roots = .empty,
             .recursive_argument_slots = .empty,
             .containment_pending = .empty,
@@ -729,6 +735,7 @@ pub const InstGraph = struct {
         self.nominal_backing_instances.deinit(allocator);
         self.nominal_backing_index.deinit();
         self.request_source_interfaces.deinit(allocator);
+        self.constructor_evidence_requests.deinit(allocator);
         self.forced_dynamic_iterator_roots.deinit(allocator);
         self.recursive_argument_slots.deinit(allocator);
         self.containment_pending.deinit(allocator);
@@ -1002,6 +1009,17 @@ pub const InstGraph = struct {
         return self.find(source_fn);
     }
 
+    pub fn registerConstructorEvidenceRequest(self: *InstGraph, request_fn: NodeId) void {
+        self.requireRelationProduction();
+        self.constructor_evidence_requests.items[@intFromEnum(request_fn)] = true;
+        self.constructor_evidence_requests.items[@intFromEnum(self.find(request_fn))] = true;
+    }
+
+    pub fn requestPropagatesConstructorEvidence(self: *InstGraph, request_fn: NodeId) bool {
+        return self.constructor_evidence_requests.items[@intFromEnum(request_fn)] or
+            self.constructor_evidence_requests.items[@intFromEnum(self.find(request_fn))];
+    }
+
     pub fn findGeneratedIterator(
         self: *InstGraph,
         public_node: NodeId,
@@ -1087,21 +1105,27 @@ pub const InstGraph = struct {
         self.relation_state = .frozen;
     }
 
+    /// An immutable segment of the append-only class-member list. Union only
+    /// links a class tail to another class head, so no link inside this saved
+    /// segment can change. Its last node remains the boundary after any union.
     pub const ArgumentClassSnapshot = struct {
-        members: []const NodeId,
+        first: NodeId,
+        last: NodeId,
 
-        fn contains(self: ArgumentClassSnapshot, node: NodeId) bool {
-            for (self.members) |member| {
+        fn contains(self: ArgumentClassSnapshot, graph: *const InstGraph, node: NodeId) bool {
+            var member = self.first;
+            while (true) {
                 if (member == node) return true;
+                if (member == self.last) return false;
+                member = graph.class_member_next.items[@intFromEnum(member)] orelse
+                    Common.invariant("argument class snapshot lost an interior link");
             }
-            return false;
         }
     };
 
-    /// Snapshot every permanent member of each ordered argument class before
-    /// a specialization body can add recursive relations. Root choice is not
-    /// stable under union, so recursive growth must compare permanent identity
-    /// against the whole initial class rather than one representative node.
+    /// Retain the exact initial membership without walking or copying the
+    /// class. Recursive growth tests permanent node identity against this
+    /// bounded segment, independently of later root choices and class joins.
     pub fn snapshotFunctionArgumentClasses(
         self: *InstGraph,
         fn_node: NodeId,
@@ -1109,15 +1133,12 @@ pub const InstGraph = struct {
         const args = (try self.functionNodes(fn_node)).args;
         const snapshots = try self.arena().alloc(ArgumentClassSnapshot, args.len);
         for (args, snapshots) |arg, *snapshot| {
-            var count: usize = 0;
-            var counting = self.classMemberIterator(arg);
-            while (counting.next() != null) count += 1;
-
-            const members = try self.arena().alloc(NodeId, count);
-            var filling = self.classMemberIterator(arg);
-            var index: usize = 0;
-            while (filling.next()) |member| : (index += 1) members[index] = member;
-            snapshot.* = .{ .members = members };
+            const root = @intFromEnum(self.find(arg));
+            snapshot.* = .{
+                .first = self.class_member_head.items[root],
+                .last = self.class_member_tail.items[root],
+            };
+            self.countDiagnosticBy("argument_class_members_snapshotted", 2);
         }
         return snapshots;
     }
@@ -1134,7 +1155,7 @@ pub const InstGraph = struct {
             Common.invariant("recursive function interface changed argument arity");
         }
         for (initial_active_arg_classes, request.args) |initial_class, request_arg| {
-            if (!initial_class.contains(request_arg)) {
+            if (!initial_class.contains(self, request_arg)) {
                 try self.recursive_argument_slots.append(self.allocator, request_arg);
             }
         }
@@ -1812,6 +1833,7 @@ pub const InstGraph = struct {
         try self.class_member_tail.append(self.allocator, id);
         try self.containment_visit_epochs.append(self.allocator, 0);
         try self.request_source_interfaces.append(self.allocator, null);
+        try self.constructor_evidence_requests.append(self.allocator, false);
         self.countDiagnostic("nodes_created");
         return id;
     }
@@ -3846,6 +3868,9 @@ pub const InstGraph = struct {
         self.class_member_tail.items[@intFromEnum(winner)] = self.class_member_tail.items[@intFromEnum(loser)];
         const winner_content = self.nodes.items[@intFromEnum(winner)];
         const loser_content = self.nodes.items[@intFromEnum(loser)];
+        self.constructor_evidence_requests.items[@intFromEnum(winner)] =
+            self.constructor_evidence_requests.items[@intFromEnum(winner)] or
+            self.constructor_evidence_requests.items[@intFromEnum(loser)];
         const joins_nominal_with_structural = winner_content != .unresolved and loser_content != .unresolved and
             (winner_content == .named) != (loser_content == .named);
         self.nodes.items[@intFromEnum(loser)] = .{ .redirect = winner };
@@ -4514,13 +4539,13 @@ pub const InstGraph = struct {
     }
 
     fn findStructuralBackingNode(self: *InstGraph, raw: NodeId, owner: InstNamed) Allocator.Error!StructuralBacking {
-        var seen = try std.DynamicBitSetUnmanaged.initEmpty(self.allocator, self.nodes.items.len);
-        defer seen.deinit(self.allocator);
+        var seen = self.node_set_pool.acquire();
+        defer self.node_set_pool.release(&seen);
         var current = self.find(raw);
         while (true) {
-            const index = @intFromEnum(current);
-            if (seen.isSet(index)) return .{ .node = current, .recursive = true };
-            seen.set(index);
+            self.countDiagnostic("structural_backing_scan_slots");
+            const entry = try seen.getOrPut(current);
+            if (entry.found_existing) return .{ .node = current, .recursive = true };
             const next = self.structuralBackingNext(current, owner) orelse return .{ .node = current, .recursive = false };
             current = next;
         }
@@ -6787,6 +6812,103 @@ test "resolved graph type detection does not default open cells" {
     try graph.unify(unresolved, str);
     try std.testing.expect(try graph.typeIsResolved(open_list));
     try std.testing.expect(try graph.typeCanSealFromExplicitEvidence(open_list));
+}
+
+test "argument class snapshots preserve entry membership through unions on both sides" {
+    const gpa = std.testing.allocator;
+    var type_store = Type.Store.init(gpa);
+    defer type_store.deinit();
+    var name_store = names.NameStore.init(gpa);
+    defer name_store.deinit();
+    const graph = try InstGraph.create(gpa, &type_store, &name_store);
+    defer graph.destroy();
+
+    // Both outsiders predate the snapshot: node age cannot stand in for
+    // membership, and either side may become the representative later.
+    const before = try graph.newNode(.empty_record);
+    const after = try graph.newNode(.empty_record);
+    const first = try graph.newNode(.empty_record);
+    const last = try graph.newNode(.empty_record);
+    try graph.union_(first, last);
+    const ret = try graph.newNode(.{ .primitive = .bool });
+    const active = try graph.newNode(.{ .func = .{
+        .args = try graph.arena().dupe(NodeId, &.{first}),
+        .ret = ret,
+    } });
+    const initial = try graph.snapshotFunctionArgumentClasses(active);
+    try graph.union_(before, first);
+    try graph.union_(before, after);
+    const new_node = try graph.newNode(.empty_record);
+    try graph.union_(new_node, before);
+    const later = try graph.snapshotFunctionArgumentClasses(active);
+
+    for ([_]NodeId{ first, last }) |member| {
+        try std.testing.expect(initial[0].contains(graph, member));
+        const request = try graph.newNode(.{ .func = .{
+            .args = try graph.arena().dupe(NodeId, &.{member}),
+            .ret = ret,
+        } });
+        try graph.unifyRecursiveFunctionInterface(active, initial, request);
+    }
+    try std.testing.expectEqual(@as(usize, 0), graph.recursive_argument_slots.items.len);
+    for ([_]NodeId{ before, after, new_node }) |member| {
+        try std.testing.expect(!initial[0].contains(graph, member));
+        try std.testing.expect(later[0].contains(graph, member));
+        const request = try graph.newNode(.{ .func = .{
+            .args = try graph.arena().dupe(NodeId, &.{member}),
+            .ret = ret,
+        } });
+        try graph.unifyRecursiveFunctionInterface(active, initial, request);
+    }
+    try std.testing.expectEqualSlices(NodeId, &.{ before, after, new_node }, graph.recursive_argument_slots.items);
+    // Re-reading a snapshot after another snapshot and recursive relations
+    // must still stop at its original tail.
+    try std.testing.expect(!initial[0].contains(graph, after));
+}
+
+test "structural backing traversal preserves cycle entry and clears only visited scratch" {
+    const gpa = std.testing.allocator;
+    for ([_]?usize{ null, 0, 1, 7 }) |cycle_entry| {
+        var type_store = Type.Store.init(gpa);
+        defer type_store.deinit();
+        var name_store = names.NameStore.init(gpa);
+        defer name_store.deinit();
+        const graph = try InstGraph.create(gpa, &type_store, &name_store);
+        defer graph.destroy();
+        const module_identity = try name_store.internModuleIdentity(&([_]u8{0xAC} ** 32));
+        const type_name = try name_store.internTypeName("Chain");
+        const terminal = try graph.newNode(.empty_record);
+        var nodes: [12]NodeId = undefined;
+        for (&nodes) |*node| node.* = try graph.newNode(.{ .unresolved = InstVariable.placeholder() });
+        for (nodes, 0..) |node, index| {
+            const next = if (index + 1 < nodes.len) nodes[index + 1] else if (cycle_entry) |entry| nodes[entry] else terminal;
+            graph.setContent(node, .{ .named = .{
+                .named_type = .{ .module = .{}, .ty = testCheckedTypeId(1) },
+                .def = .{ .module = module_identity, .type_name = type_name },
+                .kind = .nominal,
+                .builtin_owner = null,
+                .args = &.{},
+                .backing = .{ .node = next, .use = .inspectable },
+            } });
+        }
+        var diagnostics = GraphDiagnostics{};
+        graph.diagnostics = &diagnostics;
+        const owner = graph.content(nodes[0]).named;
+        const expected = if (cycle_entry) |entry| nodes[entry] else terminal;
+        var prior_steps: ?u64 = null;
+        for (0..2) |_| {
+            const before_steps = diagnostics.structural_backing_scan_slots;
+            const result = try graph.findStructuralBackingNode(nodes[0], owner);
+            try std.testing.expectEqual(expected, result.node);
+            try std.testing.expectEqual(cycle_entry != null, result.recursive);
+            const steps = diagnostics.structural_backing_scan_slots - before_steps;
+            try std.testing.expect(steps <= 8 * nodes.len);
+            if (prior_steps) |previous| try std.testing.expectEqual(previous, steps);
+            prior_steps = steps;
+            // Unrelated graph growth must not increase the next walk's work.
+            for (0..1000) |_| _ = try graph.newNode(.empty_record);
+        }
+    }
 }
 
 test "open draft function interfaces use related graph classes directly" {
