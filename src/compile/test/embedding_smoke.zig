@@ -60,11 +60,17 @@ test "embedding API: distinct provides aliases retain their names and image ordi
     );
 }
 
+const EmbeddingSequenceError = eval.BuiltinModules.InitError || std.Thread.SpawnError ||
+    Coordinator.AppDiscoveryError || @import("../coordinator.zig").CoordinatorError ||
+    @import("../compile_package.zig").PublishError || lir.CheckedPipeline.LowerResourceError ||
+    lir.LirImage.ViewError || eval.LirInterpreter.Error ||
+    error{ EntrypointNotFound, TestUnexpectedResult, TestExpectedEqual };
+
 fn runEmbeddingSequence(
     app_path: []const u8,
     expected_names: []const []const u8,
     comptime execute_entrypoint: bool,
-) !void {
+) EmbeddingSequenceError!void {
     // Paths are relative to the repo root for `run-test-zig-module-compile`.
 
     const gpa = std.testing.allocator;
