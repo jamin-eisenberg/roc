@@ -1691,6 +1691,7 @@ const CollectedAbiLayoutDetails = union(enum) {
         discriminant_size: u64,
         discriminant_offset32: u64,
         discriminant_offset64: u64,
+        has_payload: bool,
         tags: []const CollectedAbiTagLayout,
     },
 };
@@ -2855,6 +2856,7 @@ const TypeTable = struct {
                 .discriminant_size = 0,
                 .discriminant_offset32 = 0,
                 .discriminant_offset64 = 0,
+                .has_payload = false,
                 .tags = try self.abiZeroSizedTagLayouts(tu),
             } };
         }
@@ -2878,6 +2880,7 @@ const TypeTable = struct {
             self.gpa.free(tags);
         }
 
+        var has_payload = false;
         for (tu.tags, 0..) |tag, i| {
             const variant_layout_idx = info.variants.get(@intCast(i)).payload_layout;
             const variant_layout = store.getLayout(variant_layout_idx);
@@ -2891,6 +2894,7 @@ const TypeTable = struct {
                 .payload_size64 = store.sizeAt(variant_layout, .u64),
                 .payload_alignment64 = variant_layout.alignment(.u64).toByteUnits(),
             };
+            has_payload = has_payload or tags[i].payload_size32 > 0 or tags[i].payload_size64 > 0;
             populated += 1;
         }
 
@@ -2898,6 +2902,7 @@ const TypeTable = struct {
             .discriminant_size = info.data.discriminant_size,
             .discriminant_offset32 = info.data.discriminant_offset.get(.u32),
             .discriminant_offset64 = info.data.discriminant_offset.get(.u64),
+            .has_payload = has_payload,
             .tags = tags,
         } };
     }
@@ -3975,6 +3980,7 @@ fn writeAbiLayoutDetails(
             writer.writeField(value_base, payload_layout, "AbiTagUnionLayout", "discriminant_offset32", u64, tu.discriminant_offset32);
             writer.writeField(value_base, payload_layout, "AbiTagUnionLayout", "discriminant_offset64", u64, tu.discriminant_offset64);
             writer.writeField(value_base, payload_layout, "AbiTagUnionLayout", "discriminant_size", u64, tu.discriminant_size);
+            writer.writeField(value_base, payload_layout, "AbiTagUnionLayout", "has_payload", bool, tu.has_payload);
             writer.writeField(value_base, payload_layout, "AbiTagUnionLayout", "tags", RocList, buildAbiTagLayoutList(writer, tu.tags, tags_slot.layout_idx));
             writer.writeTagDiscriminant(value_base, details_layout, tag_index);
         },
