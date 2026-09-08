@@ -12291,14 +12291,7 @@ fn checkHostBoundaryType(self: *Self, var_: Var, region: Region) std.mem.Allocat
 
 /// The fixed runtime symbols every host defines; platform headers may not
 /// reuse them for provides or hosted entries.
-const reserved_host_symbols = [_][]const u8{
-    "roc_alloc",
-    "roc_dealloc",
-    "roc_realloc",
-    "roc_dbg",
-    "roc_expect_failed",
-    "roc_crashed",
-};
+const reserved_host_symbols = @import("builtins").shim_symbols.runtime_set;
 
 fn checkHostSymbol(
     self: *Self,

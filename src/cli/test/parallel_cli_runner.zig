@@ -489,6 +489,8 @@ const CliCase = struct {
     /// `--timeout` default: perf-regression guards tighten it to fail fast,
     /// while known-slow cases (e.g. the JSON round-trip) loosen it.
     timeout_ms: ?u64 = null,
+    /// Wall-clock scaling comparisons require no competing runner cases.
+    scheduling: enum { parallel, exclusive } = .parallel,
     body: Body,
 
     const Body = union(enum) {
@@ -1063,7 +1065,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "roc check writes parse errors to stderr", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/has_parse_error.roc", .exit = .failure, .stderr_min_len = 1, .contains_any = &.{.{ .needles = &parse_error_needles }} } } },
     .{ .id = 0, .suite = .subcommands, .name = "direct roc rejects compiler-owned glue platform as hostless", .body = .{ .command = .{ .args = &.{"--no-cache"}, .roc_file = "src/glue/src/DebugGlue.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "empty targets section" }, .{ .stream = .stderr, .text = "roc glue" } }, .not_contains = &.{ .{ .stream = .stderr, .text = "expected platform string" }, .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "unreachable" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "roc check displays correct file path in parse error messages", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/cli/has_parse_error.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{.{ .stream = .stderr, .text = "has_parse_error.roc" }}, .not_contains = &.{.{ .stream = .stderr, .text = "\xaa\xaa\xaa\xaa\xaa\xaa\xaa\xaa" }} } } },
-    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects invalid hosted sections", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/hosted-section-errors/platform/main.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "Host.nonexistent" }, .{ .stream = .stderr, .text = "Host.quadruple" }, .{ .stream = .stderr, .text = "roc-host-bad" }, .{ .stream = .stderr, .text = "roc_alloc" }, .{ .stream = .stderr, .text = "roc__sneaky" } } } } },
+    .{ .id = 0, .suite = .subcommands, .name = "roc check rejects invalid hosted sections", .body = .{ .command = .{ .args = &.{ "check", "--no-cache" }, .roc_file = "test/hosted-section-errors/platform/main.roc", .exit = .failure, .stderr_min_len = 1, .contains = &.{ .{ .stream = .stderr, .text = "invalid hosted section" }, .{ .stream = .stderr, .text = "Host.nonexistent" }, .{ .stream = .stderr, .text = "Host.quadruple" }, .{ .stream = .stderr, .text = "roc-host-bad" }, .{ .stream = .stderr, .text = shim_symbols.roc_alloc }, .{ .stream = .stderr, .text = "roc__sneaky" } } } } },
     // A platform whose exposed module declares a hosted function the header's
     // hosted section does not name. The section is what gives each hosted
     // function its linker symbol and its host dispatch slot, so a declaration
@@ -1257,7 +1259,7 @@ const subcommand_cases = [_]CliCase{
     .{ .id = 0, .suite = .subcommands, .name = "issue 10529: open Try ? chain builds in dev within the perf guard", .backend = .dev, .timeout_ms = 30_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue10529OpenTryChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 11072: hooks chain interns its interchangeable closure layouts once and builds in dev within the perf guard", .backend = .dev, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=dev", "--no-cache" }, .roc_file = "test/cli/Issue11072HooksChainBuildTime.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" }, .{ .stream = .stderr, .text = "reached unreachable code" } } } } },
     .{ .id = 0, .suite = .subcommands, .name = "spec-constr re-cloning keeps the inline scope chain bounded", .backend = .speed, .timeout_ms = 60_000, .body = .{ .command = .{ .args = &.{ "build", "--opt=speed", "--no-cache" }, .roc_file = "test/cli/SpecConstrInlineScopeRebaseGrowth.roc", .exit = .success, .contains = &.{.{ .stream = .stdout, .text = "successfully building" }}, .not_contains = &.{ .{ .stream = .stderr, .text = "overflowed its stack memory" }, .{ .stream = .stderr, .text = "panic" }, .{ .stream = .stderr, .text = "segmentation fault" } } } } },
-    .{ .id = 0, .suite = .subcommands, .name = "issue 11133: LLVM Optimize + Emit stays proportional to procedure count", .backend = .speed, .timeout_ms = 600_000, .body = .{ .custom = .issue_11133_llvm_emit_scaling } },
+    .{ .id = 0, .suite = .subcommands, .name = "issue 11133: LLVM Optimize + Emit stays proportional to procedure count", .backend = .speed, .timeout_ms = 600_000, .scheduling = .exclusive, .body = .{ .custom = .issue_11133_llvm_emit_scaling } },
     .{ .id = 0, .suite = .subcommands, .name = "issue 10015: macOS roc test imported package expect passes on LLVM size backend", .backend = .size, .body = .{ .custom = .issue_10015_url_random_test_size } },
     // Repro for https://github.com/roc-lang/roc/issues/10620: optimized
     // inlining must preserve explicitly keyed closure capture operands.
@@ -8384,8 +8386,8 @@ fn setupGlueRuntimeWasm(io: std.Io, allocator: Allocator, wasm_path: []const u8)
     var env_imports = try bytebox.ModuleImportPackage.init("env", null, &glue_runtime_wasm_host_context, allocator);
     errdefer env_imports.deinit();
     try env_imports.addHostFunction("roc_panic", &[_]bytebox.ValType{ .I32, .I32 }, &[_]bytebox.ValType{}, GlueRuntimeWasmHostContext.roc_panic, &glue_runtime_wasm_host_context);
-    try env_imports.addHostFunction("roc_dbg", &[_]bytebox.ValType{ .I32, .I32 }, &[_]bytebox.ValType{}, GlueRuntimeWasmHostContext.roc_dbg, &glue_runtime_wasm_host_context);
-    try env_imports.addHostFunction("roc_expect_failed", &[_]bytebox.ValType{ .I32, .I32 }, &[_]bytebox.ValType{}, GlueRuntimeWasmHostContext.roc_expect_failed, &glue_runtime_wasm_host_context);
+    try env_imports.addHostFunction(shim_symbols.roc_dbg, &[_]bytebox.ValType{ .I32, .I32 }, &[_]bytebox.ValType{}, GlueRuntimeWasmHostContext.roc_dbg, &glue_runtime_wasm_host_context);
+    try env_imports.addHostFunction(shim_symbols.roc_expect_failed, &[_]bytebox.ValType{ .I32, .I32 }, &[_]bytebox.ValType{}, GlueRuntimeWasmHostContext.roc_expect_failed, &glue_runtime_wasm_host_context);
 
     const imports = [_]bytebox.ModuleImportPackage{env_imports};
     try module_instance.instantiate(.{
@@ -8847,13 +8849,31 @@ fn compileGlueRuntimeZigHost(
 ) ?TestResult {
     const emit_flag = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{host_o_path}) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate glue runtime Zig emit flag: {}", .{err});
+    const root_module_arg = std.fmt.allocPrint(allocator, "-Mroot={s}", .{host_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host module argument: {}", .{err});
+    const symbols_module_arg = std.fmt.allocPrint(allocator, "-Mshim_symbols={s}/src/builtins/shim_symbols.zig", .{project_root_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host symbols argument: {}", .{err});
+    const allocator_module_arg = std.fmt.allocPrint(allocator, "-Mhost_alloc={s}/src/host_alloc/tracking.zig", .{project_root_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host allocator argument: {}", .{err});
+    const io_module_arg = std.fmt.allocPrint(allocator, "-Mshim_io={s}/src/shim_io.zig", .{project_root_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host IO argument: {}", .{err});
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
         "zig",
         "build-obj",
         "-target",
         target.zig_target,
         "-fcompiler-rt",
-        host_path,
+        "-lc",
+        "--dep",
+        "shim_symbols",
+        "--dep",
+        "host_alloc",
+        "--dep",
+        "shim_io",
+        root_module_arg,
+        symbols_module_arg,
+        allocator_module_arg,
+        io_module_arg,
         emit_flag,
     }, project_root_path, .{ .args = &.{} })) |failure| return failure;
 
@@ -8879,6 +8899,12 @@ fn compileGlueRuntimeZigWasmHost(
 ) ?TestResult {
     const emit_flag = std.fmt.allocPrint(allocator, "-femit-bin={s}", .{host_wasm_path}) catch |err|
         return customInfraFailure(allocator, timer, "failed to allocate glue runtime Zig wasm emit flag: {}", .{err});
+    const root_module_arg = std.fmt.allocPrint(allocator, "-Mroot={s}", .{host_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host module argument: {}", .{err});
+    const symbols_module_arg = std.fmt.allocPrint(allocator, "-Mshim_symbols={s}/src/builtins/shim_symbols.zig", .{project_root_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host symbols argument: {}", .{err});
+    const allocator_module_arg = std.fmt.allocPrint(allocator, "-Mhost_alloc={s}/src/host_alloc/tracking.zig", .{project_root_path}) catch |err|
+        return customInfraFailure(allocator, timer, "failed to allocate glue host allocator argument: {}", .{err});
     if (runRawAndCheck(io, allocator, env, timer, timeout_ms, &.{
         "zig",
         "build-obj",
@@ -8890,7 +8916,13 @@ fn compileGlueRuntimeZigWasmHost(
         "-fPIC",
         "-ffunction-sections",
         "-fdata-sections",
-        host_path,
+        "--dep",
+        "shim_symbols",
+        "--dep",
+        "host_alloc",
+        root_module_arg,
+        symbols_module_arg,
+        allocator_module_arg,
         emit_flag,
     }, project_root_path, .{ .args = &.{} })) |failure| return failure;
 
@@ -10332,6 +10364,10 @@ fn getTestName(spec: CliCase) []const u8 {
     return spec.name;
 }
 
+fn getWorkerIndex(spec: CliCase) usize {
+    return spec.id;
+}
+
 fn dupeOptional(gpa: Allocator, value: ?[]const u8) ?[]const u8 {
     return if (value) |slice| gpa.dupe(u8, slice) catch null else null;
 }
@@ -10362,6 +10398,7 @@ const Pool = harness.ProcessPool(CliCase, TestResult, .{
     .stabilizeResult = &stabilizeResult,
     .getName = &getTestName,
     .getTimeoutMs = &caseTimeoutMs,
+    .getWorkerIndex = &getWorkerIndex,
     .use_process_groups = true,
     .timeout_report_grace_ms = timeout_result_grace_ms,
     .windows_persistent_workers = false,
@@ -11051,7 +11088,26 @@ pub fn main(init: std.process.Init) CliRunnerError!void {
     const worker_argv_template = try harness.buildWorkerArgvTemplate(init.io, spec_arena.allocator(), init.minimal.args);
 
     var wall_timer = harness.Timer.start() catch @panic("no clock");
-    Pool.runWithSpans(init.io, tests, results, spans, max_children, timeout_ms, gpa, worker_argv_template);
+    // Drain each parallel batch before a case that requires exclusive timing.
+    // Keep the original case indices for re-executed Windows workers and the
+    // original run timeline for statistics across all batches.
+    var batch_start: usize = 0;
+    while (batch_start < tests.len) {
+        var batch_end = batch_start + 1;
+        if (tests[batch_start].scheduling == .parallel) {
+            while (batch_end < tests.len and tests[batch_end].scheduling == .parallel) : (batch_end += 1) {}
+        }
+        const batch_offset_ns = wall_timer.read();
+        const batch_workers = @min(max_children, batch_end - batch_start);
+        Pool.runWithSpans(init.io, tests[batch_start..batch_end], results[batch_start..batch_end], spans[batch_start..batch_end], batch_workers, timeout_ms, gpa, worker_argv_template);
+        for (spans[batch_start..batch_end]) |*maybe_span| {
+            if (maybe_span.*) |*span| {
+                span.start_ns += batch_offset_ns;
+                span.end_ns += batch_offset_ns;
+            }
+        }
+        batch_start = batch_end;
+    }
     const wall_ns = wall_timer.read();
 
     printResults(tests, results, args.verbose, gpa, wall_ns, max_children);
