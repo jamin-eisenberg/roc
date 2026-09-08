@@ -177,7 +177,10 @@ pub const Constants = struct {
     ///     diagnostic node tags.
     /// 81: Stored functions retain callable-path dispatch evidence across
     ///     reusable compile-time values.
-    pub const CACHE_VERSION = 81;
+    /// 82: Literal dispatch plans retain their enclosing pattern-failure
+    ///     expression without increasing the serialized plan size.
+    /// 83: Where methods retain their complete type annotation in CIR.
+    pub const CACHE_VERSION = 83;
 };
 
 /// Configuration for the Roc cache system.

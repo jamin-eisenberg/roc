@@ -2486,7 +2486,6 @@ const WhereClauseTypeState = struct {
     start: Token.Idx,
     var_tok: Token.Idx,
     name_tok: Token.Idx,
-    args_start: Token.Idx,
 };
 
 const WhereClauseAliasState = struct {
@@ -3966,6 +3965,19 @@ fn runExprStatementKernel(
                     .operator = op_pos,
                 });
 
+                if (first_token_tag == .LowerIdent and self.peekN(1) != .NoSpaceDotUpperIdent) {
+                    const ident_start = self.pos;
+                    const empty_qualifiers = try self.store.tokenSpanFrom(self.store.scratchTokenTop());
+                    self.advance();
+                    const rhs = try self.store.addExpr(.{ .ident = .{
+                        .region = .{ .start = ident_start, .end = self.pos },
+                        .token = ident_start,
+                        .qualifiers = empty_qualifiers,
+                    } });
+                    expr_finish_state = .{ .start = ident_start, .min_bp = 100, .expr = rhs };
+                    continue :expr_kernel .suffix;
+                }
+
                 if (first_token_tag == .LowerIdent or first_token_tag == .UpperIdent) {
                     const ident_start = self.pos;
                     const qual_result = try self.readQualificationChain(.expression_value_boundary);
@@ -5333,35 +5345,11 @@ fn runExprStatementKernel(
                     .where_clause_type => {
                         const state = open_syntax.popTypePayload(.where_clause_type, WhereClauseTypeState);
                         last_type_anno = null;
-                        const method_type = self.store.getTypeAnno(completed);
-                        if (method_type == .@"fn") {
-                            const fn_type = method_type.@"fn";
-                            const args = try self.store.addCollection(.collection_ty_anno, .{
-                                .region = .{ .start = state.args_start, .end = self.pos },
-                                .span = fn_type.args.span,
-                            });
-                            try self.store.addScratchWhereClause(try self.store.addWhereClause(.{ .mod_method = .{
-                                .region = .{ .start = state.start, .end = self.pos },
-                                .name_tok = state.name_tok,
-                                .var_tok = state.var_tok,
-                                .args = args,
-                                .ret_anno = fn_type.ret,
-                                .effectful = fn_type.effectful,
-                            } }));
-                            continue :expr_kernel .where_after_clause;
-                        }
-
-                        const empty_args = try self.store.addCollection(.collection_ty_anno, .{
-                            .region = .{ .start = state.args_start, .end = self.pos },
-                            .span = base.DataSpan.empty(),
-                        });
                         try self.store.addScratchWhereClause(try self.store.addWhereClause(.{ .mod_method = .{
                             .region = .{ .start = state.start, .end = self.pos },
                             .name_tok = state.name_tok,
                             .var_tok = state.var_tok,
-                            .args = empty_args,
-                            .ret_anno = completed,
-                            .effectful = false,
+                            .anno = completed,
                         } }));
                         continue :expr_kernel .where_after_clause;
                     },
@@ -5798,12 +5786,10 @@ fn runExprStatementKernel(
                 }
                 self.advance();
 
-                const args_start = self.pos;
                 try open_syntax.pushType(open_allocator, .where_clause_type, WhereClauseTypeState, .{
                     .start = start,
                     .var_tok = var_tok,
                     .name_tok = name_tok,
-                    .args_start = args_start,
                 });
                 type_args = .not_looking_for_args;
                 continue :expr_kernel .type_prefix;

@@ -582,6 +582,10 @@ pub const SpecializationCounters = specialize.Counters;
 
 /// Deterministic counts for body-context, type-instantiation, and call work.
 pub const BodyDiagnostics = struct {
+    /// Nested specialization candidate-index probes and candidates examined.
+    nested_lookup_probes: u64 = 0,
+    /// Entries examined while mapping draft functions to committed identities.
+    draft_commit_lookup_steps: u64 = 0,
     graphs_created: u64 = 0,
     body_contexts_created: u64 = 0,
     instantiation_scopes_created: u64 = 0,
@@ -7944,6 +7948,8 @@ const Builder = struct {
         else
             source_ctx.activeCodecContractContext();
         const family = DraftNestedFamilyAddress.init(nested, source_ctx.method_scope.key, source_fn_key);
+        self.countBodyDiagnostic("nested_lookup_probes");
+        const family_exists = source_ctx.draft.nested_spec_families.contains(family);
         const stored_evidence = try self.constFnEvidence(requested_evidence);
         const evidence_digest = Ast.fnEvidenceDigest(stored_evidence.nodes, stored_evidence.frames, stored_evidence.head);
         const resolved_request_ty: ?Type.TypeId = if (try source_ctx.graph.typeIsResolved(request_fn_node))
@@ -7975,6 +7981,7 @@ const Builder = struct {
         if (resolved_lookup_address) |address| {
             if (source_ctx.draft.nested_spec_lookup.get(address)) |candidates| {
                 for (candidates.items) |raw_spec| {
+                    self.countBodyDiagnostic("nested_lookup_probes");
                     const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                     if (signature_relation == .exact_graph and
                         source_ctx.draft.fns.items[@intFromEnum(spec.fn_id)].signature_relation != .exact_graph)
@@ -7985,16 +7992,19 @@ const Builder = struct {
                     if (!optionalDraftCodecContractContextEql(source_ctx.graph, spec.codec_contract, codec_contract)) continue;
                     if (!draftCaptureEntryGuardsMatch(source_ctx.graph, spec.capture_entry_guards, capture_entry_guards)) continue;
                     if (!std.meta.eql(spec.lexical_owner, source_ctx.draft.current_owner)) continue;
-                    const spec_fn_ty = spec.request_fn_ty orelse continue;
+                    const spec_request = try draftNestedSpecRequestNode(source_ctx.draft, source_ctx.graph, spec);
+                    if (!try source_ctx.graph.typeIsResolved(spec_request)) continue;
+                    const spec_fn_ty = try source_ctx.activeTypeFromNode(spec_request);
                     if (!try source_ctx.typeStore().typeEql(source_ctx.nameStore(), spec_fn_ty, resolved_request_ty.?)) continue;
                     if (!selection.add(raw_spec, true)) unreachable;
                 }
             }
         }
-        if (selection.selected() == null) {
+        if (family_exists and selection.selected() == null) {
             if (open_shape_lookup_address) |address| {
                 if (source_ctx.draft.nested_spec_lookup.get(address)) |candidates| {
                     for (candidates.items) |raw_spec| {
+                        self.countBodyDiagnostic("nested_lookup_probes");
                         const spec = &source_ctx.draft.nested_specs.items[raw_spec];
                         if (spec.state != .lowered) continue;
                         if (spec.request_fn_ty != null) continue;
@@ -8015,10 +8025,11 @@ const Builder = struct {
             }
         }
         var interface = try source_ctx.graph.functionInterfaceIterator(request_fn_node);
-        if (selection.selected() == null) {
+        if (family_exists and selection.selected() == null) {
             while (interface.next()) |interface_node| {
                 var aliases = source_ctx.graph.classMemberIterator(interface_node);
                 while (aliases.next()) |member| {
+                    self.countBodyDiagnostic("nested_lookup_probes");
                     const lookup_address = DraftNestedLookupAddress{
                         .family = family,
                         .evidence_digest = evidence_digest.bytes,
@@ -8027,6 +8038,7 @@ const Builder = struct {
                     };
                     if (source_ctx.draft.nested_spec_lookup.get(lookup_address)) |candidates| {
                         for (candidates.items) |raw_spec| {
+                            self.countBodyDiagnostic("nested_lookup_probes");
                             const seen = try seen_specs.getOrPut(raw_spec);
                             if (seen.found_existing) continue;
                             const spec = &source_ctx.draft.nested_specs.items[raw_spec];
@@ -8067,7 +8079,7 @@ const Builder = struct {
         // A checked recursive reference whose fresh cells have not yet joined
         // any interface class above names the in-progress specialization of
         // the same site on its own ownership chain.
-        if (selection.selected() == null and recursive_reference) {
+        if (family_exists and selection.selected() == null and recursive_reference) {
             for (source_ctx.draft.nested_specs.items, 0..) |*spec, raw_spec_usize| {
                 if (spec.state != .lowering) continue;
                 if (spec.request_fn_ty != null) continue;
@@ -8136,6 +8148,7 @@ const Builder = struct {
             return .{ .draft = spec.fn_id };
         }
         self.count("nested_misses");
+        try source_ctx.draft.nested_spec_families.put(family, {});
 
         const fn_id = try source_ctx.draft.addFn(.{ .source = .{
             .fn_def = .{ .nested = nested },
@@ -8189,6 +8202,12 @@ const Builder = struct {
             try lookup_entry.value_ptr.append(self.allocator, @intCast(spec_index));
         }
         if (open_shape_lookup_address) |address| {
+            try registerNestedSpecLookup(source_ctx.draft, self.allocator, address, @intCast(spec_index));
+        }
+        // A closed request has an exact interface before its body completes.
+        // Index it now so recursive calls with fresh instantiation cells can
+        // reuse this body through structural equality of the live interface.
+        if (resolved_lookup_address) |address| {
             try registerNestedSpecLookup(source_ctx.draft, self.allocator, address, @intCast(spec_index));
         }
 
@@ -9371,13 +9390,6 @@ const Builder = struct {
         const identities = try self.allocator.alloc(?Ast.SpecIdentity, body_draft.fns.items.len);
         defer self.allocator.free(identities);
         @memset(identities, null);
-        const allow_imported = try self.allocator.alloc(bool, body_draft.fns.items.len);
-        defer self.allocator.free(allow_imported);
-        @memset(allow_imported, false);
-        const allow_identity_merge = try self.allocator.alloc(bool, body_draft.fns.items.len);
-        defer self.allocator.free(allow_identity_merge);
-        @memset(allow_identity_merge, true);
-
         for (body_draft.sealed_nested_specs.items) |*spec| {
             spec.sealed_codec_contract = if (spec.codec_contract) |contract|
                 self.codecContractIdentity(.{
@@ -9390,12 +9402,30 @@ const Builder = struct {
                 null;
         }
 
+        // These sealed tables no longer change during commit. Index their
+        // producer-authored function ids once rather than searching per body.
+        var template_by_fn = collections.DenseMap(DraftFnId, *const SealedTemplateSpec).init(self.allocator);
+        defer template_by_fn.deinit();
+        for (body_draft.sealed_template_specs.items) |*spec| {
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            try template_by_fn.put(spec.fn_id, spec);
+        }
+        var nested_by_fn = collections.DenseMap(DraftFnId, *const SealedNestedSpec).init(self.allocator);
+        defer nested_by_fn.deinit();
+        for (body_draft.sealed_nested_specs.items) |*spec| {
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            try nested_by_fn.put(spec.fn_id, spec);
+        }
+        var prior_identities = std.AutoHashMap(specialize.SpecLookupAddress, u32).init(self.allocator);
+        defer prior_identities.deinit();
+        const previous_same_identity = try self.allocator.alloc(?u32, body_draft.fns.items.len);
+        defer self.allocator.free(previous_same_identity);
+
         var next_fn: u32 = @intCast(self.program.fnCount());
         for (body_draft.fns.items, 0..) |fn_, raw_index| {
             const draft_id: DraftFnId = @enumFromInt(@as(u32, @intCast(raw_index)));
-            const template_spec: ?*const SealedTemplateSpec = for (body_draft.sealed_template_specs.items) |*spec| {
-                if (spec.fn_id == draft_id) break spec;
-            } else null;
+            self.countBodyDiagnostic("draft_commit_lookup_steps");
+            const template_spec = template_by_fn.get(draft_id);
             if (template_spec) |spec| {
                 if (spec.state == .resolved) {
                     fn_slots[raw_index] = spec.resolved_slot orelse
@@ -9415,6 +9445,8 @@ const Builder = struct {
                 .head = fn_.source.const_evidence_frame_head,
             };
             var identity: ?Ast.SpecIdentity = null;
+            var allow_imported = false;
+            var allow_identity_merge = true;
             var lexical_owner: ?DraftOwner = null;
             if (template_spec) |spec| {
                 if (!spec.local_context_dependent) {
@@ -9438,28 +9470,25 @@ const Builder = struct {
                     );
                 }
                 lexical_owner = spec.lexical_owner;
-                allow_imported[raw_index] = !spec.requires_local;
-                allow_identity_merge[raw_index] = !spec.requires_local;
+                allow_imported = !spec.requires_local;
+                allow_identity_merge = !spec.requires_local;
             }
             if (identity == null) {
-                for (body_draft.sealed_nested_specs.items) |spec| {
-                    if (spec.fn_id == draft_id) {
-                        if (!spec.local_context_dependent) {
-                            identity = nestedSpecIdentity(
-                                spec.nested,
-                                spec.method_scope,
-                                spec.source_fn_key,
-                                sealed_template.evidence_digest,
-                                spec.capture_abi_digest,
-                                spec.sealed_codec_contract,
-                                fn_ty,
-                                digest,
-                            );
-                        }
-                        lexical_owner = spec.lexical_owner;
-                        allow_identity_merge[raw_index] = !spec.requires_local;
-                        break;
+                if (nested_by_fn.get(draft_id)) |spec| {
+                    if (!spec.local_context_dependent) {
+                        identity = nestedSpecIdentity(
+                            spec.nested,
+                            spec.method_scope,
+                            spec.source_fn_key,
+                            sealed_template.evidence_digest,
+                            spec.capture_abi_digest,
+                            spec.sealed_codec_contract,
+                            fn_ty,
+                            digest,
+                        );
                     }
+                    lexical_owner = spec.lexical_owner;
+                    allow_identity_merge = !spec.requires_local;
                 }
             }
             identities[raw_index] = identity;
@@ -9484,10 +9513,10 @@ const Builder = struct {
             };
 
             if (identity) |wanted| {
-                var prior: usize = 0;
-                while (prior < raw_index) : (prior += 1) {
-                    if (fn_slots[prior] == null) continue;
-                    if (!allow_identity_merge[raw_index] or !allow_identity_merge[prior]) continue;
+                const address = specialize.SpecLookupAddress.fromIdentity(wanted);
+                var candidate = if (allow_identity_merge) prior_identities.get(address) else null;
+                while (candidate) |prior| : (candidate = previous_same_identity[prior]) {
+                    self.countBodyDiagnostic("draft_commit_lookup_steps");
                     if (identities[prior]) |existing| {
                         if (try self.draftSpecIdentityEql(existing, wanted)) {
                             const prior_template = body_draft.fns.items[prior].source;
@@ -9508,9 +9537,9 @@ const Builder = struct {
                         }
                     }
                 } else {
-                    const committed: ?specialize.LookupResult = if (!allow_identity_merge[raw_index])
+                    const committed: ?specialize.LookupResult = if (!allow_identity_merge)
                         null
-                    else if (allow_imported[raw_index])
+                    else if (allow_imported)
                         try self.spec_store.find(wanted, specializationEvidenceView(requested_evidence))
                     else if (try self.spec_store.findLocal(wanted, specializationEvidenceView(requested_evidence))) |hit|
                         .{ .local = hit }
@@ -9535,6 +9564,11 @@ const Builder = struct {
                         fn_slots[raw_index] = .{ .local = @enumFromInt(next_fn) };
                         next_fn += 1;
                         emit_fns[raw_index] = true;
+                    }
+                    if (allow_identity_merge) {
+                        const entry = try prior_identities.getOrPut(address);
+                        previous_same_identity[raw_index] = if (entry.found_existing) entry.value_ptr.* else null;
+                        entry.value_ptr.* = @intCast(raw_index);
                     }
                 }
             } else {
@@ -13592,6 +13626,9 @@ const BodyDraftStore = struct {
     nested_specs: std.ArrayList(DraftNestedSpec),
     sealed_nested_specs: std.ArrayList(SealedNestedSpec),
     nested_spec_lookup: std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)),
+    /// Exact family membership proves a new site's miss without visiting any
+    /// graph aliases. It is independent of mutable interface root identity.
+    nested_spec_families: std.AutoHashMap(DraftNestedFamilyAddress, void),
     exprs: std.ArrayList(DraftExpr),
     pats: std.ArrayList(DraftPat),
     stmts: std.ArrayList(DraftStmt),
@@ -13702,6 +13739,7 @@ const BodyDraftStore = struct {
             .nested_specs = .empty,
             .sealed_nested_specs = .empty,
             .nested_spec_lookup = std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)).init(allocator),
+            .nested_spec_families = std.AutoHashMap(DraftNestedFamilyAddress, void).init(allocator),
             .exprs = .empty,
             .pats = .empty,
             .stmts = .empty,
@@ -13899,6 +13937,7 @@ const BodyDraftStore = struct {
         var nested_lookup_lists = self.nested_spec_lookup.valueIterator();
         while (nested_lookup_lists.next()) |list| list.deinit(self.allocator);
         self.nested_spec_lookup.deinit();
+        self.nested_spec_families.deinit();
         self.owner_runs.deinit(self.allocator);
         self.stmt_impossibility_proofs.deinit(self.allocator);
         self.pat_impossibility_proofs.deinit(self.allocator);
@@ -14654,7 +14693,9 @@ const BodyDraftStore = struct {
         var nested_lookup_lists = self.nested_spec_lookup.valueIterator();
         while (nested_lookup_lists.next()) |list| list.deinit(self.allocator);
         self.nested_spec_lookup.deinit();
+        self.nested_spec_families.deinit();
         self.nested_spec_lookup = std.AutoHashMap(DraftNestedLookupAddress, std.ArrayList(u32)).init(self.allocator);
+        self.nested_spec_families = std.AutoHashMap(DraftNestedFamilyAddress, void).init(self.allocator);
         self.template_spec_by_fn.deinit();
         self.template_spec_by_fn = collections.DenseMap(DraftFnId, u32).init(self.allocator);
         self.closed_direct_specializations.deinit();
@@ -14684,6 +14725,7 @@ const BodyDraftStore = struct {
             self.impossibility_proofs.items.len != 0 or
             self.template_spec_lookup.count() != 0 or
             self.nested_spec_lookup.count() != 0 or
+            self.nested_spec_families.count() != 0 or
             self.template_specs.items.len != 0 or
             self.nested_specs.items.len != 0 or
             self.spec_job_workspace != null or
@@ -16083,6 +16125,7 @@ const BodyContext = struct {
     /// If any argument finalizes as uninhabited, the body is unreachable.
     /// This callee-owned proof is separate from call-chain frame identity.
     function_entry_demand_guards: []const NodeId = &.{},
+    propagate_constructor_value_evidence: bool = false,
     /// Exact return cell owned by the active checked lambda specialization.
     /// Source `return` expressions must consume this cell rather than create a
     /// new instantiation of the lambda's checked return type.
@@ -18558,6 +18601,7 @@ const BodyContext = struct {
         child.active_const_binding = self.active_const_binding;
         child.runtime_demand_guard_frames = self.runtime_demand_guard_frames;
         child.function_entry_demand_guards = self.function_entry_demand_guards;
+        child.propagate_constructor_value_evidence = self.propagate_constructor_value_evidence;
         child.restored_local_proc_scope = self.restored_local_proc_scope;
         child.in_default_expr = self.in_default_expr;
         child.specialization_dispatch_crashes = self.specialization_dispatch_crashes;
@@ -21480,6 +21524,11 @@ const BodyContext = struct {
         const fn_nodes = try self.graph.functionNodes(fn_node);
         if (fn_nodes.args.len != lambda.args.len) Common.invariant("lambda template arity differs from concrete function type");
 
+        const saved_propagation = self.propagate_constructor_value_evidence;
+        defer self.propagate_constructor_value_evidence = saved_propagation;
+        self.propagate_constructor_value_evidence = saved_propagation or
+            self.graph.requestPropagatesConstructorEvidence(fn_node);
+
         const lowered = try self.lowerLambdaArgsAndBodyAtCell(
             lambda_id,
             lambda.args,
@@ -23539,6 +23588,16 @@ const BodyContext = struct {
         };
     }
 
+    fn iteratorCallNeedsConstructorArgumentEvidence(
+        self: *BodyContext,
+        procedure: ?checked.IteratorProcedureId,
+        args: []const checked.CheckedExprId,
+    ) Allocator.Error!bool {
+        if (procedure != .iter_custom) return false;
+        if (args.len != 3) Common.invariant("Iter.custom call did not have three arguments");
+        return try self.graph.containsIteratorInterface(try self.instNode(self.view.bodies.expr(args[0]).ty));
+    }
+
     fn iteratorProcedureForMethodTarget(
         _: *BodyContext,
         target: static_dispatch.MethodTarget,
@@ -24376,12 +24435,17 @@ const BodyContext = struct {
                     const components = self.generatedIteratorComponentNodes(expected, 2);
                     return try self.graphFunctionNode(&.{ components[0], request_fn.args[1], components[1] }, expected);
                 }
+                const state_is_private = try self.graph.containsGeneratedPrivate(request_fn.args[0]);
+                const advance_node = if (state_is_private)
+                    try self.iterCustomAdvanceRequestNode(checked_args[2], request_fn.args[0])
+                else
+                    request_fn.args[2];
                 return try self.graphFunctionNode(
-                    request_fn.args,
+                    &.{ request_fn.args[0], request_fn.args[1], advance_node },
                     try self.generatedIteratorNode(
                         mintedProducerKind(procedure),
                         public_fn.ret,
-                        &.{ request_fn.args[0], request_fn.args[2] },
+                        &.{ request_fn.args[0], advance_node },
                         try self.callableArgumentEvidenceDigest(checked_args[2]),
                     ),
                 );
@@ -24457,6 +24521,67 @@ const BodyContext = struct {
             .numeric_range_delegate, .iter_from_step, .range_done => {},
         }
         return null;
+    }
+
+    /// Build the `Iter.custom` transition request with its checked state role
+    /// bound to the seed's exact representation. The transition's argument and
+    /// successful next-state result share that checked identity, so a fresh
+    /// instantiation propagates the representation through both positions
+    /// without mutating a finished seed Monotype or reconstructing a type path.
+    fn iterCustomAdvanceRequestNode(
+        self: *BodyContext,
+        checked_advance: checked.CheckedExprId,
+        state_node: NodeId,
+    ) Allocator.Error!NodeId {
+        const checked_fn_ty = self.view.bodies.expr(checked_advance).ty;
+        const checked_fn = self.checkedFunctionType(checked_fn_ty);
+        if (checked_fn.args.len != 1) {
+            Common.invariant("Iter.custom advance callable did not have exactly one state argument");
+        }
+        var checked_try_ty = checked_fn.ret;
+        const checked_try = while (true) switch (checkedPayload(self.view, checked_try_ty)) {
+            .alias => |alias| checked_try_ty = alias.backing,
+            .nominal => |nominal| break nominal,
+            .pending, .err, .flex, .rigid, .record_unbound, .record, .tuple, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("Iter.custom advance callable did not return Try"),
+        };
+        const checked_try_builtin = switch (checked_try.representation) {
+            .builtin => |builtin| builtin,
+            .local_declaration, .imported_declaration, .local_box_payload_capability, .imported_box_payload_capability, .opaque_without_backing => Common.invariant("Iter.custom advance callable returned a non-builtin Try"),
+        };
+        if (checked.builtinRuntimeEncoding(checked_try_builtin) != .try_nominal or checked_try.args.len != 2) {
+            Common.invariant("Iter.custom advance callable did not return the builtin Try type");
+        }
+        var checked_ok = checked_try.args[0];
+        const checked_ok_items = while (true) switch (checkedPayload(self.view, checked_ok)) {
+            .alias => |alias| checked_ok = alias.backing,
+            .tuple => |items| break items,
+            .pending, .err, .flex, .rigid, .record_unbound, .record, .nominal, .function, .tag_union, .empty_record, .empty_tag_union => Common.invariant("Iter.custom advance success value was not an item-state tuple"),
+        };
+        if (checked_ok_items.len != 2) {
+            Common.invariant("Iter.custom advance success tuple did not have item and state elements");
+        }
+        const checked_next_state = checked_ok_items[1];
+
+        const previous = self.instantiation;
+        self.instantiation = TypeInstantiationContext.init(
+            self.allocator,
+            self.builder.allocateInstantiationScope(),
+            self.view.key.bytes,
+        );
+        defer {
+            self.instantiation.deinit();
+            self.instantiation = previous;
+        }
+
+        try self.putScopedNode(self.scopedCheckedType(checked_fn.args[0]), state_node);
+        try self.putScopedNode(self.scopedCheckedType(checked_next_state), state_node);
+        const advance_node = try self.instNode(checked_fn_ty);
+        const advance_fn = try self.graph.functionNodes(advance_node);
+        if (advance_fn.args.len != 1 or !self.graph.sameClass(advance_fn.args[0], state_node)) {
+            Common.invariant("Iter.custom advance request lost its exact state argument");
+        }
+        self.graph.registerConstructorEvidenceRequest(advance_node);
+        return advance_node;
     }
 
     /// The registry-declared minted kind for a producing iterator procedure.
@@ -30221,6 +30346,7 @@ const BodyContext = struct {
             call_ctx.in_deferred_body = self.in_deferred_body;
 
             const source_fn_ty = self.directCallInstantiationSourceFnType(target, call.source_fn_ty_payload);
+            const iterator_procedure = self.iteratorProcedureForResolvedTarget(target);
             var fn_node = try call_ctx.instantiateCallNodeFromCallerAtNode(
                 source_fn_ty,
                 self,
@@ -30228,8 +30354,8 @@ const BodyContext = struct {
                 call.args,
                 expected_ret_node,
                 try self.hostedTryCapabilityForResolvedTarget(target),
+                try self.iteratorCallNeedsConstructorArgumentEvidence(iterator_procedure, call.args),
             );
-            const iterator_procedure = self.iteratorProcedureForResolvedTarget(target);
             if (iterator_procedure) |procedure| {
                 const public_fn_node = self.graph.requestSourceInterface(fn_node) orelse fn_node;
                 if (try self.generatedIteratorFunctionNode(procedure, public_fn_node, fn_node, call.args)) |private_fn_node| {
@@ -30312,6 +30438,7 @@ const BodyContext = struct {
             call.args,
             expected_ret_node,
             null,
+            false,
         );
         const fn_nodes = try self.graph.functionNodes(fn_node);
         try self.prepareExprSpanAtNodes(call.args, fn_nodes.args);
@@ -30600,6 +30727,7 @@ const BodyContext = struct {
         checked_args: []const checked.CheckedExprId,
         expected_ret_node: ?NodeId,
         hosted_try_capability: ?HostedTryAdapterCapability,
+        capture_constructor_argument_evidence: bool,
     ) Allocator.Error!NodeId {
         const function = self.checkedFunctionType(source_fn_ty);
         if (function.args.len != checked_args.len) {
@@ -30616,15 +30744,19 @@ const BodyContext = struct {
         const request_args = try self.graph.arena().alloc(NodeId, function.args.len);
         for (fn_graph.args, checked_args, 0..) |formal_node, checked_arg, index| {
             const arg_ty = caller.view.bodies.expr(checked_arg).ty;
-            if (try caller.exprCallResultEvidenceNode(checked_arg, null)) |evidence_node| {
-                if (try self.graph.containsGeneratedPrivate(evidence_node)) {
+            const evidence_node = if (capture_constructor_argument_evidence or caller.propagate_constructor_value_evidence)
+                try caller.exprCallArgumentEvidenceNode(checked_arg)
+            else
+                try caller.exprCallResultEvidenceNode(checked_arg, null);
+            if (evidence_node) |evidence| {
+                if (try self.graph.containsGeneratedPrivate(evidence)) {
                     const public_node = try caller.freshInstNode(arg_ty);
-                    try self.graph.relateOpaqueInterface(public_node, evidence_node);
+                    try self.graph.relateOpaqueInterface(public_node, evidence);
                     try relateRequestComponent(self.graph, formal_node, public_node);
-                    request_args[index] = evidence_node;
+                    request_args[index] = evidence;
                 } else {
                     const request = try self.unifyFormalWithCallerArgNode(caller, formal_node, arg_ty);
-                    try relateRequestComponent(self.graph, formal_node, evidence_node);
+                    try relateRequestComponent(self.graph, formal_node, evidence);
                     request_args[index] = request;
                 }
             } else {
@@ -30949,6 +31081,189 @@ const BodyContext = struct {
             return try self.activeNodeFromType(ty);
         }
         return null;
+    }
+
+    /// Return the exact representation carried by a call argument. Besides a
+    /// producer result or lookup, a constructor can carry generated-private
+    /// evidence in one of its children (for example `(index, iterator)`).
+    /// Relate constructor children into a fresh node so that evidence reaches
+    /// the callee request without refining the checked-public cached cell.
+    fn exprCallArgumentEvidenceNode(
+        self: *BodyContext,
+        checked_arg: checked.CheckedExprId,
+    ) Allocator.Error!?NodeId {
+        if (try self.exprCallResultEvidenceNode(checked_arg, null)) |produced| {
+            return if (try self.graph.containsGeneratedPrivate(produced)) produced else null;
+        }
+        const expr = self.view.bodies.expr(checked_arg);
+        switch (expr.data) {
+            .tuple, .record, .tag, .nominal, .list => {},
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => return null,
+        }
+        const argument_node = try self.freshInstNode(expr.ty);
+        const produced = (try self.exprProducedValueEvidenceNode(checked_arg, argument_node)) orelse return null;
+        return if (try self.graph.containsGeneratedPrivate(produced)) produced else null;
+    }
+
+    /// Return the exact value witness explicitly produced by an expression at
+    /// a particular request. Direct producers and lookups supply their own
+    /// evidence; constructors propagate each child's evidence into its exact
+    /// positional slot and create a distinct container witness when needed.
+    fn exprProducedValueEvidenceNode(
+        self: *BodyContext,
+        checked_expr: checked.CheckedExprId,
+        request_node: NodeId,
+    ) Allocator.Error!?NodeId {
+        if (try self.exprCallResultEvidenceNode(checked_expr, null)) |produced| {
+            return try self.relateCheckedNodeToProducedValue(request_node, produced);
+        }
+        const expr = self.view.bodies.expr(checked_expr);
+        return switch (expr.data) {
+            .tuple => |items| blk: {
+                const item_nodes = try self.graph.tupleItemNodes(request_node);
+                if (items.len != item_nodes.len) Common.invariant("tuple value evidence arity differed from its graph type");
+                const produced_items = try self.allocator.alloc(NodeId, items.len);
+                defer self.allocator.free(produced_items);
+                var requires_distinct_witness = false;
+                for (items, item_nodes, 0..) |item, item_node, index| {
+                    const produced = (try self.exprProducedValueEvidenceNode(item, item_node)) orelse item_node;
+                    const witness = try self.constructorChildWitness(
+                        item_node,
+                        produced,
+                        "tuple value evidence child differed without explicit representation evidence",
+                    );
+                    produced_items[index] = witness.slot;
+                    if (witness.requires_witness) requires_distinct_witness = true;
+                }
+                if (!requires_distinct_witness) break :blk null;
+                const structural_node = try self.graph.newNode(.{
+                    .tuple = try self.graph.arena().dupe(NodeId, produced_items),
+                });
+                const witness = try self.constructorWitnessWithStructuralNode(request_node, structural_node);
+                break :blk try self.relateCheckedNodeToProducedValue(request_node, witness);
+            },
+            .tag => |tag| blk: {
+                const name = try self.tagName(self.view, tag.name);
+                const produced_payloads = try self.allocator.alloc(NodeId, tag.args.len);
+                defer self.allocator.free(produced_payloads);
+                var requires_distinct_witness = false;
+                for (tag.args, 0..) |payload, index| {
+                    const payload_node = try self.graph.tagConstructionPayloadNode(request_node, name, index);
+                    const produced = (try self.exprProducedValueEvidenceNode(payload, payload_node)) orelse payload_node;
+                    const witness = try self.constructorChildWitness(
+                        payload_node,
+                        produced,
+                        "tag value evidence child differed without explicit representation evidence",
+                    );
+                    produced_payloads[index] = witness.slot;
+                    if (witness.requires_witness) requires_distinct_witness = true;
+                }
+                if (!requires_distinct_witness) break :blk null;
+                const structural_node = try self.graph.tagValueNodeWithPayloads(request_node, name, produced_payloads);
+                const witness = try self.constructorWitnessWithStructuralNode(request_node, structural_node);
+                break :blk try self.relateCheckedNodeToProducedValue(request_node, witness);
+            },
+            .record => |record| blk: {
+                const target_fields = (try self.graph.recordConstructionNodes(request_node)).fields;
+                const produced_fields = try self.allocator.dupe(InstField, target_fields);
+                defer self.allocator.free(produced_fields);
+                const base_node = if (record.ext) |base_expr|
+                    try self.exprProducedValueEvidenceNode(
+                        base_expr,
+                        try self.freshInstNode(self.view.bodies.expr(base_expr).ty),
+                    )
+                else
+                    null;
+                var requires_distinct_witness = false;
+                for (target_fields, 0..) |field, index| {
+                    const field_value = (try self.recordUpdateFieldValue(record.fields, field.name)) orelse {
+                        const base_witness = base_node orelse continue;
+                        var is_unset = false;
+                        for (record.unsets) |label| {
+                            if (try self.recordFieldName(self.view, label) == field.name) {
+                                is_unset = true;
+                                break;
+                            }
+                        }
+                        if (is_unset) continue;
+                        const produced_slot = try self.graph.recordConstructionFieldNode(base_witness, field.name);
+                        const witness = try self.constructorChildWitness(
+                            field.ty,
+                            produced_slot,
+                            "record update evidence field differed without explicit representation evidence",
+                        );
+                        produced_fields[index].ty = witness.slot;
+                        if (witness.requires_witness) requires_distinct_witness = true;
+                        continue;
+                    };
+                    const value_node = try self.graph.recordConstructionFieldValueNode(request_node, field.name);
+                    const produced_value = (try self.exprProducedValueEvidenceNode(field_value, value_node)) orelse value_node;
+                    const produced_slot = switch (try self.graph.recordConstructionFieldKind(request_node, field.name)) {
+                        .required, .defaulted => produced_value,
+                        .optional => optional: {
+                            const present = try self.nameStoreMut().internTagLabel(Builder.optional_slot_present_tag);
+                            const present_node = try self.graph.tagValueNodeWithPayloads(field.ty, present, &.{produced_value});
+                            break :optional try self.constructorWitnessWithStructuralNode(field.ty, present_node);
+                        },
+                    };
+                    const witness = try self.constructorChildWitness(
+                        field.ty,
+                        produced_slot,
+                        "record value evidence child differed without explicit representation evidence",
+                    );
+                    produced_fields[index].ty = witness.slot;
+                    if (witness.requires_witness) requires_distinct_witness = true;
+                }
+                if (!requires_distinct_witness) break :blk null;
+                const structural_node = try self.graph.newNode(.{ .record = .{
+                    .fields = try self.graph.arena().dupe(InstField, produced_fields),
+                    .ext = try self.graph.newNode(.empty_record),
+                } });
+                const witness = try self.constructorWitnessWithStructuralNode(request_node, structural_node);
+                break :blk try self.relateCheckedNodeToProducedValue(request_node, witness);
+            },
+            .list => |items| blk: {
+                const element_node = try self.graph.listElementNode(request_node);
+                var produced_element: ?NodeId = null;
+                for (items) |item| {
+                    const produced = (try self.exprProducedValueEvidenceNode(item, element_node)) orelse element_node;
+                    if (produced_element) |selected| {
+                        try selectRequestRepresentation(self.graph, selected, produced);
+                    } else {
+                        const witness = try self.constructorChildWitness(
+                            element_node,
+                            produced,
+                            "list value evidence child differed without explicit representation evidence",
+                        );
+                        if (witness.requires_witness) produced_element = witness.slot;
+                    }
+                }
+                const element_witness = produced_element orelse break :blk null;
+                const structural_node = try self.graph.newNode(.{ .list = element_witness });
+                const witness = try self.constructorWitnessWithStructuralNode(request_node, structural_node);
+                break :blk try self.relateCheckedNodeToProducedValue(request_node, witness);
+            },
+            .nominal => |nominal| blk: {
+                const representation_node = self.constructorRepresentationNode(request_node);
+                const named = switch (self.graph.content(representation_node)) {
+                    .named => |value| value,
+                    .redirect, .unresolved, .primitive, .list, .box, .tuple, .func, .tag_union, .record, .empty_tag_union, .empty_record, .erased, .zst => Common.invariant("nominal value evidence had no nominal graph representation"),
+                };
+                const backing = named.backing orelse
+                    Common.invariant("nominal value evidence graph node had no backing");
+                const produced = (try self.exprProducedValueEvidenceNode(nominal.backing_expr, backing.node)) orelse
+                    break :blk null;
+                const backing_witness = try self.constructorChildWitness(
+                    backing.node,
+                    produced,
+                    "nominal value evidence child differed without explicit representation evidence",
+                );
+                if (!backing_witness.requires_witness) break :blk null;
+                const witness = try self.graph.namedValueNodeWithBacking(representation_node, backing_witness.slot);
+                break :blk try self.relateCheckedNodeToProducedValue(representation_node, witness);
+            },
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .lookup_local, .lookup_external, .lookup_required, .empty_list, .match_, .if_, .empty_record, .block, .zero_argument_tag, .call, .closure, .lambda, .binop, .unary_minus, .unary_not, .field_access, .dispatch_call, .interpolation, .structural_eq, .structural_hash, .method_eq, .type_dispatch_call, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+        };
     }
 
     fn lookupCallArgumentEvidenceNode(
@@ -31306,6 +31621,7 @@ const BodyContext = struct {
                 call.args,
                 if (expected_ret_ty) |expected| try self.activeNodeFromType(expected) else null,
                 null,
+                false,
             );
             return switch (self.graph.content(fn_node)) {
                 .func => |function| function.ret,
@@ -31351,6 +31667,10 @@ const BodyContext = struct {
             call.args,
             expected_ret_node,
             try self.hostedTryCapabilityForResolvedTarget(call.direct_target.?),
+            try self.iteratorCallNeedsConstructorArgumentEvidence(
+                self.iteratorProcedureForResolvedTarget(call.direct_target.?),
+                call.args,
+            ),
         );
         if (self.iteratorProcedureForResolvedTarget(call.direct_target.?)) |procedure| {
             const public_fn_node = self.graph.requestSourceInterface(fn_node) orelse fn_node;
@@ -35065,6 +35385,13 @@ const BodyContext = struct {
             call.args,
             if (hosted_try_capability != null) expected_ret_node else null,
             hosted_try_capability,
+            if (call.direct_target) |target|
+                try self.iteratorCallNeedsConstructorArgumentEvidence(
+                    self.iteratorProcedureForResolvedTarget(target),
+                    call.args,
+                )
+            else
+                false,
         );
         const fn_nodes = try self.graph.functionNodes(fn_node);
         try relateRequestComponent(self.graph, fn_nodes.ret, expected_ret_node);
@@ -49822,6 +50149,13 @@ const BodyContext = struct {
                 try self.includeControlFlowResult(selection, entry.body);
             }
         }
+        if (value_selection) |selection| {
+            for (pending.items) |entry| {
+                if (self.exprImpossibilityProof(entry.body) == null) {
+                    self.draft.exprs.items[@intFromEnum(entry.body)].ty = selection.selected;
+                }
+            }
+        }
 
         const scrutinee = if (try self.nodeIsProvenUninhabited(scrutinee_node))
             try self.lowerUninhabitedScrutineeAtTypeCell(match.cond, scrutinee_cell)
@@ -50387,7 +50721,11 @@ const BodyContext = struct {
                 try self.controlFlowResultEvidenceNode(block.final_expr, expected_node)
             else
                 null,
-            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .list, .empty_list, .tuple, .match_, .if_, .record, .empty_record, .tag, .nominal, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
+            .tuple, .record, .tag, .nominal, .list => if (self.propagate_constructor_value_evidence)
+                try self.exprProducedValueEvidenceNode(checked_value, expected_node)
+            else
+                null,
+            .pending, .numeral, .str_from_quote, .str_segment, .str, .bytes_literal, .empty_list, .match_, .if_, .empty_record, .zero_argument_tag, .closure, .lambda, .binop, .unary_minus, .unary_not, .structural_eq, .structural_hash, .tuple_access, .runtime_error, .crash, .dbg, .expect_err, .expect, .ellipsis, .anno_only, .break_, .return_, .for_, .hosted_lambda, .run_low_level => null,
         };
     }
 
@@ -50405,10 +50743,11 @@ const BodyContext = struct {
         const selected_private = try self.graph.containsGeneratedPrivate(selected_node);
         const value_private = try self.graph.containsGeneratedPrivate(value_node);
         if (selected_private != value_private) {
-            if (!selection.has_value and !selected_private and value_private) {
+            if (!selected_private and value_private) {
                 // A finished private producer remains immutable and therefore
                 // cannot merge into the live public accumulator. Carry its
-                // exact cell forward as the request for every later branch.
+                // exact cell forward, then retag earlier branches after the
+                // final representation has been selected.
                 selection.selected = value_cell;
             } else {
                 Common.invariant("control-flow branch could not use its selected runtime representation");
@@ -50567,6 +50906,14 @@ const BodyContext = struct {
         );
         if (value_selection) |selection| {
             try self.includeControlFlowResult(selection, final_else);
+            for (branches) |branch| {
+                if (self.exprImpossibilityProof(branch.body) == null) {
+                    self.draft.exprs.items[@intFromEnum(branch.body)].ty = selection.selected;
+                }
+            }
+            if (self.exprImpossibilityProof(final_else) == null) {
+                self.draft.exprs.items[@intFromEnum(final_else)].ty = selection.selected;
+            }
         }
         return .{ .if_ = .{
             .branches = try self.addIfBranchSpan(branches),
@@ -52148,11 +52495,15 @@ const BodyContext = struct {
                     const arg_ty = caller.view.bodies.expr(checked_arg).ty;
                     const public_node = try caller.instNode(arg_ty);
                     try relateRequestComponent(self.graph, formal_node, public_node);
-                    if (try caller.exprCallResultEvidenceNode(checked_arg, null)) |evidence_node| {
+                    const evidence_node = if (caller.propagate_constructor_value_evidence)
+                        try caller.exprCallArgumentEvidenceNode(checked_arg)
+                    else
+                        try caller.exprCallResultEvidenceNode(checked_arg, null);
+                    if (evidence_node) |evidence| {
                         request_arg.* = try checkedMonoRequestNode(
                             self.graph,
                             public_node,
-                            evidence_node,
+                            evidence,
                             .exact,
                         );
                     } else {
