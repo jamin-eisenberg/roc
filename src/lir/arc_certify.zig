@@ -1869,7 +1869,7 @@ const Certifier = struct {
 
         const info = self.values.items[value];
         if (info.always_live) return true;
-        if (state.balanceOf(value) > 0) return true;
+        if (state.balanceOf(value) > 0 and !try self.claimsSpendUnit(state, value)) return true;
         const holder = state.holderOf(value);
         if (holder != no_value and try self.valueIsLiveSeen(state, holder, seen)) {
             return true;
@@ -2494,7 +2494,9 @@ const Certifier = struct {
         defer seen.unset(value_index);
 
         const info = self.values.items[value];
-        if (info.always_live or state.balanceOf(value) > 0) {
+        if (info.always_live or
+            (state.balanceOf(value) > 0 and !try self.claimsSpendUnit(state, value)))
+        {
             try appendUniqueValueId(anchors, self.allocator, value);
             return true;
         }
@@ -7230,6 +7232,43 @@ test "certify preserves a holder alternative to a payload lender across a join" 
     _ = try f.addProc(&.{owner}, field_read, .i64);
 
     try f.certify();
+}
+
+test "a fully claimed holder does not keep a stale alias live across a join" {
+    var f = try CertifyTest.init(testing.allocator);
+    defer f.deinit();
+    const holder_layout = try f.layouts.putStructFields(&.{.{ .index = 0, .layout = .str }});
+    const payload = try f.local(.str);
+    const holder = try f.local(holder_layout);
+    const taken = try f.local(.str);
+    const result = try f.local(.i64);
+
+    const ret = try f.ret(result);
+    const result_assign = try f.assignI64(result, ret);
+    const use_stale_payload = try f.store.addCFStmt(.{ .expect = .{
+        .condition = payload,
+        .next = result_assign,
+    } });
+    const join_id = f.freshJoinPointId();
+    const jump = try f.store.addCFStmt(.{ .jump = .{ .target = join_id } });
+    const release_taken = try f.decrefStmt(taken, .str, jump);
+    const take = try fieldReadStmt(&f, taken, holder, 0, release_taken);
+    const make_holder = try f.store.addCFStmt(.{ .assign_struct = .{
+        .target = holder,
+        .fields = try f.store.addLocalSpan(&.{payload}),
+        .next = take,
+    } });
+    const join = try f.store.addCFStmt(.{ .join = .{
+        .id = join_id,
+        .params = LIR.LocalSpan.empty(),
+        .body = use_stale_payload,
+        .remainder = make_holder,
+    } });
+    const body = try f.assignStr(payload, join);
+    _ = try f.addProc(&.{}, body, .i64);
+
+    try testing.expectError(error.Certification, f.certify());
+    try testing.expect(std.mem.find(u8, f.diag.message(), "unbound") != null);
 }
 
 test "certify drops a dead dormant lender from an owned join value" {
