@@ -1984,6 +1984,7 @@ fn optionalDraftCodecContractContextEql(
     if ((left == null) != (right == null)) return false;
     if (left == null) return true;
     return optionalCodecContractAnchorEql(left.?.anchor, right.?.anchor) and
+        graph.sameClass(left.?.shape_node, right.?.shape_node) and
         graph.sameFunctionInterface(
             left.?.constructor_node,
             right.?.constructor_node,
@@ -2989,6 +2990,7 @@ fn codecContractIdentityDigest(contract: ?Ast.CodecContractIdentity) names.TypeD
     hasher.update(&integer);
     hasher.update(&.{@intFromEnum(actual.kind)});
     hasher.update(&actual.constructor_ty_digest.bytes);
+    hasher.update(&actual.shape_ty_digest.bytes);
     return .{ .bytes = hasher.finalResult() };
 }
 
@@ -3437,6 +3439,8 @@ const Builder = struct {
             },
             .constructor_ty_digest = self.specializationTypeDigest(actual.constructor_ty),
             .constructor_ty = actual.constructor_ty,
+            .shape_ty_digest = self.specializationTypeDigest(actual.shape_ty),
+            .shape_ty = actual.shape_ty,
         };
     }
 
@@ -5786,11 +5790,13 @@ const Builder = struct {
             .constructor_node = try body_ctx.activeNodeFromType(
                 try body_ctx.importProgramType(contract.constructor_ty),
             ),
+            .shape_node = try body_ctx.activeNodeFromType(try body_ctx.importProgramType(contract.shape_ty)),
         } else null;
         if (draft_codec_contract) |contract| {
             try body_ctx.instantiateCodecContractAtCall(
                 contract.anchor,
                 contract.constructor_node,
+                contract.shape_node,
             );
         }
         self.active_template_root = .{
@@ -6277,6 +6283,7 @@ const Builder = struct {
             try body_ctx.instantiateCodecContractAtCall(
                 contract.anchor,
                 contract.constructor_node,
+                contract.shape_node,
             );
         }
         try body_ctx.instantiateTemplateDispatchRelations(template, null);
@@ -8242,6 +8249,7 @@ const Builder = struct {
             try nested_ctx.instantiateCodecContractAtCall(
                 contract.anchor,
                 contract.constructor_node,
+                contract.shape_node,
             );
         }
         const root_node = try nested_ctx.instNode(source_fn_ty);
@@ -8445,6 +8453,8 @@ const Builder = struct {
                 left_contract.derivation != right_contract.derivation or
                 left_contract.kind != right_contract.kind or
                 !std.meta.eql(left_contract.constructor_ty_digest, right_contract.constructor_ty_digest) or
+                !std.meta.eql(left_contract.shape_ty_digest, right_contract.shape_ty_digest) or
+                !try self.program.types.typeEql(&self.program.names, left_contract.shape_ty, right_contract.shape_ty) or
                 !try self.program.types.typeEql(
                     &self.program.names,
                     left_contract.constructor_ty,
@@ -9341,6 +9351,7 @@ const Builder = struct {
                 .constructor_ty = try committed_types.commitType(
                     contract.constructor_ty,
                 ),
+                .shape_ty = try committed_types.commitType(contract.shape_ty),
             } else null;
             // Seal-time requests are symbolic: they reserve the callee's id
             // for call-site patching and queue the body for the wave drain.
@@ -9417,6 +9428,7 @@ const Builder = struct {
                     .constructor_ty = try committed_types.commitType(
                         contract.constructor_ty,
                     ),
+                    .shape_ty = try committed_types.commitType(contract.shape_ty),
                 })
             else
                 null;
@@ -9476,6 +9488,7 @@ const Builder = struct {
                             .constructor_ty = try committed_types.commitType(
                                 contract.constructor_ty,
                             ),
+                            .shape_ty = try committed_types.commitType(contract.shape_ty),
                         })
                     else
                         null;
@@ -9737,6 +9750,7 @@ const Builder = struct {
                 .codec_contract = if (spec.codec_contract) |contract| .{
                     .anchor = contract.anchor,
                     .constructor_ty = try sealer.sealNode(contract.constructor_node),
+                    .shape_ty = try sealer.sealNode(contract.shape_node),
                 } else null,
                 .requires_local = spec.requires_local,
                 .local_context_dependent = spec.local_context_dependent,
@@ -9765,6 +9779,7 @@ const Builder = struct {
                 .codec_contract = if (spec.codec_contract) |contract| .{
                     .anchor = contract.anchor,
                     .constructor_ty = try sealer.sealNode(contract.constructor_node),
+                    .shape_ty = try sealer.sealNode(contract.shape_node),
                 } else null,
                 .lexical_owner = spec.lexical_owner,
                 .requires_local = spec.requires_local,
@@ -12963,12 +12978,14 @@ const CheckedCodecContractAnchor = struct {
 };
 
 /// Graph-local specialization context for a procedure body reached from a
-/// generated codec call. The instantiated constructor carries the complete
+/// generated codec call. The constructor and public shape carry the complete
 /// producer-authored contract component bindings, including components that
-/// the grounding format call's own type does not mention.
+/// the grounding format call's own type does not mention. The public shape
+/// retains its nominal boundary when the constructor uses the body shape.
 const DraftCodecContractContext = struct {
     anchor: CheckedCodecContractAnchor,
     constructor_node: NodeId,
+    shape_node: NodeId,
 };
 
 /// Durable form of `DraftCodecContractContext` used after the requesting
@@ -12976,6 +12993,7 @@ const DraftCodecContractContext = struct {
 const SealedCodecContractContext = struct {
     anchor: CheckedCodecContractAnchor,
     constructor_ty: Type.TypeId,
+    shape_ty: Type.TypeId,
 };
 
 const CodecContractBoundary = struct {
@@ -13016,6 +13034,7 @@ const ActiveCodecContract = struct {
     method_call_slots: []CodecMethodCallSlot,
     grounding_call_index: ?u32,
     constructor_node: NodeId,
+    shape_node: NodeId,
 };
 
 /// Graph-native snapshot of an already-instantiated checker contract. Deferred
@@ -13030,6 +13049,7 @@ const RetainedCodecContract = struct {
     method_call_slots: []const CodecMethodCallSlot,
     grounding_call_index: ?u32,
     constructor_node: NodeId,
+    shape_node: NodeId,
 
     fn deinit(self: RetainedCodecContract, allocator: Allocator) void {
         allocator.free(self.calls);
@@ -18687,6 +18707,7 @@ const BodyContext = struct {
             .method_call_slots = try self.graph.arena().dupe(CodecMethodCallSlot, active.method_call_slots),
             .grounding_call_index = active.grounding_call_index,
             .constructor_node = active.constructor_node,
+            .shape_node = active.shape_node,
         };
     }
 
@@ -33083,6 +33104,7 @@ const BodyContext = struct {
             .constructor_ty = try self.commitGraphType(
                 try self.activeTypeFromNode(contract.constructor_node),
             ),
+            .shape_ty = try self.commitGraphType(try self.activeTypeFromNode(contract.shape_node)),
         } else null;
         // Iterator-inline completion consumes the callee's solved private
         // representation, so the body must lower now rather than queue.
@@ -45314,6 +45336,7 @@ const BodyContext = struct {
         self: *BodyContext,
         anchor: CheckedCodecContractAnchor,
         constructor_node: NodeId,
+        shape_node: NodeId,
     ) Allocator.Error!void {
         if (@intFromEnum(anchor.derivation) >= anchor.view.static_dispatch_plans.generated_codec_derivations.len) {
             Common.invariant("checked codec call anchor referenced a missing derivation");
@@ -45322,7 +45345,6 @@ const BodyContext = struct {
         if (anchor.call_index >= derivation.calls.len) {
             Common.invariant("checked codec call anchor referenced a missing generated call");
         }
-        const shape_node = try self.codecShapeNodeFromConstructor(anchor.kind, constructor_node);
         var active = try self.instantiateCheckedCodecContract(
             anchor.view,
             anchor.derivation,
@@ -45331,32 +45353,6 @@ const BodyContext = struct {
         );
         active.grounding_call_index = anchor.call_index;
         self.active_codec_contract = active;
-    }
-
-    fn codecShapeNodeFromConstructor(
-        self: *BodyContext,
-        kind: CodecKind,
-        constructor_node: NodeId,
-    ) Allocator.Error!NodeId {
-        const constructor = try self.graph.functionNodes(constructor_node);
-        if (constructor.args.len != 1) {
-            Common.invariant("generated codec boundary constructor did not have one encoding argument");
-        }
-        const runtime = try self.graph.functionNodes(constructor.ret);
-        return switch (kind) {
-            .parser => blk: {
-                if (runtime.args.len != 1) {
-                    Common.invariant("generated parser boundary runtime did not have one state argument");
-                }
-                break :blk (try self.graphParserResultNodes(runtime.ret)).value;
-            },
-            .encoder => blk: {
-                if (runtime.args.len != 2) {
-                    Common.invariant("generated encoder boundary runtime did not have value and state arguments");
-                }
-                break :blk runtime.args[0];
-            },
-        };
     }
 
     /// Select the checker-authored subject role for a container reached while
@@ -45372,7 +45368,7 @@ const BodyContext = struct {
             Common.invariant("generated codec subject selection had no active contract");
         const derivation = active.view.static_dispatch_plans.generated_codec_derivations[@intFromEnum(active.derivation)];
         if (derivation.body_shape_ty == derivation.shape_ty) return shape_node;
-        const boundary_shape_node = try self.codecShapeNodeFromConstructor(active.kind, active.constructor_node);
+        const boundary_shape_node = active.shape_node;
         return if (self.graph.sameClass(boundary_shape_node, shape_node)) structural_node else shape_node;
     }
 
@@ -45562,6 +45558,7 @@ const BodyContext = struct {
             .method_call_slots = try self.codecMethodCallSlots(instantiated_calls),
             .grounding_call_index = null,
             .constructor_node = boundary.callable_node,
+            .shape_node = boundary.shape_node,
         };
     }
 
@@ -45634,6 +45631,7 @@ const BodyContext = struct {
                     .kind = active.kind,
                 },
                 .constructor_node = active.constructor_node,
+                .shape_node = active.shape_node,
             };
         }
         Common.invariant("active generated codec contract lost its grounding call");
@@ -45652,7 +45650,7 @@ const BodyContext = struct {
         {
             Common.invariant("generated codec call anchor disagreed with its active contract");
         }
-        return .{ .anchor = anchor, .constructor_node = active.constructor_node };
+        return .{ .anchor = anchor, .constructor_node = active.constructor_node, .shape_node = active.shape_node };
     }
 
     fn retainActiveCodecContract(self: *BodyContext) Allocator.Error!RetainedCodecContract {
@@ -45670,6 +45668,7 @@ const BodyContext = struct {
             .method_call_slots = method_call_slots,
             .grounding_call_index = active.grounding_call_index,
             .constructor_node = active.constructor_node,
+            .shape_node = active.shape_node,
         };
     }
 
@@ -45691,6 +45690,7 @@ const BodyContext = struct {
             .method_call_slots = try self.graph.arena().dupe(CodecMethodCallSlot, retained.method_call_slots),
             .grounding_call_index = retained.grounding_call_index,
             .constructor_node = retained.constructor_node,
+            .shape_node = retained.shape_node,
         };
     }
 

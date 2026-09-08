@@ -3526,6 +3526,10 @@ finite proof graphs. Source contracts remain intact for replay; specialization
 equality uses the shared identity rather than the per-use derivation index.
 
 Monotype instantiates a generated-codec contract once at the codec boundary.
+Queued specialization contexts retain both the constructor and the explicit
+public value shape. Both participate in specialization identity. A constructor
+may use the structural generated-body representation, so restoring the contract
+consumes the retained public shape to preserve its nominal boundary.
 While the specialization graph is mutable, codec preparation relates the
 contract's source and frozen constructor roles to that boundary, instantiates
 both its public value shape and its explicitly checker-authored generated-body

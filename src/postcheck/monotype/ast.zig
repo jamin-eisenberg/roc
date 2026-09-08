@@ -156,6 +156,8 @@ pub const CodecContractIdentity = struct {
     kind: CodecContractKind,
     constructor_ty_digest: names.TypeDigest,
     constructor_ty: Type.TypeId,
+    shape_ty_digest: names.TypeDigest,
+    shape_ty: Type.TypeId,
 };
 
 /// Function template plus source and monomorphic type identities.
@@ -1314,7 +1316,7 @@ pub const ProgramView = struct {
         for (self.specs) |spec| {
             if (!self.typeRefInBounds(spec.identity.request_fn_ty)) return .spec_type_out_of_bounds;
             if (spec.identity.codec_contract) |contract| {
-                if (!self.typeRefInBounds(contract.constructor_ty)) return .spec_type_out_of_bounds;
+                if (!self.typeRefInBounds(contract.constructor_ty) or !self.typeRefInBounds(contract.shape_ty)) return .spec_type_out_of_bounds;
             }
             if (!self.typeRefInBounds(spec.request_fn_ty)) return .spec_type_out_of_bounds;
             if (!self.typeRefInBounds(spec.solved_fn_ty)) return .spec_type_out_of_bounds;
