@@ -299,7 +299,7 @@ test "non-iterator methods sharing iterator producer names remain hoistable" {
 
 test "hoist roots are not selected for static dispatch requiring where evidence" {
     var test_env = try TestEnv.init("Test",
-        \\f : a -> _ where [a.f : {}]
+        \\f : a -> _ where [a.f : () -> {}]
         \\f = |_| {
         \\    A : a
         \\    A.f

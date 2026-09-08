@@ -7,6 +7,7 @@ const collections = @import("collections");
 const layout = @import("layout");
 
 const lir_defs = @import("LIR.zig");
+const TailCallBuilder = @import("tail_call_builder.zig");
 
 const Allocator = std.mem.Allocator;
 pub const GuardedList = collections.GuardedList;
@@ -98,6 +99,10 @@ pub const BodyRelocation = struct {
 
     pub fn local(self: BodyRelocation, prefix: BodyPrefix, id: LocalId) LocalId {
         return relocateBodyValue(LocalId, id, prefix, self);
+    }
+
+    pub fn stmt(self: BodyRelocation, prefix: BodyPrefix, id: CFStmtId) CFStmtId {
+        return relocateBodyValue(CFStmtId, id, prefix, self);
     }
 
     pub fn localSpan(self: BodyRelocation, prefix: BodyPrefix, span: LocalSpan) LocalSpan {
@@ -442,6 +447,9 @@ current_loc: base.SourceLoc,
 current_region: base.Region,
 /// Ambient virtual source frame recorded by `addCFStmt`.
 current_inline_scope: InlineScopeId,
+/// Active procedure-construction scope. Never persisted in LIR images or
+/// transferred into another body worker; completed proofs live in LIR itself.
+tail_call_builder: ?*TailCallBuilder = null,
 
 /// Initializes empty storage for statement-only LIR.
 pub fn init(allocator: Allocator) Self {
@@ -1055,7 +1063,15 @@ pub fn addCFStmt(self: *Self, stmt: CFStmt) Allocator.Error!CFStmtId {
     try self.cf_stmt_locs.append(self.allocator, loc);
     try self.cf_stmt_regions.append(self.allocator, region);
     try self.cf_stmt_inline_scopes.append(self.allocator, inline_scope);
-    return @enumFromInt(@as(u32, @intCast(idx)));
+    const id: CFStmtId = @enumFromInt(@as(u32, @intCast(idx)));
+    if (self.tail_call_builder) |builder| try builder.record(id, stmt);
+    return id;
+}
+
+/// Fill a producer-owned placeholder and record its final control-flow facts.
+pub fn replaceCFStmt(self: *Self, id: CFStmtId, stmt: CFStmt) Allocator.Error!void {
+    self.getCFStmtPtr(id).* = stmt;
+    if (self.tail_call_builder) |builder| try builder.record(id, stmt);
 }
 
 /// Number of stored control-flow statements.
@@ -1704,4 +1720,52 @@ test "source file table stores display and package-qualified names per entry" {
     try std.testing.expectEqualStrings("app.Cfg", store.sourceFileQualifiedName(0));
     try std.testing.expectEqualStrings("pf.Cfg", store.sourceFileQualifiedName(1));
     try std.testing.expectEqualStrings("app.Utils", store.sourceFileQualifiedName(2));
+}
+
+test "body shard relocates producer tail-call links" {
+    const allocator = std.testing.allocator;
+    var coordinator = Self.init(allocator);
+    defer coordinator.deinit();
+    const arg = try coordinator.addLocal(.{ .layout_idx = .u64 });
+    const proc = try coordinator.addProcSpec(.{
+        .name = coordinator.freshSyntheticSymbol(),
+        .args = try coordinator.addLocalSpan(&.{arg}),
+        .ret_layout = .u64,
+    });
+    var worker = try coordinator.cloneForBodyShard(allocator);
+    defer worker.deinit();
+    const prefix = worker.captureBodyPrefix();
+    var builder = TailCallBuilder.init(allocator, proc);
+    defer builder.deinit();
+    worker.tail_call_builder = &builder;
+    const result = try worker.addLocal(.{ .layout_idx = .u64 });
+    const ret = try worker.addCFStmt(.{ .ret = .{ .value = result } });
+    const first = try worker.addCFStmt(.{ .assign_call = .{
+        .proc = proc,
+        .args = try worker.addLocalSpan(&.{arg}),
+        .target = result,
+        .next = ret,
+    } });
+    const second = try worker.addCFStmt(.{ .assign_call = .{
+        .proc = proc,
+        .args = try worker.addLocalSpan(&.{arg}),
+        .target = result,
+        .next = ret,
+    } });
+    const body = try worker.addCFStmt(.{ .switch_stmt = .{
+        .cond = arg,
+        .branches = try worker.addCFSwitchBranches(&.{.{ .value = 0, .body = first }}),
+        .default_branch = second,
+    } });
+    const frame = try worker.addLocalSpan(&.{ arg, result });
+    const sites = (try builder.finish(&worker)).?;
+    worker.tail_call_builder = null;
+    _ = try coordinator.addCFStmt(.{ .ret = .{ .value = arg } });
+    const appended = try coordinator.appendBodyShard(try worker.captureBodyShard(prefix), body, frame);
+    const head = appended.relocation.stmt(prefix, sites.head);
+    try std.testing.expectEqual(appended.relocation.stmt(prefix, second), head);
+    const link = coordinator.getCFStmt(head).assign_call.tail_call.?.next.?;
+    try std.testing.expectEqual(appended.relocation.stmt(prefix, first), link);
+    try std.testing.expect(coordinator.getCFStmt(link).assign_call.tail_call.?.next == null);
+    try std.testing.expect(coordinator.tail_call_builder == null);
 }

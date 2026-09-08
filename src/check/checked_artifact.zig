@@ -33748,7 +33748,6 @@ fn scanLoweringVisibleNames(module_env: *const ModuleEnv, visitor: anytype) Allo
                 try visitor.recordField(field.name);
             },
             .where_method,
-            .where_method_effectful,
             .where_alias,
             => {
                 const where_clause = store.getWhereClause(@enumFromInt(raw_node_idx));

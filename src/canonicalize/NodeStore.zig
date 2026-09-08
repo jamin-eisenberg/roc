@@ -132,7 +132,7 @@ const ExprNodeTag = enum {
     malformed,
 };
 
-const WhereNodeTag = enum { where_method, where_method_effectful, where_alias, where_malformed };
+const WhereNodeTag = enum { where_method, where_alias, where_malformed };
 
 const PatternNodeTag = enum {
     pattern_identifier,
@@ -2301,20 +2301,12 @@ pub fn getWhereClause(store: *const NodeStore, whereClause: CIR.WhereClause.Idx)
     const tag = narrowNodeTag(WhereNodeTag, node.tag) orelse
         std.debug.panic("unreachable, node is not a where tag: {}", .{node.tag});
     switch (tag) {
-        .where_method, .where_method_effectful => {
+        .where_method => {
             const p = payload.where_clause;
-            const var_ = @as(CIR.TypeAnno.Idx, @enumFromInt(p.var_idx));
-            const method_name = @as(Ident.Idx, @bitCast(p.name));
-
-            // Retrieve args span and ret from span_with_node_data
-            const args_ret = store.span_with_node_data.items.items[p.args_ret_idx];
-
             return CIR.WhereClause{ .w_method = .{
-                .var_ = var_,
-                .method_name = method_name,
-                .args = .{ .span = .{ .start = args_ret.start, .len = args_ret.len } },
-                .ret = @enumFromInt(args_ret.node),
-                .effectful = node.tag == .where_method_effectful,
+                .var_ = @enumFromInt(p.var_idx),
+                .method_name = @bitCast(p.name),
+                .anno = @enumFromInt(p.anno),
             } };
         },
         .where_alias => {
@@ -3624,18 +3616,11 @@ pub fn addWhereClause(store: *NodeStore, whereClause: CIR.WhereClause, region: b
 
     switch (whereClause) {
         .w_method => |where_method| {
-            node.tag = if (where_method.effectful) .where_method_effectful else .where_method;
-            const args_ret_idx: u32 = @intCast(store.span_with_node_data.len());
-            _ = try store.span_with_node_data.append(store.gpa, .{
-                .start = where_method.args.span.start,
-                .len = where_method.args.span.len,
-                .node = @intFromEnum(where_method.ret),
-            });
+            node.tag = .where_method;
             node.setPayload(.{ .where_clause = .{
                 .var_idx = @intFromEnum(where_method.var_),
                 .name = @bitCast(where_method.method_name),
-                .args_ret_idx = args_ret_idx,
-                .effectful = @intFromBool(where_method.effectful),
+                .anno = @intFromEnum(where_method.anno),
             } });
         },
         .w_alias => |where_alias| {
@@ -4181,8 +4166,7 @@ fn annotationContainsUnderscore(store: *const NodeStore, anno_idx: CIR.TypeAnno.
             switch (store.getWhereClause(where_idx)) {
                 .w_method => |method| {
                     if (store.typeAnnoContainsUnderscore(method.var_)) return true;
-                    if (store.anyTypeAnnoContainsUnderscore(method.args)) return true;
-                    if (store.typeAnnoContainsUnderscore(method.ret)) return true;
+                    if (store.typeAnnoContainsUnderscore(method.anno)) return true;
                 },
                 .w_alias, .w_malformed => {},
             }
@@ -4676,10 +4660,7 @@ pub fn whereClauseSpanFrom(store: *NodeStore, start: u32, root_annos: []const CI
         switch (store.getWhereClause(where_idx)) {
             .w_method => |method| {
                 try store.collectIntroducedRigidVars(method.var_, &locally_declared);
-                for (store.sliceTypeAnnos(method.args)) |arg| {
-                    try store.collectIntroducedRigidVars(arg, &locally_declared);
-                }
-                try store.collectIntroducedRigidVars(method.ret, &locally_declared);
+                try store.collectIntroducedRigidVars(method.anno, &locally_declared);
             },
             .w_alias => |alias| {
                 try store.collectIntroducedRigidVars(alias.var_, &locally_declared);
@@ -4715,10 +4696,7 @@ pub fn whereClauseSpanFrom(store: *NodeStore, start: u32, root_annos: []const CI
         for (grouped.get(owner).?.items) |where_idx| {
             switch (store.getWhereClause(where_idx)) {
                 .w_method => |method| {
-                    for (store.sliceTypeAnnos(method.args)) |arg| {
-                        try store.collectReferencedRigidVars(arg, &dependencies);
-                    }
-                    try store.collectReferencedRigidVars(method.ret, &dependencies);
+                    try store.collectReferencedRigidVars(method.anno, &dependencies);
                 },
                 // A where alias reaches the type variables its arguments name.
                 .w_alias => |alias| try store.collectReferencedRigidVars(alias.alias, &dependencies),

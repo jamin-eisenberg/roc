@@ -1716,6 +1716,24 @@ alias arguments, but references to the annotated value consume the annotation
 root. This is how alias spelling from annotations is preserved without making
 alias roots union-find representatives for concrete structures.
 
+### Where Method Annotations
+
+A where method's type is the complete annotation written after its colon.
+Parsing retains that annotation node, and canonicalization produces one type
+annotation root for checking, ownership, documentation, and serialization.
+`a.method : _` leaves the whole method type to inference; `a.method : () -> _`
+requires a nullary pure function. Parentheses and transparent type aliases keep
+their ordinary annotation meaning. A nullary function signature always includes
+its arrow; a bare result type is not shorthand for a nullary function.
+
+The annotation root's type variable is also the static-dispatch constraint's
+callable variable. Checking declares that identity before completing owned
+constraints, then generates its type through ordinary annotation generation and
+unification. It allocates no second callable placeholder or bridging relation.
+Inference holes retain the existing body-checking and generalization rules, and
+the named method's static-dispatch constraint is preserved even when its type
+is incomplete.
+
 ## Nominal Constructor Backing Relation
 
 An explicit nominal constructor chooses the nominal wrapper itself. Its operand
@@ -1757,6 +1775,17 @@ class belongs to an ordinary value that keeps flowing—in the rewrap case
 erroneous types on nodes Monotype must instantiate. So the relation reports its
 own diagnostic instead of poisoning either operand, and only the constructor's
 own var becomes erroneous.
+
+Pattern checking carries a rejected nominal constructor result through its
+recursive children to the owning checked expression. A lambda with an invalid parameter
+is recorded as an erroneous function-value expression; a match records the
+failure on the match; a binding records it on the initializer. Iterator loops
+retire their own execution and output rejected iterator dispatch plans. The
+independently checked scrutinee or iterable keeps its solved type. These owners
+use the existing checked runtime-error output path, so no malformed
+parameter reaches post-check instantiation and independent definitions remain
+available. This is propagation of the backing relation's explicit result, not a
+later scan of solved pattern types or a change to nominal typing rules.
 
 ### Settled-State Re-Decision
 
@@ -1806,6 +1835,15 @@ allocation failure, unsupported compiler hosts, corrupt serialized CheckedModule
 inputs, and compiler invariant violations are operational aborts, not user-error
 module outcomes. They must propagate as operation errors rather than being
 converted into a user diagnostic or a module `Failure` value.
+
+Workers carry source-read and type-check operational errors through the existing
+result channel as explicit stage/error data. The coordinator preserves the
+failing module's observed file state and records the failure for reporting, then
+returns the error before finalizing compilation. Reports do not substitute for
+the operation error. Aborting stops workers and releases unconsumed task and
+result payloads before their borrowed module environments are destroyed. AST
+ownership passes when canonicalization is queued; the coordinator must not
+retain an owning AST pointer while a worker consumes it.
 
 ## Cache Boundary
 
@@ -3946,6 +3984,53 @@ not bypass Lambda Solved. All modes therefore consume the same Monotype type
 identities, the same Lambda Solved callable information, and the same direct
 Solved-to-LIR representation decisions.
 
+### Self-Tail Return Continuations
+
+LIR construction owns ordinary self-tail-call proofs. Each procedure builder
+records exact self-call sites and join definitions as statements are emitted,
+including producer-owned placeholder replacements. After producer fixups,
+finalization resolves only the recorded calls' return continuations. Shared
+suffixes are memoized by statement identity; forwarding cycles do not prove a
+return. The query has no candidate or path-length limit and never walks unrelated
+control flow. Both Solved and Boxy lowering use this same construction contract.
+
+A proven continuation returns the call's value unchanged through explicit
+returns, jumps, lexical joins, identity references, join-parameter forwarding
+writes, and Boxy moves whose explicit adapter operation is `relabel`. It contains
+no intervening effect, failure, constructor, or materializing representation
+adaptation. Calls with an additional runtime descriptor output need a proof for
+that output too; value-only forwarding does not authorize their elimination.
+Return-destination reuse metadata is not a tail-position proof.
+
+The producer records a linked list of proven sites in the call nodes and a
+fresh loop join identity in the procedure. Body shards relocate these statement
+references with the rest of the body. Ordinary TCE consumes the list directly:
+it replaces each call node with simultaneous argument transfer followed by a
+loop jump. It never splices a predecessor, overwrites a shared return terminal,
+duplicates a continuation, or consults TRMC's constructor candidate limits.
+All actual arguments, including hidden captures and dictionaries, participate
+in the transfer. The transfer scheduler indexes destinations once per procedure
+and reuses its arrays across sites and procedures; the destination map remains
+local to each procedure so unrelated local IDs do not widen its storage. It emits
+writes only after their destinations have no remaining readers, then breaks each
+remaining cycle with one temporary. Identity writes are omitted. The first write
+or jump occupies the original call row, preserving its source metadata without
+allocating an unused head statement. ARC runs afterward and owns every resulting
+RC operation.
+
+Frame inventories are already complete, unique, and sorted. TCE preserves the
+original span when it creates no locals. Otherwise, monotonically allocated
+fresh locals append after the original inventory without sorting or deduplication.
+The producer's stack-probe requirement is preserved; only added locals need to be
+checked for an additional requirement.
+
+Constructor rewriting retains its separate value-use and shared-path proof.
+Mixed procedures use one loop for both kinds of recursive site; ordinary tails
+preserve the current hole, and constructor sites advance it. Return epilogues
+remain present for every surviving return, including returns shared with paths
+that do not recurse. Later producers that expose new self-tail sites must
+record the same continuation proof rather than relying on downstream discovery.
+
 The explicit `InlineMode` controls the optional specialization work:
 
 - `.none` skips Monotype Lifted SpecConstr and produces an empty solved inline
@@ -3990,7 +4075,13 @@ analyzer records the complete decision before LIR generation; direct
 Solved-to-LIR lowering only substitutes arguments and dumbly lowers a selected
 body at its unique call site. The existing wrapper eligibility remains available
 for proven small call-through and low-level wrappers even when they have multiple
-direct uses.
+direct uses. Checked call-through wrappers also qualify when a single-condition
+`if` has a literal-crash arm and a continuing wrapper arm. The guard and both
+arms must read only arguments or constants; there are no captures or local
+statements other than the terminal literal crash. Argument substitution preserves
+evaluation and the guard, while exposing constant arguments to the existing
+LIR range pass. Conditionals with two continuing arms do not qualify under this
+wrapper rule, including conditionals nested in call arguments.
 
 Each post-lift capture operand explicitly names the callee capture slot it
 supplies. Capture finalization preserves that key while rewriting the operand
@@ -6391,7 +6482,9 @@ Other solved-graph mutations:
   (above). An operand already owns a reported error, so its call-like parent is
   inserted into both expression sets before any dispatch constraint is
   introduced; a required iterator plan is sealed with rejected callable metadata
-  instead.
+  instead. `checkIteratorForLoop` also consumes an explicit rejected pattern
+  result to retire the loop and reject its iterator plans without poisoning
+  the independently checked iterable.
 - `checkMatchExpr`'s branch-pattern target—mechanism: diagnostic recovery after
   an already-reported error. An erroneous scrutinee cannot relate the branch
   patterns to each other, so they unify against a shared fresh variable instead
@@ -10612,6 +10705,17 @@ resource per rc node reachable in its committed layout or dynamic descriptor:
 - the captures resource of a `closure` / `erased_callable`
 - the top-level and payload resources described by a boxy `TypeDesc`
 
+ARC classifies each local from its committed layout once into a dense
+representation table. Descriptor presence does not imply refcounted storage:
+concrete field-presence slots can carry descriptors while containing only scalar
+payloads. Constructors and aliases preserve the RC shape already recorded in
+layouts; classification does not propagate resource bits through statements.
+The solver retains the representation table as its borrow-anchor domain, while
+emission shares it until the first capture-view exclusion requires a private
+copy. The certifier uses
+the same classification rule on the final LIR store and independently checks
+ownership; it does not reuse the pre-emission table or inferred balances.
+
 An `erased_capture_load` target whose aggregate contains an `erased_box` is
 explicitly a borrowed view into the executing callable's capture allocation.
 The committed aggregate layout identifies the dynamic fields it may project,
@@ -11412,6 +11516,15 @@ payload contains all refcounted data of the active variant, or an individual
 tag-payload field is that payload struct's sole refcounted field. The tag read's
 variant and discriminant metadata is the explicit proof of the active shape;
 no layout shape is treated as evidence that a variant is active.
+
+Certification tracks field claims over the full committed layout field-index
+domain. Scalar and padding fields require no RC claims, regardless
+of their indices. The required claim set is derived once per queried layout from
+its committed RC fields. Path states keep the first word inline and share sparse
+persistent words for higher indices; forks and outcome-restitution receipts retain
+exact prior sets. Join comparison and memo hashing use field-set contents rather
+than snapshot addresses. A container's unit is spent only when its claims equal
+the complete required set, with every field claim validated against that set.
 
 Ownership-complete aggregate reads and borrowed pure aliases form explicit
 ownership places. The place graph is solved to a fixpoint, so a nested read
@@ -13079,6 +13192,25 @@ interpreter-internal structure (the dev-build translation shim and
 compiler-internal evaluation construct one); it is not part of any host ABI,
 and glue never emits it.
 
+Generated Zig and Rust bindings provide a `RocHost` helper for host-owned
+allocation state. Its fields are exactly the `env` and callback prefix of
+`RocOps`, with callback self pointers referring to `RocHost`. It has no
+`hosted_fns` member: hosted calls use the platform's declared linker symbols.
+This helper is not passed across compiled Roc entrypoints. The glue ABI lock
+compares its complete prefix size, alignment, field offsets, and callback
+signatures with the interpreter types defined by builtins. C bindings call the runtime
+symbols directly. C and Rust declarations generated from builtins are compiled
+alongside generated bindings to lock their runtime value layouts and callback
+signatures; template-local numeric assertions alone do not establish agreement
+with builtins.
+
+The glue script input and output are written using checked runtime record
+schemas and committed LIR layouts. No handwritten Zig extern record mirrors
+stand between `src/glue/platform/*.roc` and the glue runner. Named fields select
+schema logical indices; the layout store supplies their byte offsets and
+layouts. A checked-source schema regression test locks the remaining marshaller
+field names and leaf types.
+
 The platform header maps linker symbols explicitly, symbol-string first, in
 both directions:
 
@@ -13135,6 +13267,22 @@ then compares the resulting defined and undefined global symbol sets with the
 checked platform contract. An unexpected definition, an unresolved builtin or
 compiler-rt call, or an undeclared host requirement is a compiler error; it is
 never passed through to the platform linker as a best-effort import.
+
+The prebuilt machine-code run shim has the same explicit dependency boundary,
+verified when building Roc itself. Before an archive can be installed or
+embedded, the archive verifier checks every ELF, Mach-O, or COFF global symbol
+against the shim's declared exports, host runtime/table imports, and target
+C/OS ABI dependencies. Weak and hidden globals are checked too. COFF preparation
+localizes compiler-owned definitions, removes their COMDAT participation, and
+rebuilds the archive index from the public roots before verification; symbol
+indices and relocations remain intact. Unknown helpers, extra exports, missing entrypoints, and malformed
+or uninspectable archives fail the build. This check is unconditional across
+optimization modes and runs only in Roc's build graph: neither the released
+compiler nor user executables contain or execute the verifier. The focused
+archive test cross-builds all shipped native architectures and object formats.
+Compiler-private cache synchronization and stack probing are local to the
+shim; exported builtins payloads and the interpreter's assembly trampoline
+are not machine-code run-shim inputs.
 
 Every object-format address embedded in compiler-owned code or data remains a
 relocation through this boundary. In particular, Wasm function pointers are
@@ -14066,6 +14214,16 @@ host ABI classification.
 
 LLVM emits generic vector IR for ordinary operations and target intrinsics for
 operations whose pinned edge behavior or instruction selection requires them.
+LLVM bitmask lowering compares the lane bits as signed integers against zero,
+then bitcasts the predicate vector to the packed lane-count integer and
+zero-extends to the result layout. This preserves each lane's most significant
+bit for arbitrary inputs and lets vector instruction selection consume the
+complete operation.
+The existing LIR range pass records an exact in-range `concat_shift_bytes`
+count in `assign_low_level.simd_concat_count`. Cloning and ARC preserve that
+count. LLVM consumes it as a two-input byte shuffle; an unannotated operation
+retains the exact dynamic-count shifts, including the zero and sixteen cases.
+Recording a count does not change dataflow or request an extra proof round.
 The generic `dot_pairs_saturated` lowering widens unsigned and signed bytes to
 32-bit lanes, multiplies and pairwise-adds at that width, clamps to signed
 16-bit bounds, and narrows only after saturation; no intermediate 16-bit sum
