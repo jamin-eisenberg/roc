@@ -1776,6 +1776,17 @@ erroneous types on nodes Monotype must instantiate. So the relation reports its
 own diagnostic instead of poisoning either operand, and only the constructor's
 own var becomes erroneous.
 
+Pattern checking carries a rejected nominal constructor result through its
+recursive children to the owning checked expression. A lambda with an invalid parameter
+is recorded as an erroneous function-value expression; a match records the
+failure on the match; a binding records it on the initializer. Iterator loops
+retire their own execution and output rejected iterator dispatch plans. The
+independently checked scrutinee or iterable keeps its solved type. These owners
+use the existing checked runtime-error output path, so no malformed
+parameter reaches post-check instantiation and independent definitions remain
+available. This is propagation of the backing relation's explicit result, not a
+later scan of solved pattern types or a change to nominal typing rules.
+
 ### Settled-State Re-Decision
 
 Whether the operand has already lifted to a nominal is decided from its solved
@@ -6454,7 +6465,9 @@ Other solved-graph mutations:
   (above). An operand already owns a reported error, so its call-like parent is
   inserted into both expression sets before any dispatch constraint is
   introduced; a required iterator plan is sealed with rejected callable metadata
-  instead.
+  instead. `checkIteratorForLoop` also consumes an explicit rejected pattern
+  result to retire the loop and reject its iterator plans without poisoning
+  the independently checked iterable.
 - `checkMatchExpr`'s branch-pattern target—mechanism: diagnostic recovery after
   an already-reported error. An erroneous scrutinee cannot relate the branch
   patterns to each other, so they unify against a shared fresh variable instead
